@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from typing import Any, Dict, List
+
+from app.config import settings
+from app.services.indicator_service import compute_ema, compute_macd, compute_rsi
+
+try:
+    from kiteconnect import KiteConnect
+except Exception:  # KiteConnect may not be installed in test env
+    KiteConnect = None  # type: ignore
+
+
+class KiteFeed:
+    """A thin feed adapter that provides a scanner-friendly snapshot using Kite Connect.
+
+    This adapter is intentionally conservative: it attempts to fetch LTP and
+    historical candles when possible and falls back to safe defaults so the
+    application remains functional in development environments.
+    """
+
+    SYMBOL_ALIASES = {
+        "NIFTY": "NIFTY 50",
+        "BANKNIFTY": "NIFTY BANK",
+        "FINNIFTY": "NIFTY FIN SERVICE",
+    }
+
+    def __init__(self) -> None:
+        self._instrument_cache: Dict[str, List[Dict[str, Any]]] = {}
+        if KiteConnect is None:
+            self.client = None
+        else:
+            self.client = KiteConnect(api_key=settings.kite_api_key)
+            if settings.kite_access_token:
+                try:
+                    # Some kite client versions provide set_access_token, others expect direct header.
+                    self.client.set_access_token(settings.kite_access_token)  # type: ignore
+                except Exception:
+                    # ignore if unavailable
+                    pass
+
+    def _safe_int(self, value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    def get_snapshot(self, symbol: str) -> Dict[str, Any]:
+        # Default fallback snapshot
+        snapshot = {
+            "symbol": symbol,
+            "price": 0.0,
+            "rsi": 50,
+            "adx": 15,
+            "macd_positive": False,
+            "ema_alignment": False,
+            "vwap_above_price": False,
+            "volume_confirmed": False,
+            "trend_bullish": False,
+            "market_context": "neutral",
+        }
+
+        if self.client is None:
+            return snapshot
+
+        # Attempt to fetch LTP via quote() — this expects instrument token or "exchange:tradingsymbol"
+        try:
+            # try common NSE format
+            kite_symbol = self._kite_symbol(symbol)
+            instrument = f"NSE:{kite_symbol}" if ":" not in kite_symbol else kite_symbol
+            q = self.client.quote([instrument])  # type: ignore
+            # q structure may vary; try to extract last_price
+            last_price = None
+            for key in (instrument, "last_price"):
+                if isinstance(q, dict) and key in q and isinstance(q[key], dict) and "last_price" in q[key]:
+                    last_price = q[key]["last_price"]
+                    break
+            if last_price is None and isinstance(q, dict) and "last_price" in q:
+                last_price = q["last_price"]
+            if last_price is not None:
+                snapshot["price"] = float(last_price)
+        except Exception:
+            # ignore network / key errors
+            pass
+
+        # Try to get a few historical candles to derive simple indicators
+        try:
+            token = self._find_instrument_token(symbol)
+            if token is None:
+                return snapshot
+            now = datetime.utcnow()
+            to_dt = now
+            from_dt = now - timedelta(days=7)
+            hist = self.client.historical_data(token, from_dt, to_dt, "15minute")  # type: ignore
+            if hist and isinstance(hist, list):
+                closes = [float(c["close"]) for c in hist if "close" in c]
+                highs = [float(c["high"]) for c in hist if "high" in c]
+                lows = [float(c["low"]) for c in hist if "low" in c]
+                volumes = [float(c.get("volume", 0.0)) for c in hist]
+                if len(closes) >= 26:
+                    snapshot["price"] = closes[-1]
+                    rsi = compute_rsi(closes)[-1]
+                    ema_9 = compute_ema(closes, 9)[-1]
+                    ema_21 = compute_ema(closes, 21)[-1]
+                    macd, signal = compute_macd(closes)
+                    typical_price_volume = [
+                        ((highs[idx] + lows[idx] + closes[idx]) / 3) * volumes[idx]
+                        for idx in range(min(len(highs), len(lows), len(closes), len(volumes)))
+                    ]
+                    volume_sum = sum(volumes[-20:]) or 1.0
+                    vwap = sum(typical_price_volume[-20:]) / volume_sum
+                    avg_volume = sum(volumes[-21:-1]) / max(len(volumes[-21:-1]), 1)
+                    snapshot["rsi"] = int(rsi)
+                    snapshot["macd_positive"] = bool(macd and signal and macd[-1] > signal[-1])
+                    snapshot["ema_alignment"] = ema_9 > ema_21
+                    snapshot["vwap_above_price"] = closes[-1] > vwap
+                    snapshot["volume_confirmed"] = volumes[-1] > avg_volume * 1.15 if avg_volume else False
+                    snapshot["adx"] = self._simple_trend_strength(closes)
+                    snapshot["trend_bullish"] = closes[-1] > closes[0]
+                    snapshot["market_context"] = "strong" if snapshot["adx"] >= 20 and snapshot["volume_confirmed"] else "neutral"
+        except Exception:
+            pass
+
+        return snapshot
+
+    def get_instruments(self, exchange: str) -> List[Dict[str, Any]]:
+        if self.client is None:
+            return []
+        if exchange not in self._instrument_cache:
+            try:
+                self._instrument_cache[exchange] = self.client.instruments(exchange)  # type: ignore
+            except Exception:
+                self._instrument_cache[exchange] = []
+        return self._instrument_cache[exchange]
+
+    def get_quotes(self, instruments: List[str]) -> Dict[str, Any]:
+        if self.client is None or not instruments:
+            return {}
+        try:
+            return self.client.quote(instruments)  # type: ignore
+        except Exception:
+            return {}
+
+    def _find_instrument_token(self, symbol: str) -> int | None:
+        exchange_symbol = self._kite_symbol(symbol).split(":", 1)[-1].upper()
+        for item in self.get_instruments(settings.default_exchange):
+            if str(item.get("tradingsymbol", "")).upper() == exchange_symbol:
+                return self._safe_int(item.get("instrument_token"), None)  # type: ignore
+        return None
+
+    def _kite_symbol(self, symbol: str) -> str:
+        raw_symbol = symbol.split(":", 1)[-1].upper()
+        return self.SYMBOL_ALIASES.get(raw_symbol, raw_symbol)
+
+    def _simple_trend_strength(self, closes: List[float]) -> int:
+        if len(closes) < 20:
+            return 15
+        net_move = abs(closes[-1] - closes[-20])
+        average_close = sum(closes[-20:]) / 20
+        strength = (net_move / average_close) * 1000 if average_close else 0
+        return min(50, max(10, int(strength)))
