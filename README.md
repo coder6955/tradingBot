@@ -7,7 +7,9 @@ This project is an AI-assisted options trading scanner for the Indian stock mark
 - Use Kite Connect for NSE/NFO instruments, quotes, candles, profile, margins, positions, and orders.
 - Fall back to deterministic mock data when Kite credentials are not configured.
 - Check technical score, option liquidity, premium risk, stop loss, targets, quantity, and risk/reward before a trade.
+- Check market regime, India VIX, price action, CPR/pivots, previous-day levels, option-chain PCR, OI support/resistance, max-pain approximation, bid/ask spread, volume, OI, timing, and configured event blocks before a trade.
 - Route orders to paper trading by default. Live Kite orders require `LIVE_TRADING_MODE=true`, `PAPER_TRADING_MODE=false`, and `confirm_live=true`.
+- `/scanner/opportunities` returns only real executable option contracts when Kite market data is enabled. It does not return placeholder strikes or fallback prices.
 
 ## Setup
 
@@ -29,6 +31,16 @@ ACCOUNT_EQUITY=100000
 MAX_RISK_PER_TRADE_PCT=1.0
 MIN_SIGNAL_SCORE=80
 MIN_OPTION_LIQUIDITY_SCORE=70
+MIN_MARKET_REGIME_SCORE=55
+MIN_PRICE_ACTION_SCORE=55
+MIN_OPTION_CHAIN_SCORE=55
+MIN_RISK_REWARD=1.2
+MAX_BID_ASK_SPREAD_PCT=5.0
+MIN_OPTION_VOLUME=500
+MIN_OPTION_OI=5000
+ENFORCE_MARKET_HOURS=false
+BLOCKED_EVENT_DATES=
+BLOCKED_SYMBOLS=
 ```
 
 ## Kite setup

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 from app.config import settings
+from app.providers.token_store import load_access_token
 from app.services.indicator_service import compute_ema, compute_macd, compute_rsi
 
 try:
@@ -24,6 +25,8 @@ class KiteFeed:
         "NIFTY": "NIFTY 50",
         "BANKNIFTY": "NIFTY BANK",
         "FINNIFTY": "NIFTY FIN SERVICE",
+        "INDIAVIX": "INDIA VIX",
+        "VIX": "INDIA VIX",
     }
 
     def __init__(self) -> None:
@@ -32,10 +35,11 @@ class KiteFeed:
             self.client = None
         else:
             self.client = KiteConnect(api_key=settings.kite_api_key)
-            if settings.kite_access_token:
+            access_token = settings.kite_access_token or load_access_token()
+            if access_token:
                 try:
                     # Some kite client versions provide set_access_token, others expect direct header.
-                    self.client.set_access_token(settings.kite_access_token)  # type: ignore
+                    self.client.set_access_token(access_token)  # type: ignore
                 except Exception:
                     # ignore if unavailable
                     pass
@@ -50,6 +54,8 @@ class KiteFeed:
         # Default fallback snapshot
         snapshot = {
             "symbol": symbol,
+            "source": "kite",
+            "is_real_data": False,
             "price": 0.0,
             "rsi": 50,
             "adx": 15,
@@ -59,6 +65,19 @@ class KiteFeed:
             "volume_confirmed": False,
             "trend_bullish": False,
             "market_context": "neutral",
+            "instrument_token": None,
+            "candles": [],
+            "vwap": 0.0,
+            "ema_9": 0.0,
+            "ema_21": 0.0,
+            "macd": 0.0,
+            "macd_signal": 0.0,
+            "previous_day_high": 0.0,
+            "previous_day_low": 0.0,
+            "previous_day_close": 0.0,
+            "day_open": 0.0,
+            "day_high": 0.0,
+            "day_low": 0.0,
         }
 
         if self.client is None:
@@ -80,6 +99,7 @@ class KiteFeed:
                 last_price = q["last_price"]
             if last_price is not None:
                 snapshot["price"] = float(last_price)
+                snapshot["is_real_data"] = snapshot["price"] > 0
         except Exception:
             # ignore network / key errors
             pass
@@ -89,17 +109,30 @@ class KiteFeed:
             token = self._find_instrument_token(symbol)
             if token is None:
                 return snapshot
+            snapshot["instrument_token"] = token
             now = datetime.utcnow()
             to_dt = now
-            from_dt = now - timedelta(days=7)
+            from_dt = now - timedelta(days=14)
             hist = self.client.historical_data(token, from_dt, to_dt, "15minute")  # type: ignore
             if hist and isinstance(hist, list):
                 closes = [float(c["close"]) for c in hist if "close" in c]
                 highs = [float(c["high"]) for c in hist if "high" in c]
                 lows = [float(c["low"]) for c in hist if "low" in c]
                 volumes = [float(c.get("volume", 0.0)) for c in hist]
+                snapshot["candles"] = [
+                    {
+                        "date": str(c.get("date", "")),
+                        "open": float(c.get("open", 0.0)),
+                        "high": float(c.get("high", 0.0)),
+                        "low": float(c.get("low", 0.0)),
+                        "close": float(c.get("close", 0.0)),
+                        "volume": float(c.get("volume", 0.0)),
+                    }
+                    for c in hist[-160:]
+                ]
                 if len(closes) >= 26:
                     snapshot["price"] = closes[-1]
+                    snapshot["is_real_data"] = closes[-1] > 0
                     rsi = compute_rsi(closes)[-1]
                     ema_9 = compute_ema(closes, 9)[-1]
                     ema_21 = compute_ema(closes, 21)[-1]
@@ -108,17 +141,28 @@ class KiteFeed:
                         ((highs[idx] + lows[idx] + closes[idx]) / 3) * volumes[idx]
                         for idx in range(min(len(highs), len(lows), len(closes), len(volumes)))
                     ]
-                    volume_sum = sum(volumes[-20:]) or 1.0
-                    vwap = sum(typical_price_volume[-20:]) / volume_sum
+                    volume_sum = sum(volumes[-20:])
+                    if volume_sum > 0:
+                        vwap = sum(typical_price_volume[-20:]) / volume_sum
+                    else:
+                        typical_prices = [(highs[idx] + lows[idx] + closes[idx]) / 3 for idx in range(min(len(highs), len(lows), len(closes)))]
+                        vwap = sum(typical_prices[-20:]) / max(len(typical_prices[-20:]), 1)
                     avg_volume = sum(volumes[-21:-1]) / max(len(volumes[-21:-1]), 1)
                     snapshot["rsi"] = int(rsi)
+                    snapshot["macd"] = round(macd[-1], 4) if macd else 0.0
+                    snapshot["macd_signal"] = round(signal[-1], 4) if signal else 0.0
                     snapshot["macd_positive"] = bool(macd and signal and macd[-1] > signal[-1])
+                    snapshot["ema_9"] = round(ema_9, 2)
+                    snapshot["ema_21"] = round(ema_21, 2)
                     snapshot["ema_alignment"] = ema_9 > ema_21
+                    snapshot["vwap"] = round(vwap, 2)
                     snapshot["vwap_above_price"] = closes[-1] > vwap
                     snapshot["volume_confirmed"] = volumes[-1] > avg_volume * 1.15 if avg_volume else False
                     snapshot["adx"] = self._simple_trend_strength(closes)
-                    snapshot["trend_bullish"] = closes[-1] > closes[0]
+                    snapshot["trend_bullish"] = closes[-1] >= ema_21 and ema_9 >= ema_21
                     snapshot["market_context"] = "strong" if snapshot["adx"] >= 20 and snapshot["volume_confirmed"] else "neutral"
+                    levels = self._daily_levels(snapshot["candles"])
+                    snapshot.update(levels)
         except Exception:
             pass
 
@@ -152,6 +196,33 @@ class KiteFeed:
     def _kite_symbol(self, symbol: str) -> str:
         raw_symbol = symbol.split(":", 1)[-1].upper()
         return self.SYMBOL_ALIASES.get(raw_symbol, raw_symbol)
+
+    def _daily_levels(self, candles: List[Dict[str, Any]]) -> Dict[str, float]:
+        by_day: Dict[str, List[Dict[str, Any]]] = {}
+        for candle in candles:
+            day = str(candle.get("date", ""))[:10]
+            if day:
+                by_day.setdefault(day, []).append(candle)
+        days = sorted(by_day)
+        if not days:
+            return {}
+        current_day = days[-1]
+        current = by_day[current_day]
+        levels = {
+            "day_open": float(current[0].get("open", 0.0)) if current else 0.0,
+            "day_high": max(float(c.get("high", 0.0)) for c in current),
+            "day_low": min(float(c.get("low", 0.0)) for c in current),
+        }
+        if len(days) >= 2:
+            previous = by_day[days[-2]]
+            levels.update(
+                {
+                    "previous_day_high": max(float(c.get("high", 0.0)) for c in previous),
+                    "previous_day_low": min(float(c.get("low", 0.0)) for c in previous),
+                    "previous_day_close": float(previous[-1].get("close", 0.0)),
+                }
+            )
+        return levels
 
     def _simple_trend_strength(self, closes: List[float]) -> int:
         if len(closes) < 20:

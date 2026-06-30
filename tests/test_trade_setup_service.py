@@ -1,6 +1,7 @@
 import unittest
+from datetime import date
 
-from app.services.trade_setup_service import TradeSetupService
+from app.services.trade_setup_service import OptionContract, TradeSetupService
 
 
 class TradeSetupServiceTests(unittest.TestCase):
@@ -47,6 +48,41 @@ class TradeSetupServiceTests(unittest.TestCase):
         service = TradeSetupService()
         self.assertEqual(service.option_type_for("bullish", "SELL"), "PE")
         self.assertEqual(service.option_type_for("bearish", "SELL"), "CE")
+
+    def test_affordable_quantity_downsizes_to_available_funds(self) -> None:
+        service = TradeSetupService()
+
+        quantity = service.affordable_quantity(
+            entry_price=100,
+            lot_size=50,
+            available_funds=10000,
+            side="BUY",
+        )
+
+        self.assertEqual(quantity, 100)
+
+    def test_risk_checks_block_expiry_day_low_premium_option_buy(self) -> None:
+        service = TradeSetupService()
+        contract = OptionContract(
+            tradingsymbol="HDFCBANK26JUN800PE",
+            exchange="NFO",
+            instrument_token=1,
+            name="HDFCBANK",
+            expiry=date.today().isoformat(),
+            strike=800,
+            option_type="PE",
+            lot_size=550,
+            last_price=2.4,
+            open_interest=3550800,
+            volume=2090550,
+            bid=2.3,
+            ask=2.4,
+        )
+
+        failures = service.risk_checks(86, contract, 2.4, "BUY")
+
+        self.assertIn("option premium is below minimum configured for buying", failures)
+        self.assertIn("expiry-day option buying is blocked", failures)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ except ModuleNotFoundError:
     KiteConnect = None  # type: ignore
 
 from app.config import settings
+from app.providers.token_store import load_access_token
 
 
 class KiteProvider:
@@ -17,10 +18,10 @@ class KiteProvider:
     def __init__(self) -> None:
         if KiteConnect is None:
             self.client = None
-            self.access_token = settings.kite_access_token
+            self.access_token = load_access_token() or settings.kite_access_token
             return
         self.client = KiteConnect(api_key=settings.kite_api_key)
-        self.access_token = settings.kite_access_token
+        self.access_token = load_access_token() or settings.kite_access_token
         if self.access_token:
             self.client.set_access_token(self.access_token)
 
@@ -38,7 +39,7 @@ class KiteProvider:
         return {"status": "not-configured", "token": bool(self.access_token)}
 
     def is_ready(self) -> bool:
-        return bool(settings.kite_api_key and self.access_token)
+        return bool(settings.kite_api_key and (self.access_token or load_access_token()))
 
     def generate_session(self, request_token: str) -> Dict[str, Any]:
         """Exchange a request_token for an access token using the API secret.

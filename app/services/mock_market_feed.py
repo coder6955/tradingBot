@@ -9,6 +9,8 @@ class MockMarketFeed:
     def get_snapshot(self, symbol: str) -> Dict[str, Any]:
         base = {
             "NIFTY": {
+                "source": "mock",
+                "is_real_data": False,
                 "price": 22150.0,
                 "rsi": 58,
                 "adx": 25,
@@ -20,6 +22,8 @@ class MockMarketFeed:
                 "market_context": "strong",
             },
             "BANKNIFTY": {
+                "source": "mock",
+                "is_real_data": False,
                 "price": 47200.0,
                 "rsi": 54,
                 "adx": 22,
@@ -32,6 +36,8 @@ class MockMarketFeed:
             },
         }
         return base.get(symbol, {
+            "source": "mock",
+            "is_real_data": False,
             "price": 100.0,
             "rsi": 50,
             "adx": 15,

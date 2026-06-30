@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.models import Signal
+from app.config import settings
 
 
 class SignalService:
@@ -19,6 +20,7 @@ class SignalService:
         stop_loss: float | None = None,
         target_1: float | None = None,
         target_2: float | None = None,
+        target_3: float | None = None,
         side: str = "BUY",
         tradingsymbol: str | None = None,
         exchange: str = "NFO",
@@ -27,9 +29,17 @@ class SignalService:
         lot_size: int = 0,
         probability: float | None = None,
         risk_reward: float = 0.0,
+        setup_type: str = "",
+        technical_score: int = 0,
+        market_regime_score: int = 0,
+        price_action_score: int = 0,
+        option_chain_score: int = 0,
+        liquidity_score: int = 0,
+        factor_scores: dict[str, object] | None = None,
+        risk_notes: list[str] | None = None,
     ) -> Signal:
-        if score < 80:
-            raise ValueError("score must be at least 80 to qualify")
+        if score < settings.min_signal_score:
+            raise ValueError(f"score must be at least {settings.min_signal_score} to qualify")
 
         bullish = trend.lower() == "bullish"
         if side.upper() == "SELL":
@@ -43,6 +53,7 @@ class SignalService:
         stop_loss = stop_loss if stop_loss is not None else entry_price * 0.9
         target_1 = target_1 if target_1 is not None else entry_price * 1.12
         target_2 = target_2 if target_2 is not None else entry_price * 1.2
+        target_3 = target_3 if target_3 is not None else entry_price * 1.3
         probability = probability if probability is not None else confidence
 
         explanation = (
@@ -64,10 +75,19 @@ class SignalService:
             stop_loss=stop_loss,
             target_1=target_1,
             target_2=target_2,
+            target_3=target_3,
             quantity=quantity,
             lot_size=lot_size,
             probability=probability,
             risk_reward=risk_reward,
+            setup_type=setup_type,
+            technical_score=technical_score,
+            market_regime_score=market_regime_score,
+            price_action_score=price_action_score,
+            option_chain_score=option_chain_score,
+            liquidity_score=liquidity_score,
+            factor_scores=factor_scores or {},
+            risk_notes=risk_notes or [],
             confidence=confidence,
             score=score,
             explanation=explanation,

@@ -23,6 +23,8 @@ class OptionContract:
     volume: float = 0.0
     bid: float = 0.0
     ask: float = 0.0
+    oi_day_high: float = 0.0
+    oi_day_low: float = 0.0
 
 
 class TradeSetupService:
@@ -71,7 +73,32 @@ class TradeSetupService:
         if not candidates:
             return None
 
-        return min(candidates, key=lambda contract: abs(contract.strike - spot_price))
+        interval = self._strike_interval(candidates)
+        target = self._target_strike(spot_price, option_type, side, interval)
+        return max(candidates, key=lambda contract: self._contract_score(contract, target))
+
+    def build_contracts(
+        self,
+        instruments: Iterable[Dict[str, Any]],
+        underlying: str,
+        quotes: Dict[str, Any] | None = None,
+    ) -> List[OptionContract]:
+        expiry = self.nearest_expiry(instruments, underlying)
+        if expiry is None:
+            return []
+        contracts: List[OptionContract] = []
+        for item in instruments:
+            if not self._underlying_matches(item, underlying):
+                continue
+            if str(item.get("instrument_type")) not in {"CE", "PE"}:
+                continue
+            item_expiry = self._parse_expiry(item.get("expiry"))
+            if item_expiry is None or item_expiry.isoformat() != expiry:
+                continue
+            contract = self._contract_from_instrument(item, quotes or {})
+            if contract:
+                contracts.append(contract)
+        return contracts
 
     def liquidity_score(self, contract: OptionContract) -> int:
         score = 0
@@ -101,12 +128,14 @@ class TradeSetupService:
             stop_loss = entry_price * 1.35
             target_1 = entry_price * 0.75
             target_2 = entry_price * 0.55
+            target_3 = entry_price * 0.35
             reward = entry_price - target_1
             risk = stop_loss - entry_price
         else:
             stop_loss = entry_price * 0.78
             target_1 = entry_price * 1.35
             target_2 = entry_price * 1.65
+            target_3 = entry_price * 2.0
             reward = target_1 - entry_price
             risk = entry_price - stop_loss
         return {
@@ -114,18 +143,28 @@ class TradeSetupService:
             "stop_loss": round(stop_loss, 2),
             "target_1": round(target_1, 2),
             "target_2": round(target_2, 2),
+            "target_3": round(target_3, 2),
             "risk_reward": round(reward / risk, 2) if risk > 0 else 0.0,
         }
 
-    def position_size(self, entry_price: float, stop_loss: float, lot_size: int, side: str) -> int:
+    def position_size(self, entry_price: float, stop_loss: float, lot_size: int, side: str, account_equity: float | None = None) -> int:
         if lot_size <= 0:
             return 0
         per_unit_risk = abs(entry_price - stop_loss)
         if per_unit_risk <= 0:
             return 0
-        max_risk = settings.account_equity * (settings.max_risk_per_trade_pct / 100)
+        equity = account_equity if account_equity is not None else settings.account_equity
+        max_risk = equity * (settings.max_risk_per_trade_pct / 100)
         lots = floor(max_risk / (per_unit_risk * lot_size))
         return max(lot_size, lots * lot_size) if lots > 0 else lot_size
+
+    def affordable_quantity(self, entry_price: float, lot_size: int, available_funds: float, side: str) -> int:
+        if lot_size <= 0 or entry_price <= 0 or available_funds <= 0:
+            return 0
+        if side.upper() == "SELL":
+            return lot_size
+        affordable_lots = floor(available_funds / (entry_price * lot_size))
+        return max(0, affordable_lots * lot_size)
 
     def risk_checks(self, score: int, contract: OptionContract, entry_price: float, side: str) -> List[str]:
         failures: List[str] = []
@@ -134,9 +173,23 @@ class TradeSetupService:
         if self.liquidity_score(contract) < settings.min_option_liquidity_score:
             failures.append("option liquidity is below threshold")
         if side.upper() == "BUY":
+            if entry_price < settings.min_option_buy_premium:
+                failures.append("option premium is below minimum configured for buying")
+            expiry = self._parse_expiry(contract.expiry)
+            if settings.block_expiry_day_option_buying and expiry is not None and expiry <= date.today():
+                failures.append("expiry-day option buying is blocked")
             max_premium = settings.account_equity * (settings.max_option_premium_pct / 100)
             if entry_price * contract.lot_size > max_premium:
                 failures.append("option premium is too large for configured account risk")
+        else:
+            if not settings.allow_option_selling:
+                failures.append("option selling is disabled by configuration")
+        if self._spread_pct(contract) > settings.max_bid_ask_spread_pct:
+            failures.append("bid/ask spread is too wide")
+        if contract.volume < settings.min_option_volume:
+            failures.append("option volume is below threshold")
+        if contract.open_interest < settings.min_option_oi:
+            failures.append("option open interest is below threshold")
         return failures
 
     def option_type_for(self, trend: str, side: str) -> str:
@@ -169,7 +222,28 @@ class TradeSetupService:
             volume=float(quote.get("volume") or item.get("volume") or 0.0),
             bid=bid,
             ask=ask,
+            oi_day_high=float(quote.get("oi_day_high") or 0.0),
+            oi_day_low=float(quote.get("oi_day_low") or 0.0),
         )
+
+    def _strike_interval(self, contracts: List[OptionContract]) -> float:
+        strikes = sorted({contract.strike for contract in contracts})
+        diffs = [strikes[idx] - strikes[idx - 1] for idx in range(1, len(strikes)) if strikes[idx] > strikes[idx - 1]]
+        return min(diffs) if diffs else 50.0
+
+    def _target_strike(self, spot_price: float, option_type: str, side: str, interval: float) -> float:
+        if side.upper() == "SELL":
+            return spot_price - interval if option_type == "PE" else spot_price + interval
+        return spot_price - (interval * 0.5) if option_type == "CE" else spot_price + (interval * 0.5)
+
+    def _contract_score(self, contract: OptionContract, target: float) -> float:
+        distance_penalty = abs(contract.strike - target)
+        return self.liquidity_score(contract) - (distance_penalty / max(contract.strike, 1.0) * 1000)
+
+    def _spread_pct(self, contract: OptionContract) -> float:
+        if not contract.bid or not contract.ask or not contract.last_price:
+            return 100.0
+        return ((contract.ask - contract.bid) / contract.last_price) * 100
 
     def _underlying_matches(self, item: Dict[str, Any], underlying: str) -> bool:
         target = underlying.upper().replace(" ", "")
