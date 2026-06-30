@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import asdict
 from datetime import datetime
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.models import Signal
@@ -36,6 +37,9 @@ class AutoTraderService:
         self.errors: list[dict[str, Any]] = []
         self.seen_order_keys: set[str] = set()
         self.last_scan_at: str | None = None
+
+    def _now_ist(self) -> str:
+        return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M:%S %p IST")
 
     def start(
         self,
@@ -93,7 +97,7 @@ class AutoTraderService:
             except Exception as exc:
                 self.errors.append(
                     {
-                        "time": datetime.utcnow().isoformat(),
+                        "time": self._now_ist(),
                         "error": str(exc),
                     }
                 )
@@ -112,7 +116,7 @@ class AutoTraderService:
         if self.opportunity_repository is not None:
             for signal in limited:
                 saved_ids.append(self.opportunity_repository.save_opportunity(signal).id)
-        self.last_scan_at = datetime.utcnow().isoformat()
+        self.last_scan_at = self._now_ist()
 
         placed: list[dict[str, Any]] = []
         if self.config.get("place_orders"):
@@ -149,7 +153,7 @@ class AutoTraderService:
             confirm_live=bool(self.config.get("confirm_live", False)),
         )
         execution = {
-            "time": datetime.utcnow().isoformat(),
+            "time": self._now_ist(),
             "order_key": order_key,
             "signal": asdict(signal),
             "result": result,

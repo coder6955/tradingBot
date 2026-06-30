@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from datetime import datetime
+from collections import Counter
 from typing import Any
 
 from app.models import Signal
@@ -54,6 +55,13 @@ class OpportunityRepository:
         finally:
             session.close()
 
+    def get_opportunity(self, opportunity_id: int) -> OpportunityRecord | None:
+        session = get_session()
+        try:
+            return session.get(OpportunityRecord, opportunity_id)
+        finally:
+            session.close()
+
     def update_outcome(
         self,
         opportunity_id: int,
@@ -61,6 +69,7 @@ class OpportunityRepository:
         outcome: str,
         exit_price: float | None = None,
         review_notes: str | None = None,
+        failure_tags: list[str] | None = None,
     ) -> OpportunityRecord:
         session = get_session()
         try:
@@ -73,6 +82,7 @@ class OpportunityRepository:
             record.exit_price = exit_price
             record.closed_at = datetime.utcnow()
             record.review_notes = review_notes
+            record.failure_tags_json = json.dumps(failure_tags or [])
             if exit_price is not None and record.entry_price is not None:
                 multiplier = 1 if record.side == "BUY" else -1
                 record.pnl = (exit_price - record.entry_price) * record.quantity * multiplier
@@ -97,4 +107,42 @@ class OpportunityRepository:
             "losses": len(losses),
             "win_rate": round(len(wins) / len(closed), 4) if closed else 0.0,
             "pnl": round(sum(pnl_values), 2),
+        }
+
+    def failure_analysis(self) -> dict[str, Any]:
+        records = self.list_opportunities(limit=1000)
+        failed = [record for record in records if record.outcome in {"stop_loss", "false_signal", "loser", "expired"}]
+        tag_counter: Counter[str] = Counter()
+        by_symbol: Counter[str] = Counter()
+        by_action: Counter[str] = Counter()
+        examples: list[dict[str, Any]] = []
+        for record in failed:
+            by_symbol.update([record.symbol])
+            by_action.update([record.action])
+            try:
+                tags = json.loads(record.failure_tags_json or "[]")
+            except json.JSONDecodeError:
+                tags = []
+            tag_counter.update(str(tag) for tag in tags)
+            if len(examples) < 10:
+                examples.append(
+                    {
+                        "id": record.id,
+                        "symbol": record.symbol,
+                        "action": record.action,
+                        "tradingsymbol": record.tradingsymbol,
+                        "outcome": record.outcome,
+                        "entry_price": record.entry_price,
+                        "exit_price": record.exit_price,
+                        "score": record.score,
+                        "tags": tags,
+                        "review_notes": record.review_notes,
+                    }
+                )
+        return {
+            "failed_count": len(failed),
+            "top_failure_tags": dict(tag_counter.most_common(20)),
+            "by_symbol": dict(by_symbol.most_common(20)),
+            "by_action": dict(by_action.most_common(20)),
+            "examples": examples,
         }

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import sys
 from typing import Optional
 
 from datetime import datetime
+from pathlib import Path
 
-from sqlalchemy import Column, DateTime, Float, Integer, String, Text, create_engine
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+VENV_SITE_PACKAGES = PROJECT_ROOT / ".venv" / "Lib" / "site-packages"
+if VENV_SITE_PACKAGES.exists() and str(VENV_SITE_PACKAGES) not in sys.path:
+    sys.path.append(str(VENV_SITE_PACKAGES))
+
+from sqlalchemy import Column, DateTime, Float, Integer, String, Text, create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.config import settings
@@ -69,18 +76,36 @@ class OpportunityRecord(Base):
     pnl = Column(Float, nullable=True)
     signal_json = Column(Text, nullable=False)
     factor_scores_json = Column(Text, nullable=True)
+    failure_tags_json = Column(Text, nullable=True)
     review_notes = Column(Text, nullable=True)
 
 
 def init_db(database_url: Optional[str] = None) -> None:
     global engine, SessionLocal
     url = database_url or settings.database_url
-    engine = create_engine(url, future=True)
+    connect_args = {"connect_timeout": 5} if url.startswith("mysql") else {}
+    engine = create_engine(url, future=True, connect_args=connect_args)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     Base.metadata.create_all(bind=engine)
+    _ensure_opportunity_columns()
+
+
+def _ensure_opportunity_columns() -> None:
+    if engine is None:
+        return
+    inspector = inspect(engine)
+    if "opportunities" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("opportunities")}
+    if "failure_tags_json" in columns:
+        return
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE opportunities ADD COLUMN failure_tags_json TEXT"))
 
 
 def get_session():
     if SessionLocal is None:
         init_db()
+    else:
+        _ensure_opportunity_columns()
     return SessionLocal()
