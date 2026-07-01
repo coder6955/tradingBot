@@ -9,6 +9,7 @@ from app.config import settings
 from app.providers.kite_provider import KiteProvider
 from app.services.database import OpportunityRecord
 from app.services.opportunity_repository import OpportunityRepository
+from app.services.trade_exit_service import TradeExitService
 
 
 KiteProviderFactory = Callable[[], KiteProvider]
@@ -21,14 +22,17 @@ class OpportunityOutcomeService:
         self,
         repository: OpportunityRepository,
         kite_provider_factory: KiteProviderFactory,
+        trade_exit_service: TradeExitService | None = None,
     ) -> None:
         self.repository = repository
         self.kite_provider_factory = kite_provider_factory
+        self.trade_exit_service = trade_exit_service
         self.task: asyncio.Task[None] | None = None
         self.running = False
         self.interval_seconds = 30
         self.last_run_at: str | None = None
         self.last_results: list[dict[str, Any]] = []
+        self.last_trade_exit_result: dict[str, Any] | None = None
         self.errors: list[dict[str, Any]] = []
 
     def start(self, interval_seconds: int = 30) -> dict[str, Any]:
@@ -56,6 +60,7 @@ class OpportunityOutcomeService:
             "interval_seconds": self.interval_seconds,
             "last_run_at": self.last_run_at,
             "last_result_count": len(self.last_results),
+            "last_trade_exit_result": self.last_trade_exit_result,
             "error_count": len(self.errors),
         }
 
@@ -73,12 +78,15 @@ class OpportunityOutcomeService:
         results: list[dict[str, Any]] = []
         for record in open_records:
             results.append(self._evaluate_record(provider, record))
+        trade_exit_result = self.trade_exit_service.evaluate_once(limit=limit) if self.trade_exit_service else None
         self.last_run_at = datetime.utcnow().isoformat()
         self.last_results = results
+        self.last_trade_exit_result = trade_exit_result
         return {
             "evaluated": len(results),
             "closed": len([item for item in results if item.get("closed")]),
             "results": results,
+            "trade_exits": trade_exit_result,
         }
 
     def _evaluate_record(self, provider: KiteProvider, record: OpportunityRecord) -> dict[str, Any]:

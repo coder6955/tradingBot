@@ -11,9 +11,28 @@ from app.services.signal_repository import SignalRepository
 from app.services.order_service import OrderService
 from app.services.paper_trading_service import PaperTradingService
 from app.services.auto_trader_service import AutoTraderService
+from app.services.automation_supervisor_service import AutomationSupervisorService
 from app.services.opportunity_repository import OpportunityRepository
 from app.services.opportunity_outcome_service import OpportunityOutcomeService
+from app.services.broker_sync_service import BrokerSyncService
+from app.services.backtest_service import BacktestService
+from app.services.data_ingestion_service import DataIngestionService
+from app.services.day_type_service import DayTypeService
 from app.services.database import get_session
+from app.services.greeks_service import GreeksService
+from app.services.notification_service import NotificationService
+from app.services.option_history_repository import OptionHistoryRepository
+from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
+from app.services.option_quality_service import OptionQualityService
+from app.services.option_snapshot_collector_service import OptionSnapshotCollectorService
+from app.services.outcome_learning_service import OutcomeLearningService
+from app.services.risk_management_service import RiskManagementService
+from app.services.strategy_edge_service import StrategyEdgeService
+from app.services.strategy_validation_repository import StrategyValidationRepository
+from app.services.time_bucket_edge_service import TimeBucketEdgeService
+from app.services.trade_exit_service import TradeExitService
+from app.services.trade_repository import TradeRepository
+from app.services.trade_setup_service import OptionContract
 from app.providers.kite_provider import KiteProvider
 from app.providers.token_store import save_access_token, load_access_token
 from fastapi.responses import RedirectResponse, HTMLResponse
@@ -26,13 +45,13 @@ Recommended sequence:
 1. System checks: `GET /health`, `GET /db/health`
 2. Kite login: `GET /kite/auth`, then verify with `GET /kite/health`
 3. Account checks: `GET /kite/margins`, `GET /kite/positions`
-4. Manual scan: `GET /scanner/opportunities?side=BUY&symbols=NIFTY,BANKNIFTY&limit=3`
-5. Review diagnostics: `GET /scanner/diagnostics?side=BUY&symbols=NIFTY`
-6. Paper order test: `POST /orders/place` with `confirm_live=false`
-7. Start continuous scanner: `POST /auto-trader/start`
+4. Start automation: `POST /automation/start`
+5. Watch automation: `GET /automation/status`, `GET /dashboard`
+6. Manual override if needed: `GET /scanner/diagnostics?side=BUY&symbols=BANKNIFTY`
+7. Research quality: `POST /research/market-insights`, `GET /research/outcome-learning`, `POST /research/greeks`, `POST /research/option-quality`, `POST /research/backtest`
 8. Watch saved opportunities: `GET /opportunities`, `GET /opportunities/performance`
 9. Study failures: `POST /opportunities/evaluate-open`, `GET /opportunities/failure-analysis`
-10. Live orders only after validation: set `LIVE_TRADING_MODE=true`, `PAPER_TRADING_MODE=false`, and send `confirm_live=true`
+10. Live orders only after validation: set `LIVE_TRADING_MODE=true`, `PAPER_TRADING_MODE=false`, `AUTOMATION_PLACE_ORDERS=true`, and `AUTOMATION_CONFIRM_LIVE=true`
 
 Safety note: signals are probability-ranked trade setups, not guaranteed-profit trades.
 """
@@ -47,6 +66,9 @@ OPENAPI_TAGS = [
     {"name": "07 Outcome Monitor", "description": "Automatically evaluate open opportunities against stop/target prices."},
     {"name": "08 Paper Trading", "description": "Inspect and close simulated in-memory paper trades."},
     {"name": "09 Market Data", "description": "Read stored market summaries."},
+    {"name": "10 Research", "description": "Market insight filters, Greeks, IV, option-quality filters, and historical rule replay."},
+    {"name": "11 Data Ingestion", "description": "Pull historical candles and option-chain snapshots into MySQL."},
+    {"name": "12 Automation", "description": "One-switch supervisor for daily ingestion, collectors, scanners, and monitors."},
 ]
 
 app = FastAPI(
@@ -59,6 +81,19 @@ market_data_service = MarketDataService()
 signal_repository = SignalRepository()
 paper_trading_service = PaperTradingService()
 opportunity_repository = OpportunityRepository()
+trade_repository = TradeRepository()
+risk_management_service = RiskManagementService(trade_repository)
+notification_service = NotificationService()
+greeks_service = GreeksService()
+option_quality_service = OptionQualityService(greeks_service)
+backtest_service = BacktestService()
+option_history_repository = OptionHistoryRepository()
+strategy_validation_repository = StrategyValidationRepository()
+strategy_edge_service = StrategyEdgeService(backtest_service=backtest_service, repository=strategy_validation_repository)
+day_type_service = DayTypeService()
+option_premium_confirmation_service = OptionPremiumConfirmationService()
+time_bucket_edge_service = TimeBucketEdgeService(backtest_service=backtest_service)
+outcome_learning_service = OutcomeLearningService()
 
 
 def get_kite_provider() -> KiteProvider:
@@ -69,23 +104,71 @@ def get_kite_provider() -> KiteProvider:
     return provider
 
 
+data_ingestion_service = DataIngestionService(
+    kite_provider_factory=get_kite_provider,
+    market_data_service=market_data_service,
+    option_history_repository=option_history_repository,
+    greeks_service=greeks_service,
+)
+option_snapshot_collector_service = OptionSnapshotCollectorService(data_ingestion_service)
+
+
 def get_scanner_service() -> ScannerService:
-    return ScannerService()
+    return ScannerService(strategy_edge_service=strategy_edge_service)
 
 
 def get_order_service() -> OrderService:
-    return OrderService(kite_provider=get_kite_provider(), paper_trading_service=paper_trading_service)
+    return OrderService(
+        kite_provider=get_kite_provider(),
+        paper_trading_service=paper_trading_service,
+        trade_repository=trade_repository,
+        risk_management_service=risk_management_service,
+    )
 
 
 auto_trader_service = AutoTraderService(
     scanner_factory=get_scanner_service,
     order_service_factory=get_order_service,
     opportunity_repository=opportunity_repository,
+    risk_management_service=risk_management_service,
+    notification_service=notification_service,
+)
+trade_exit_service = TradeExitService(
+    trade_repository=trade_repository,
+    kite_provider_factory=get_kite_provider,
+    paper_trading_service=paper_trading_service,
 )
 opportunity_outcome_service = OpportunityOutcomeService(
     repository=opportunity_repository,
     kite_provider_factory=get_kite_provider,
+    trade_exit_service=trade_exit_service,
 )
+broker_sync_service = BrokerSyncService(
+    trade_repository=trade_repository,
+    kite_provider_factory=get_kite_provider,
+)
+automation_supervisor_service = AutomationSupervisorService(
+    data_ingestion_service=data_ingestion_service,
+    snapshot_collector_service=option_snapshot_collector_service,
+    auto_trader_service=auto_trader_service,
+    outcome_service=opportunity_outcome_service,
+    risk_management_service=risk_management_service,
+    notification_service=notification_service,
+)
+
+
+@app.on_event("startup")
+async def startup_automation() -> None:
+    if settings.automation_enabled:
+        automation_supervisor_service.start()
+
+
+@app.on_event("shutdown")
+async def shutdown_background_services() -> None:
+    await automation_supervisor_service.stop()
+    await option_snapshot_collector_service.stop()
+    await auto_trader_service.stop()
+    await opportunity_outcome_service.stop()
 
 
 @app.get("/health", tags=["01 System"], summary="Check API health")
@@ -129,8 +212,17 @@ def root() -> dict[str, object]:
             "GET /kite/auth",
             "GET /kite/health",
             "GET /kite/margins",
-            "GET /scanner/opportunities?side=BUY&symbols=NIFTY,BANKNIFTY&limit=3",
-            "GET /scanner/diagnostics?side=BUY&symbols=NIFTY&limit=10",
+            "POST /automation/start",
+            "GET /automation/status",
+            "POST /data/ingest/candles",
+            "POST /data/ingest/option-candles",
+            "POST /data/ingest/option-snapshots",
+            "POST /data/collector/start",
+            "GET /scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3",
+            "GET /scanner/diagnostics?side=BUY&symbols=BANKNIFTY&limit=10",
+            "POST /research/greeks",
+            "POST /research/option-quality",
+            "POST /research/backtest",
             "POST /orders/place with confirm_live=false for paper test",
             "POST /auto-trader/start with monitor_outcomes=true",
             "GET /opportunities",
@@ -185,6 +277,8 @@ def command_center_dashboard() -> HTMLResponse:
     pre { max-height: 300px; overflow: auto; background: #101828; color: #f9fafb; border-radius: 8px; padding: 10px; font-size: 12px; }
     .links { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; }
     .muted { color: #667085; font-size: 12px; }
+    details { margin-top: 12px; border-top: 1px solid #eaecf0; padding-top: 10px; }
+    summary { cursor: pointer; font-weight: 600; color: #344054; }
     @media (max-width: 1100px) { .control-grid,.data-grid { grid-template-columns: 1fr; } .full { grid-column: auto; } header { align-items: flex-start; flex-direction: column; } }
     @media (max-width: 620px) { main, header { padding-left: 12px; padding-right: 12px; } .status,.metrics,.links,.row { grid-template-columns: 1fr; } }
   </style>
@@ -202,15 +296,18 @@ def command_center_dashboard() -> HTMLResponse:
     <section class="panel"><div class="status" id="statusCards"></div></section>
     <section class="control-grid">
       <div class="panel">
-        <h2>Auto Trade Controls</h2>
-        <div class="row"><div><label>Side</label><select id="side"><option>BUY</option><option>SELL</option></select></div><div><label>Limit</label><input id="limit" type="number" value="3" min="1" max="25"></div></div>
-        <label>Symbols</label><input id="symbols" value="NIFTY,BANKNIFTY,HDFCBANK">
-        <div class="row"><div><label>Scan seconds</label><input id="interval" type="number" value="5" min="3"></div><div><label>Outcome seconds</label><input id="outcomeInterval" type="number" value="30" min="10"></div></div>
-        <div class="row"><label><input id="placeOrders" type="checkbox" style="width:auto"> Auto place orders</label><label><input id="confirmLive" type="checkbox" style="width:auto"> Confirm live</label></div>
+        <h2>Automation Control</h2>
+        <label>Order mode</label><select id="orderMode"><option value="paper">Paper orders</option><option value="live">Live orders</option></select>
         <div class="actions">
-          <button onclick="startAuto()">Start</button><button class="danger" onclick="stopAuto()">Stop Auto</button><button class="secondary" onclick="stopMonitor()">Stop Monitor</button>
+          <button onclick="startAutomation()">Start Full Automation</button><button class="danger" onclick="stopAutomation()">Stop Full Automation</button>
           <button class="secondary" onclick="scanOnce()">Run One Scan</button><button class="secondary" onclick="evaluateOpen()">Evaluate Open</button>
         </div>
+        <details>
+          <summary>Advanced</summary>
+          <div class="row"><div><label>Side</label><select id="side"><option>BUY</option><option>SELL</option></select></div><div><label>Limit</label><input id="limit" type="number" value="5" min="1" max="25"></div></div>
+          <label>Symbols</label><input id="symbols" value="">
+          <div class="row"><div><label>Scan seconds</label><input id="interval" type="number" value="30" min="3"></div><div><label>Outcome seconds</label><input id="outcomeInterval" type="number" value="30" min="10"></div></div>
+        </details>
         <pre id="actionResult">{}</pre>
       </div>
       <div class="panel">
@@ -222,11 +319,18 @@ def command_center_dashboard() -> HTMLResponse:
     <section class="panel">
       <h2>Quick Modules</h2>
       <div class="links">
-        <a class="linkbtn secondary" href="/scanner/opportunities?side=BUY&symbols=NIFTY,BANKNIFTY&limit=3" target="_blank">Scanner</a>
-        <a class="linkbtn secondary" href="/scanner/diagnostics?side=BUY&symbols=NIFTY&limit=10" target="_blank">Diagnostics</a>
+        <a class="linkbtn secondary" href="/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3" target="_blank">Scanner</a>
+        <a class="linkbtn secondary" href="/scanner/diagnostics?side=BUY&symbols=BANKNIFTY&limit=10" target="_blank">Diagnostics</a>
         <a class="linkbtn secondary" href="/opportunities?limit=20" target="_blank">Journal</a>
         <a class="linkbtn secondary" href="/opportunities/failure-analysis" target="_blank">Failures</a>
         <a class="linkbtn secondary" href="/paper/positions" target="_blank">Paper</a>
+        <a class="linkbtn secondary" href="/trades?limit=20" target="_blank">Trades</a>
+        <a class="linkbtn secondary" href="/risk/status" target="_blank">Risk</a>
+        <a class="linkbtn secondary" href="/research/settings" target="_blank">Research</a>
+        <a class="linkbtn secondary" href="/research/outcome-learning" target="_blank">Learning</a>
+        <a class="linkbtn secondary" href="/data/ingest/status" target="_blank">Ingestion</a>
+        <a class="linkbtn secondary" href="/data/collector/status" target="_blank">Collector</a>
+        <a class="linkbtn secondary" href="/automation/status" target="_blank">Automation</a>
         <a class="linkbtn secondary" href="/kite/margins" target="_blank">Margins</a>
         <a class="linkbtn secondary" href="/kite/positions" target="_blank">Positions</a>
         <a class="linkbtn secondary" href="/db/health" target="_blank">DB</a>
@@ -236,6 +340,8 @@ def command_center_dashboard() -> HTMLResponse:
       <div class="panel"><h2>Latest Scan Opportunities</h2><div class="tablewrap"><table id="latestTable"></table></div></div>
       <div class="panel"><h2>Failure Analysis</h2><pre id="failureJson">{}</pre></div>
       <div class="panel"><h2>Saved Opportunity Journal</h2><div class="tablewrap"><table id="journalTable"></table></div></div>
+      <div class="panel"><h2>Outcome Learning</h2><pre id="learningJson">{}</pre></div>
+      <div class="panel full"><h2>Trade Decision / Exit Watch</h2><pre id="decisionJson">{}</pre></div>
       <div class="panel"><h2>Paper / Execution State</h2><pre id="ordersJson">{}</pre></div>
       <div class="panel full"><h2>Kite Account</h2><pre id="accountJson">{}</pre></div>
     </section>
@@ -264,13 +370,15 @@ function table(el, rows) {
     rows.map(r => `<tr>${keys.map(k => `<td>${r[k] ?? ""}</td>`).join("")}</tr>`).join("") + "</tbody>";
 }
 function payload() {
+  const orderMode = document.getElementById("orderMode").value;
   return {
+    order_mode: orderMode,
     side: document.getElementById("side").value,
     symbols: document.getElementById("symbols").value,
     interval_seconds: Number(document.getElementById("interval").value),
     limit: Number(document.getElementById("limit").value),
-    place_orders: document.getElementById("placeOrders").checked,
-    confirm_live: document.getElementById("confirmLive").checked,
+    place_orders: true,
+    confirm_live: orderMode === "live",
     monitor_outcomes: true,
     outcome_interval_seconds: Number(document.getElementById("outcomeInterval").value)
   };
@@ -280,36 +388,68 @@ async function showAction(fn) {
   try { const data = await fn(); out.textContent = JSON.stringify(data, null, 2); await refreshAll(); }
   catch (e) { out.textContent = e.message; }
 }
-function startAuto(){ showAction(() => postJson("/auto-trader/start", payload())); }
-function stopAuto(){ showAction(() => postJson("/auto-trader/stop")); }
-function stopMonitor(){ showAction(() => postJson("/opportunity-monitor/stop")); }
 function scanOnce(){ showAction(() => postJson("/auto-trader/scan-once", {...payload(), place_orders:false})); }
 function evaluateOpen(){ showAction(() => postJson("/opportunities/evaluate-open", {limit:100})); }
+function automationPayload(){ return {
+  order_mode: document.getElementById("orderMode").value,
+  symbols: document.getElementById("symbols").value,
+  side: document.getElementById("side").value,
+  scan_interval_seconds: Number(document.getElementById("interval").value),
+  snapshot_interval_seconds: 180,
+  outcome_interval_seconds: Number(document.getElementById("outcomeInterval").value),
+  checkpoint_overlap_minutes: 30,
+  intraday_candle_sync: true,
+  intraday_candle_sync_minutes: 5,
+  scan_limit: Number(document.getElementById("limit").value),
+  place_orders: true,
+  confirm_live: document.getElementById("orderMode").value === "live"
+}; }
+function startAutomation(){ showAction(() => postJson("/automation/start", automationPayload())); }
+function stopAutomation(){ showAction(() => postJson("/automation/stop")); }
+function loadControls(config) {
+  if (window.controlsLoaded || !config) return;
+  document.getElementById("symbols").value = config.symbols || "";
+  document.getElementById("orderMode").value = config.order_mode || "paper";
+  document.getElementById("side").value = config.side || "BUY";
+  document.getElementById("interval").value = config.scan_interval_seconds || 30;
+  document.getElementById("outcomeInterval").value = config.outcome_interval_seconds || 30;
+  document.getElementById("limit").value = config.scan_limit || 5;
+  window.controlsLoaded = true;
+}
 async function refreshAll() {
-  const [health, db, kite, auto, monitor, perf, latest, journal, failures, execs, paper, margins, positions] = await Promise.allSettled([
+  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, collector, ingest] = await Promise.allSettled([
     getJson("/health"), getJson("/db/health"), getJson("/kite/health"), getJson("/auto-trader/status"), getJson("/opportunity-monitor/status"),
     getJson("/opportunities/performance"), getJson("/auto-trader/latest"), getJson("/opportunities?limit=50"), getJson("/opportunities/failure-analysis"),
-    getJson("/auto-trader/executions"), getJson("/paper/trades"), getJson("/kite/margins"), getJson("/kite/positions")
+    getJson("/research/outcome-learning"), getJson("/auto-trader/executions"), getJson("/paper/trades"), getJson("/kite/margins"), getJson("/kite/positions"), getJson("/risk/status"), getJson("/trades?limit=50"),
+    getJson("/automation/status"), getJson("/data/collector/status"), getJson("/data/ingest/status")
   ]);
   const val = r => r.status === "fulfilled" ? r.value : {error: r.reason.message};
-  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures);
+  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), c=val(collector), ing=val(ingest);
+  loadControls(au.config);
   document.getElementById("statusCards").innerHTML =
     pill("API", h.status === "ok", h.status || h.error) + pill("Database", d.status === "ok", d.status || d.error) +
+    pill("Automation", !!au.running, au.running ? (au.market_open ? "running, market open" : "running, market closed") : "stopped") +
     pill("Kite", k.status === "ok", k.status || k.error || "check") + pill("Auto Trader", !!a.running, a.running ? "running" : "stopped") +
-    pill("Outcome Monitor", !!m.running, m.running ? "running" : "stopped");
+    pill("Collector", !!c.running, c.running ? "running" : "stopped") + pill("Outcome Monitor", !!m.running, m.running ? "running" : "stopped");
   document.getElementById("metrics").innerHTML =
     metric("Last scan", a.last_scan_at || "-") + metric("Latest found", a.latest_count || 0) + metric("Executions", a.execution_count || 0) +
-    metric("Open", p.open || 0) + metric("Closed", p.closed || 0) + metric("Win rate", `${((p.win_rate || 0) * 100).toFixed(1)}%`);
-  document.getElementById("activityJson").textContent = JSON.stringify({auto_trader:a, monitor:m, performance:p}, null, 2);
+    metric("Open", p.open || 0) + metric("Closed", p.closed || 0) + metric("Risk", r.passed === false ? "Blocked" : "Allowed");
+  document.getElementById("activityJson").textContent = JSON.stringify({automation:au, auto_trader:a, collector:c, ingestion:ing, monitor:m, performance:p, risk:r}, null, 2);
   table(document.getElementById("latestTable"), l.opportunities || []);
   table(document.getElementById("journalTable"), j.opportunities || []);
   document.getElementById("failureJson").textContent = JSON.stringify(f, null, 2);
-  document.getElementById("ordersJson").textContent = JSON.stringify({executions: val(execs), paper: val(paper)}, null, 2);
+  document.getElementById("learningJson").textContent = JSON.stringify(learn, null, 2);
+  document.getElementById("decisionJson").textContent = JSON.stringify({
+    latest_opportunity: (l.opportunities || [])[0] || null,
+    open_lifecycle_trades: (t.trades || []).filter(x => x.status !== "closed"),
+    last_monitor_results: m
+  }, null, 2);
+  document.getElementById("ordersJson").textContent = JSON.stringify({executions: val(execs), lifecycle_trades: t, paper: val(paper)}, null, 2);
   document.getElementById("accountJson").textContent = JSON.stringify({margins: val(margins), positions: val(positions)}, null, 2);
   document.getElementById("refreshText").textContent = `Last refreshed ${new Date().toLocaleTimeString()}`;
 }
 refreshAll();
-setInterval(refreshAll, 10000);
+setInterval(refreshAll, 5000);
 </script>
 </body>
 </html>
@@ -352,9 +492,806 @@ def opportunity_record_to_dict(record) -> dict[str, object]:
     }
 
 
+def trade_record_to_dict(record) -> dict[str, object]:
+    return {
+        "id": record.id,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+        "opportunity_id": record.opportunity_id,
+        "symbol": record.symbol,
+        "tradingsymbol": record.tradingsymbol,
+        "exchange": record.exchange,
+        "action": record.action,
+        "side": record.side,
+        "mode": record.mode,
+        "status": record.status,
+        "broker_order_id": record.broker_order_id,
+        "requested_quantity": record.requested_quantity,
+        "placed_quantity": record.placed_quantity,
+        "filled_quantity": record.filled_quantity,
+        "entry_price": record.entry_price,
+        "average_price": record.average_price,
+        "stop_loss": record.stop_loss,
+        "target_1": record.target_1,
+        "target_2": record.target_2,
+        "target_3": record.target_3,
+        "exit_price": record.exit_price,
+        "pnl": record.pnl,
+        "outcome": record.outcome,
+        "notes": record.notes,
+    }
+
+
+def option_quote_snapshot_to_dict(record) -> dict[str, object]:
+    return {
+        "id": record.id,
+        "underlying": record.underlying,
+        "tradingsymbol": record.tradingsymbol,
+        "exchange": record.exchange,
+        "timestamp": record.timestamp.isoformat() if record.timestamp else None,
+        "expiry": record.expiry,
+        "strike": record.strike,
+        "option_type": record.option_type,
+        "last_price": record.last_price,
+        "bid": record.bid,
+        "ask": record.ask,
+        "implied_volatility": record.implied_volatility,
+        "delta": record.delta,
+        "gamma": record.gamma,
+        "theta": record.theta,
+        "vega": record.vega,
+        "open_interest": record.open_interest,
+        "volume": record.volume,
+    }
+
+
+def parse_symbol_list(value: object, default: list[str] | None = None) -> list[str]:
+    if isinstance(value, str):
+        symbols = [item.strip().upper() for item in value.split(",") if item.strip()]
+    elif isinstance(value, list):
+        symbols = [str(item).strip().upper() for item in value if str(item).strip()]
+    else:
+        symbols = default or ["BANKNIFTY"]
+    return symbols or (default or ["BANKNIFTY"])
+
+
 @app.get("/market/{symbol}", tags=["09 Market Data"], summary="Get stored market summary for a symbol")
 def get_market_summary(symbol: str) -> dict[str, object]:
     return market_data_service.get_market_summary(symbol)
+
+
+@app.get("/data/ingest/status", tags=["11 Data Ingestion"], summary="Show stored candle and option-history counts")
+def get_ingestion_status(symbols: str | None = None, timeframe: str = "5minute") -> dict[str, object]:
+    return data_ingestion_service.status(symbols=parse_symbol_list(symbols, default=[]) if symbols else None, timeframe=timeframe)
+
+
+@app.post(
+    "/data/ingest/candles",
+    tags=["11 Data Ingestion"],
+    summary="Ingest historical underlying candles from Kite",
+    description="Fetches Kite historical OHLCV candles for the given symbols and stores them in MySQL for backtesting.",
+)
+def ingest_historical_candles(
+    payload: dict[str, object] | None = Body(
+        default=None,
+        examples=[
+            {
+                "symbols": "BANKNIFTY",
+                "timeframe": "5minute",
+                "days": 90,
+                "use_checkpoint": True,
+                "overlap_minutes": 30,
+                "from": "2026-04-01",
+                "to": "2026-06-30",
+            }
+        ],
+    ),
+) -> dict[str, object]:
+    payload = payload or {}
+    try:
+        return data_ingestion_service.ingest_candles(
+            symbols=parse_symbol_list(payload.get("symbols")),
+            timeframe=str(payload.get("timeframe") or "5minute"),
+            from_date=str(payload.get("from")) if payload.get("from") else None,
+            to_date=str(payload.get("to")) if payload.get("to") else None,
+            days=int(payload.get("days") or 90),
+            use_checkpoint=bool(payload.get("use_checkpoint", False)),
+            overlap_minutes=int(payload.get("overlap_minutes") or settings.automation_checkpoint_overlap_minutes),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/data/ingest/option-snapshots",
+    tags=["11 Data Ingestion"],
+    summary="Capture current option-chain quote snapshots",
+    description=(
+        "Stores current nearby option quotes, bid/ask, OI, volume, and estimated Greeks/IV. "
+        "Run this repeatedly during market hours to build historical option-chain data going forward."
+    ),
+)
+def ingest_option_snapshots(
+    payload: dict[str, object] | None = Body(
+        default=None,
+        examples=[
+            {
+                "symbols": "BANKNIFTY",
+                "strike_window_pct": 4.0,
+                "max_contracts_per_symbol": 120,
+            }
+        ],
+    ),
+) -> dict[str, object]:
+    payload = payload or {}
+    try:
+        return data_ingestion_service.capture_option_snapshots(
+            symbols=parse_symbol_list(payload.get("symbols")),
+            strike_window_pct=float(payload.get("strike_window_pct") or 4.0),
+            max_contracts_per_symbol=int(payload.get("max_contracts_per_symbol") or 120),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/data/collector/start",
+    tags=["11 Data Ingestion"],
+    summary="Start continuous option-chain snapshot collection",
+    description="Continuously stores option quote, bid/ask, OI, IV, and Greeks snapshots. Use during market hours to build option-history data.",
+)
+async def start_option_snapshot_collector(
+    payload: dict[str, object] | None = Body(
+        default=None,
+        examples=[
+            {
+                "symbols": "BANKNIFTY",
+                "interval_seconds": 300,
+                "strike_window_pct": 4.0,
+                "max_contracts_per_symbol": 120,
+            }
+        ],
+    ),
+) -> dict[str, object]:
+    payload = payload or {}
+    return option_snapshot_collector_service.start(
+        symbols=parse_symbol_list(payload.get("symbols")),
+        interval_seconds=int(payload.get("interval_seconds") or 300),
+        strike_window_pct=float(payload.get("strike_window_pct") or 4.0),
+        max_contracts_per_symbol=int(payload.get("max_contracts_per_symbol") or 120),
+    )
+
+
+@app.post("/data/collector/stop", tags=["11 Data Ingestion"], summary="Stop continuous option-chain snapshot collection")
+async def stop_option_snapshot_collector() -> dict[str, object]:
+    return await option_snapshot_collector_service.stop()
+
+
+@app.get("/data/collector/status", tags=["11 Data Ingestion"], summary="Get option-chain snapshot collector status")
+def get_option_snapshot_collector_status() -> dict[str, object]:
+    return option_snapshot_collector_service.status()
+
+
+@app.post(
+    "/automation/start",
+    tags=["12 Automation"],
+    summary="Start one-switch automation supervisor",
+    description=(
+        "Automatically handles daily candle ingestion, market-hour option snapshot collection, auto scanning, "
+        "and outcome monitoring. Orders stay disabled unless `place_orders=true`; live orders still require live config and `confirm_live=true`."
+    ),
+)
+async def start_automation(
+    payload: dict[str, object] | None = Body(
+        default=None,
+        examples=[
+            {
+                "symbols": "BANKNIFTY",
+                "side": "BUY",
+                "scan_interval_seconds": 30,
+                "snapshot_interval_seconds": 300,
+                "outcome_interval_seconds": 30,
+                "ingest_days": 7,
+                "checkpoint_overlap_minutes": 30,
+                "scan_limit": 3,
+                "place_orders": False,
+                "confirm_live": False,
+            }
+        ],
+    ),
+) -> dict[str, object]:
+    return automation_supervisor_service.start(payload or {})
+
+
+@app.post("/automation/stop", tags=["12 Automation"], summary="Stop automation supervisor and intraday collector/scanner")
+async def stop_automation() -> dict[str, object]:
+    return await automation_supervisor_service.stop()
+
+
+@app.post(
+    "/automation/run-once",
+    tags=["12 Automation"],
+    summary="Run one automation supervisor cycle now",
+    description="Runs the same decision cycle the supervisor loop runs: bootstrap data if needed, start market-hour services, or evaluate open outcomes after hours.",
+)
+def run_automation_once(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
+    return automation_supervisor_service.run_once(payload or None)
+
+
+@app.get("/automation/status", tags=["12 Automation"], summary="Get automation supervisor status")
+def get_automation_status() -> dict[str, object]:
+    return automation_supervisor_service.status()
+
+
+@app.post(
+    "/data/ingest/option-candles",
+    tags=["11 Data Ingestion"],
+    summary="Ingest historical candles for nearby option contracts",
+    description=(
+        "Fetches OHLCV candles for currently listed nearby option contracts. "
+        "This stores option premium movement, while `/data/ingest/option-snapshots` stores bid/ask, OI, IV, and Greeks."
+    ),
+)
+def ingest_option_candles(
+    payload: dict[str, object] | None = Body(
+        default=None,
+        examples=[
+            {
+                "symbols": "BANKNIFTY",
+                "timeframe": "5minute",
+                "days": 30,
+                "strike_window_pct": 2.0,
+                "max_contracts_per_symbol": 20,
+            }
+        ],
+    ),
+) -> dict[str, object]:
+    payload = payload or {}
+    try:
+        return data_ingestion_service.ingest_option_candles(
+            symbols=parse_symbol_list(payload.get("symbols")),
+            timeframe=str(payload.get("timeframe") or "5minute"),
+            from_date=str(payload.get("from")) if payload.get("from") else None,
+            to_date=str(payload.get("to")) if payload.get("to") else None,
+            days=int(payload.get("days") or 30),
+            strike_window_pct=float(payload.get("strike_window_pct") or 2.0),
+            max_contracts_per_symbol=int(payload.get("max_contracts_per_symbol") or 20),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/data/ingest/all",
+    tags=["11 Data Ingestion"],
+    summary="Ingest candles and capture option snapshots",
+    description="Runs historical underlying candle ingestion first, then captures current option-chain snapshots for the same symbols.",
+)
+def ingest_all_market_research_data(
+    payload: dict[str, object] | None = Body(
+        default=None,
+        examples=[
+            {
+                "symbols": "BANKNIFTY",
+                "timeframe": "5minute",
+                "days": 90,
+                "use_checkpoint": True,
+                "overlap_minutes": 30,
+                "strike_window_pct": 4.0,
+                "max_contracts_per_symbol": 120,
+            }
+        ],
+    ),
+) -> dict[str, object]:
+    payload = payload or {}
+    try:
+        return data_ingestion_service.ingest_all(
+            symbols=parse_symbol_list(payload.get("symbols")),
+            timeframe=str(payload.get("timeframe") or "5minute"),
+            from_date=str(payload.get("from")) if payload.get("from") else None,
+            to_date=str(payload.get("to")) if payload.get("to") else None,
+            days=int(payload.get("days") or 90),
+            strike_window_pct=float(payload.get("strike_window_pct") or 4.0),
+            max_contracts_per_symbol=int(payload.get("max_contracts_per_symbol") or 120),
+            use_checkpoint=bool(payload.get("use_checkpoint", False)),
+            overlap_minutes=int(payload.get("overlap_minutes") or settings.automation_checkpoint_overlap_minutes),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/research/settings", tags=["10 Research"], summary="Show option-buying research thresholds")
+def get_research_settings() -> dict[str, object]:
+    return {
+        "option_quality": {
+            "min_delta": settings.min_option_buy_delta,
+            "max_delta": settings.max_option_buy_delta,
+            "max_theta_pct": settings.max_option_buy_theta_pct,
+            "min_iv": settings.min_option_buy_iv,
+            "max_iv": settings.max_option_buy_iv,
+            "min_quality_score": settings.min_option_quality_score,
+            "min_buy_premium": settings.min_option_buy_premium,
+            "max_bid_ask_spread_pct": settings.max_bid_ask_spread_pct,
+        },
+        "backtest": {
+            "default_horizon_candles": settings.backtest_horizon_candles,
+            "mode": "underlying_rule_replay",
+            "historical_option_snapshots": option_history_repository.count_snapshots(),
+            "option_stop_loss_pct": settings.backtest_option_stop_loss_pct,
+            "option_target_pct": settings.backtest_option_target_pct,
+            "slippage_pct": settings.backtest_slippage_pct,
+            "charges_pct": settings.backtest_charges_pct,
+            "walk_forward_train_pct": settings.backtest_walk_forward_train_pct,
+        },
+        "strategy_edge_guard": {
+            "enabled": settings.enable_strategy_edge_guard,
+            "min_trades": settings.min_strategy_trades,
+            "min_expectancy_pct": settings.min_strategy_expectancy_pct,
+            "min_profit_factor": settings.min_strategy_profit_factor,
+            "min_win_rate_pct": settings.min_strategy_win_rate_pct,
+        },
+        "market_insights": {
+            "day_type_filter": settings.enable_day_type_filter,
+            "min_day_type_score": settings.min_day_type_score,
+            "opening_range_minutes": settings.opening_range_minutes,
+            "option_premium_confirmation": settings.enable_option_premium_confirmation,
+            "min_option_premium_confirmation_score": settings.min_option_premium_confirmation_score,
+            "option_premium_lookback_candles": settings.option_premium_lookback_candles,
+            "time_bucket_filter": settings.enable_time_bucket_filter,
+            "min_time_bucket_trades": settings.min_time_bucket_trades,
+            "min_time_bucket_expectancy_pct": settings.min_time_bucket_expectancy_pct,
+            "outcome_learning_guard": settings.enable_outcome_learning_guard,
+            "min_outcome_learning_trades": settings.min_outcome_learning_trades,
+            "min_outcome_learning_expectancy_pct": settings.min_outcome_learning_expectancy_pct,
+            "min_outcome_learning_win_rate_pct": settings.min_outcome_learning_win_rate_pct,
+            "outcome_learning_lookback": settings.outcome_learning_lookback,
+        },
+        "automation_learning_loop": {
+            "intraday_candle_sync": settings.automation_intraday_candle_sync,
+            "intraday_candle_sync_minutes": settings.automation_intraday_candle_sync_minutes,
+            "checkpoint_overlap_minutes": settings.automation_checkpoint_overlap_minutes,
+            "snapshot_interval_seconds": settings.automation_snapshot_interval_seconds,
+            "outcome_interval_seconds": settings.automation_outcome_interval_seconds,
+            "auto_squareoff": settings.enable_auto_squareoff,
+            "live_auto_squareoff": settings.live_auto_squareoff,
+        },
+        "execution_quality": {
+            "enabled": settings.enforce_execution_quality,
+            "default_order_mode": settings.default_order_mode,
+            "max_execution_spread_pct": settings.max_execution_spread_pct,
+            "max_entry_price_deviation_pct": settings.max_entry_price_deviation_pct,
+            "min_execution_quote_price": settings.min_execution_quote_price,
+            "max_trend_momentum_score": settings.max_trend_momentum_score,
+            "option_time_stop_minutes": settings.option_time_stop_minutes,
+            "option_time_stop_min_move_pct": settings.option_time_stop_min_move_pct,
+            "exit_open_trades_before_close_minutes": settings.exit_open_trades_before_close_minutes,
+        },
+    }
+
+
+@app.post(
+    "/research/market-insights",
+    tags=["10 Research"],
+    summary="Inspect live market insight filters for a symbol and option contract",
+    description="Use this to audit day type, option-premium confirmation, and time-bucket edge before trusting an option-buying signal.",
+)
+def get_market_insights(
+    payload: dict[str, object] = Body(
+        examples=[
+            {
+                "symbol": "NIFTY",
+                "trend": "bearish",
+                "side": "BUY",
+                "timeframe": "5minute",
+                "contract": {
+                    "tradingsymbol": "NIFTY2670723950PE",
+                    "exchange": "NFO",
+                    "instrument_token": 123456,
+                    "name": "NIFTY",
+                    "expiry": "2026-07-07",
+                    "strike": 23950,
+                    "option_type": "PE",
+                    "lot_size": 75,
+                    "last_price": 120.0,
+                    "bid": 119.5,
+                    "ask": 120.0,
+                    "open_interest": 1000000,
+                    "volume": 250000,
+                },
+            }
+        ]
+    ),
+) -> dict[str, object]:
+    symbol = str(payload.get("symbol") or "").strip().upper()
+    trend = str(payload.get("trend") or "").strip().lower()
+    side = str(payload.get("side") or "BUY").strip().upper()
+    timeframe = str(payload.get("timeframe") or "5minute").strip()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="symbol is required")
+    if trend not in {"bullish", "bearish"}:
+        raise HTTPException(status_code=400, detail="trend must be bullish or bearish")
+
+    contract_payload = payload.get("contract")
+    premium_eval: dict[str, object]
+    if isinstance(contract_payload, dict):
+        contract = OptionContract(
+            tradingsymbol=str(contract_payload.get("tradingsymbol") or ""),
+            exchange=str(contract_payload.get("exchange") or "NFO"),
+            instrument_token=int(contract_payload["instrument_token"]) if contract_payload.get("instrument_token") else None,
+            name=str(contract_payload.get("name") or symbol),
+            expiry=str(contract_payload.get("expiry") or ""),
+            strike=float(contract_payload.get("strike") or 0),
+            option_type=str(contract_payload.get("option_type") or ""),
+            lot_size=int(contract_payload.get("lot_size") or 0),
+            last_price=float(contract_payload.get("last_price") or 0),
+            open_interest=float(contract_payload.get("open_interest") or 0),
+            volume=float(contract_payload.get("volume") or 0),
+            bid=float(contract_payload.get("bid") or 0),
+            ask=float(contract_payload.get("ask") or 0),
+        )
+        premium_eval = option_premium_confirmation_service.evaluate(contract=contract, side=side, timeframe=timeframe)
+    else:
+        premium_eval = {
+            "enabled": settings.enable_option_premium_confirmation,
+            "score": 0,
+            "passed": False,
+            "reasons": ["contract is required for option premium confirmation"],
+            "details": {},
+        }
+
+    return {
+        "status": "ok",
+        "symbol": symbol,
+        "trend": trend,
+        "side": side,
+        "timeframe": timeframe,
+        "insights": {
+            "day_type": day_type_service.evaluate(symbol=symbol, trend=trend, timeframe=timeframe),
+            "option_premium_confirmation": premium_eval,
+            "time_bucket_edge": time_bucket_edge_service.evaluate(symbol=symbol, trend=trend, timeframe=timeframe),
+        },
+    }
+
+
+@app.get(
+    "/research/outcome-learning",
+    tags=["10 Research"],
+    summary="Analyze actual opportunity outcomes for adaptive setup guards",
+    description="Shows which symbols, actions, setup types, day types, and time buckets have enough closed-trade evidence to trust or avoid.",
+)
+def get_outcome_learning() -> dict[str, object]:
+    return {"status": "ok", "learning": outcome_learning_service.analyze()}
+
+
+@app.post(
+    "/research/greeks",
+    tags=["10 Research"],
+    summary="Estimate IV and Greeks for an option",
+    description="Use this to inspect whether a proposed option has usable delta, acceptable theta decay, and reasonable IV.",
+)
+def estimate_greeks(
+    payload: dict[str, object] = Body(
+        examples=[
+            {
+                "spot_price": 796,
+                "strike": 800,
+                "option_price": 2.4,
+                "option_type": "PE",
+                "expiry": "2026-06-30",
+            }
+        ]
+    ),
+) -> dict[str, object]:
+    try:
+        greeks = greeks_service.estimate(
+            spot_price=float(payload["spot_price"]),
+            strike=float(payload["strike"]),
+            option_price=float(payload["option_price"]),
+            option_type=str(payload["option_type"]),
+            expiry=payload.get("expiry"),
+        )
+        return {"status": "ok", "greeks": greeks.to_dict()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/research/option-quality",
+    tags=["10 Research"],
+    summary="Score an option contract for buying quality",
+    description="Applies the same option-quality gate used by the scanner: delta, theta, IV, expiry, spread, and premium noise.",
+)
+def score_option_quality(
+    payload: dict[str, object] = Body(
+        examples=[
+            {
+                "spot_price": 796,
+                "entry_price": 2.4,
+                "side": "BUY",
+                "contract": {
+                    "tradingsymbol": "BANKNIFTY2670758000PE",
+                    "exchange": "NFO",
+                    "name": "BANKNIFTY",
+                    "expiry": "2026-06-30",
+                    "strike": 800,
+                    "option_type": "PE",
+                    "lot_size": 550,
+                    "last_price": 2.4,
+                    "bid": 2.3,
+                    "ask": 2.4,
+                    "open_interest": 3550800,
+                    "volume": 2090550,
+                },
+            }
+        ]
+    ),
+) -> dict[str, object]:
+    try:
+        contract_payload = payload.get("contract") or payload
+        if not isinstance(contract_payload, dict):
+            raise ValueError("contract must be an object")
+        contract = OptionContract(
+            tradingsymbol=str(contract_payload.get("tradingsymbol") or ""),
+            exchange=str(contract_payload.get("exchange") or settings.option_exchange),
+            instrument_token=int(contract_payload["instrument_token"]) if contract_payload.get("instrument_token") is not None else None,
+            name=str(contract_payload.get("name") or payload.get("symbol") or ""),
+            expiry=str(contract_payload.get("expiry") or ""),
+            strike=float(contract_payload.get("strike") or 0),
+            option_type=str(contract_payload.get("option_type") or contract_payload.get("instrument_type") or ""),
+            lot_size=int(contract_payload.get("lot_size") or 1),
+            last_price=float(contract_payload.get("last_price") or payload.get("entry_price") or 0),
+            open_interest=float(contract_payload.get("open_interest") or 0),
+            volume=float(contract_payload.get("volume") or 0),
+            bid=float(contract_payload.get("bid") or 0),
+            ask=float(contract_payload.get("ask") or 0),
+        )
+        evaluation = option_quality_service.evaluate(
+            spot_price=float(payload["spot_price"]),
+            contract=contract,
+            entry_price=float(payload.get("entry_price") or contract.last_price),
+            side=str(payload.get("side") or "BUY"),
+        )
+        return {"status": "ok", "evaluation": evaluation}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/research/backtest",
+    tags=["10 Research"],
+    summary="Replay stored candles against directional option-buying rules",
+    description=(
+        "Runs an underlying-candle rule replay. This improves scanner filters, but exact option P&L still needs "
+        "historical option-chain quotes, bid/ask, IV, and Greeks snapshots."
+    ),
+)
+def run_research_backtest(
+    payload: dict[str, object] = Body(
+        examples=[
+            {
+                "symbol": "NIFTY",
+                "timeframe": "5minute",
+                "side": "BUY",
+                "direction": "BOTH",
+                "horizon_candles": 12,
+                "limit": 2000,
+            }
+        ]
+    ),
+) -> dict[str, object]:
+    try:
+        return backtest_service.run(
+            symbol=str(payload.get("symbol") or "NIFTY"),
+            timeframe=str(payload.get("timeframe") or "5minute"),
+            side=str(payload.get("side") or "BUY"),
+            direction=str(payload.get("direction") or "BOTH"),
+            horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
+            limit=int(payload.get("limit") or 2000),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/research/backtest/options",
+    tags=["10 Research"],
+    summary="Replay strategy on historical option premium candles",
+    description="Uses stored option OHLC candles to simulate real option entry, premium stop loss, target, slippage, and exits.",
+)
+def run_option_premium_backtest(
+    payload: dict[str, object] = Body(
+        examples=[
+            {
+                "symbol": "NIFTY",
+                "timeframe": "5minute",
+                "direction": "BOTH",
+                "horizon_candles": 12,
+                "limit": 3000,
+            }
+        ]
+    ),
+) -> dict[str, object]:
+    try:
+        return backtest_service.run_option_premium(
+            symbol=str(payload.get("symbol") or "NIFTY"),
+            timeframe=str(payload.get("timeframe") or "5minute"),
+            direction=str(payload.get("direction") or "BOTH"),
+            horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
+            limit=int(payload.get("limit") or 3000),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/research/walk-forward",
+    tags=["10 Research"],
+    summary="Run walk-forward option-premium validation",
+    description="Splits historical data into train/test periods and validates out-of-sample option-premium performance.",
+)
+def run_walk_forward_validation(
+    payload: dict[str, object] = Body(
+        examples=[
+            {
+                "symbol": "NIFTY",
+                "timeframe": "5minute",
+                "direction": "BOTH",
+                "horizon_candles": 12,
+                "limit": 3000,
+            }
+        ]
+    ),
+) -> dict[str, object]:
+    try:
+        return backtest_service.run_walk_forward(
+            symbol=str(payload.get("symbol") or "NIFTY"),
+            timeframe=str(payload.get("timeframe") or "5minute"),
+            direction=str(payload.get("direction") or "BOTH"),
+            horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
+            limit=int(payload.get("limit") or 3000),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/research/strategy-edge/validate",
+    tags=["10 Research"],
+    summary="Validate and save measured strategy edge",
+    description="Runs walk-forward validation, stores the result, and makes it available to the optional scanner edge guard.",
+)
+def validate_strategy_edge(
+    payload: dict[str, object] = Body(
+        examples=[
+            {
+                "symbol": "NIFTY",
+                "timeframe": "5minute",
+                "direction": "CALL",
+                "limit": 3000,
+            }
+        ]
+    ),
+) -> dict[str, object]:
+    try:
+        return strategy_edge_service.validate(
+            symbol=str(payload.get("symbol") or "NIFTY"),
+            timeframe=str(payload.get("timeframe") or "5minute"),
+            direction=str(payload.get("direction") or "BOTH"),
+            limit=int(payload.get("limit") or 3000),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/research/strategy-edge", tags=["10 Research"], summary="List recent saved strategy edge validations")
+def list_strategy_edge(limit: int = 50) -> dict[str, object]:
+    rows = strategy_edge_service.recent(limit=limit)
+    return {"count": len(rows), "validations": rows}
+
+
+@app.post(
+    "/research/strategy-ranking",
+    tags=["10 Research"],
+    summary="Rank symbols and directions by measured walk-forward edge",
+    description="Runs/saves strategy validations and returns the highest expectancy setups first.",
+)
+def rank_strategy_edge(
+    payload: dict[str, object] = Body(
+        examples=[
+            {
+                "symbols": "BANKNIFTY",
+                "directions": "CALL,PUT",
+                "timeframe": "5minute",
+                "limit": 3000,
+            }
+        ]
+    ),
+) -> dict[str, object]:
+    symbols = parse_symbol_list(payload.get("symbols"))
+    direction_value = payload.get("directions") or "CALL,PUT"
+    directions = [item.strip().upper() for item in str(direction_value).split(",") if item.strip()]
+    rows: list[dict[str, object]] = []
+    for symbol in symbols:
+        for direction in directions:
+            try:
+                rows.append(
+                    strategy_edge_service.validate(
+                        symbol=symbol,
+                        timeframe=str(payload.get("timeframe") or "5minute"),
+                        direction=direction,
+                        limit=int(payload.get("limit") or 3000),
+                    )
+                )
+            except Exception as exc:
+                rows.append({"symbol": symbol, "direction": direction, "passed": False, "reasons": [str(exc)], "summary": {}})
+    ranked = sorted(
+        rows,
+        key=lambda row: (
+            bool(row.get("passed")),
+            float((row.get("summary") or {}).get("expectancy_pct") or 0),
+            float((row.get("summary") or {}).get("profit_factor") or 0),
+        ),
+        reverse=True,
+    )
+    return {"count": len(ranked), "ranked": ranked}
+
+
+@app.post(
+    "/research/option-history/import",
+    tags=["10 Research"],
+    summary="Import historical option quote snapshots",
+    description="Stores historical option-chain quotes, IV, and Greeks snapshots in MySQL so exact option backtests can be built from real option history.",
+)
+def import_option_history(
+    payload: dict[str, object] = Body(
+        examples=[
+            {
+                "snapshots": [
+                    {
+                        "underlying": "BANKNIFTY",
+                        "tradingsymbol": "BANKNIFTY2670758000PE",
+                        "exchange": "NFO",
+                        "timestamp": "2026-06-30 12:15:00",
+                        "expiry": "2026-06-30",
+                        "strike": 800,
+                        "option_type": "PE",
+                        "last_price": 2.4,
+                        "bid": 2.3,
+                        "ask": 2.4,
+                        "iv": 0.22,
+                        "delta": -0.48,
+                        "gamma": 0.03,
+                        "theta": -0.35,
+                        "vega": 0.07,
+                        "oi": 3550800,
+                        "volume": 2090550,
+                    }
+                ]
+            }
+        ]
+    ),
+) -> dict[str, object]:
+    try:
+        rows = payload.get("snapshots")
+        if not isinstance(rows, list):
+            raise ValueError("snapshots must be a list")
+        return option_history_repository.import_snapshots([row for row in rows if isinstance(row, dict)])
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get(
+    "/research/option-history",
+    tags=["10 Research"],
+    summary="List stored historical option quote snapshots",
+)
+def list_option_history(underlying: str | None = None, limit: int = 20) -> dict[str, object]:
+    records = option_history_repository.latest_snapshots(underlying=underlying, limit=limit)
+    return {
+        "count": len(records),
+        "total_snapshots": option_history_repository.count_snapshots(underlying),
+        "snapshots": [option_quote_snapshot_to_dict(record) for record in records],
+    }
 
 
 @app.get("/signals", tags=["03 Scanner"], summary="Generate and save ranked signals")
@@ -379,15 +1316,15 @@ def get_signals(side: str = "BUY", limit: int = 10) -> list[dict[str, object]]:
     "/scanner/opportunities",
     tags=["03 Scanner"],
     summary="Scan option opportunities and save them to DB",
-    description="Use this for manual scanning. Example: `/scanner/opportunities?side=BUY&symbols=NIFTY,BANKNIFTY,HDFCBANK&limit=3`.",
+    description="Use this for manual Bank Nifty scanning. Example: `/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3`.",
 )
-def get_opportunities(side: str = "BUY", symbols: str | None = None, limit: int = 10) -> dict[str, object]:
+def get_opportunities(side: str = "BUY", symbols: str | None = None, limit: int = 10, order_mode: str = "paper") -> dict[str, object]:
     scanner_service = get_scanner_service()
     symbol_list = [item.strip().upper() for item in symbols.split(",")] if symbols else None
-    recommendations = scanner_service.scan_symbols(symbols=symbol_list, side=side.upper())
+    recommendations = scanner_service.scan_symbols(symbols=symbol_list, side=side.upper(), order_mode=order_mode.lower())
     saved_ids = [opportunity_repository.save_opportunity(signal).id for signal in recommendations[:limit]]
     return {
-        "mode": "live" if settings.live_trading_mode else "paper",
+        "mode": order_mode.lower(),
         "market_data": type(scanner_service.feed).__name__,
         "kite_access_token": bool(load_access_token()),
         "side": side.upper(),
@@ -404,10 +1341,10 @@ def get_opportunities(side: str = "BUY", symbols: str | None = None, limit: int 
     summary="Explain why symbols passed or failed scanner gates",
     description="Use after `/scanner/opportunities` when a symbol is not appearing or when a signal needs explanation.",
 )
-def get_scanner_diagnostics(side: str = "BUY", symbols: str | None = None, limit: int = 25) -> dict[str, object]:
+def get_scanner_diagnostics(side: str = "BUY", symbols: str | None = None, limit: int = 25, order_mode: str = "paper") -> dict[str, object]:
     scanner_service = get_scanner_service()
     symbol_list = [item.strip().upper() for item in symbols.split(",")] if symbols else None
-    diagnostics = scanner_service.scan_with_diagnostics(symbols=symbol_list, side=side.upper())
+    diagnostics = scanner_service.scan_with_diagnostics(symbols=symbol_list, side=side.upper(), order_mode=order_mode.lower())
     rows: list[dict[str, object]] = []
     for item in diagnostics[:limit]:
         row = dict(item)
@@ -415,7 +1352,7 @@ def get_scanner_diagnostics(side: str = "BUY", symbols: str | None = None, limit
         row["signal"] = asdict(signal) if signal is not None else None
         rows.append(row)
     return {
-        "mode": "live" if settings.live_trading_mode else "paper",
+        "mode": order_mode.lower(),
         "market_data": type(scanner_service.feed).__name__,
         "kite_access_token": bool(load_access_token()),
         "use_kite_market_data": settings.use_kite_market_data,
@@ -460,12 +1397,72 @@ def place_order(
     try:
         signal_payload = payload.get("signal")
         if not isinstance(signal_payload, dict):
-            signal_payload = {key: value for key, value in payload.items() if key != "confirm_live"}
+            signal_payload = {key: value for key, value in payload.items() if key not in {"confirm_live", "opportunity_id"}}
         signal = Signal(**signal_payload)  # type: ignore[arg-type]
         confirm_live = bool(payload.get("confirm_live", False))
-        return get_order_service().place_signal_order(signal, confirm_live=confirm_live)
+        opportunity_id_value = payload.get("opportunity_id")
+        opportunity_id = int(opportunity_id_value) if opportunity_id_value is not None else None
+        return get_order_service().place_signal_order(signal, confirm_live=confirm_live, opportunity_id=opportunity_id)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/risk/status", tags=["04 Orders"], summary="Check daily risk guard status")
+def get_risk_status() -> dict[str, object]:
+    return risk_management_service.evaluate_entry()
+
+
+@app.get("/trades", tags=["04 Orders"], summary="List actual paper/live trade lifecycle records")
+def list_trades(status: str | None = None, limit: int = 100) -> dict[str, object]:
+    records = trade_repository.list_trades(status=status, limit=limit)
+    return {"count": len(records), "trades": [trade_record_to_dict(record) for record in records]}
+
+
+@app.post("/trades/{trade_id}/close", tags=["04 Orders"], summary="Manually close a lifecycle trade")
+def close_trade(
+    trade_id: int,
+    payload: dict[str, object] = Body(examples=[{"outcome": "target_1", "exit_price": 115, "notes": "Manual paper exit"}]),
+) -> dict[str, object]:
+    outcome = str(payload.get("outcome") or "")
+    exit_price = payload.get("exit_price")
+    if not outcome:
+        raise HTTPException(status_code=400, detail="outcome is required")
+    if exit_price is None:
+        raise HTTPException(status_code=400, detail="exit_price is required")
+    try:
+        record = trade_repository.close_trade(
+            trade_id,
+            outcome=outcome,
+            exit_price=float(exit_price),
+            notes=str(payload.get("notes") or ""),
+        )
+        return {"trade": trade_record_to_dict(record)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/trades/sync", tags=["04 Orders"], summary="Sync open live trades with Kite order status")
+def sync_live_trades(payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100}])) -> dict[str, object]:
+    payload = payload or {}
+    try:
+        return broker_sync_service.sync_open_trades(limit=int(payload.get("limit") or 100))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/trades/evaluate-exits", tags=["04 Orders"], summary="Auto square-off open trades at target or stop")
+def evaluate_trade_exits(payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100}])) -> dict[str, object]:
+    payload = payload or {}
+    try:
+        return trade_exit_service.evaluate_once(limit=int(payload.get("limit") or 100))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/alerts/test", tags=["01 System"], summary="Send a test Telegram alert if configured")
+def send_test_alert(payload: dict[str, object] | None = Body(default=None, examples=[{"message": "AI Option Trader test alert"}])) -> dict[str, object]:
+    payload = payload or {}
+    return notification_service.send(str(payload.get("message") or "AI Option Trader test alert"))
 
 
 @app.post(
@@ -479,21 +1476,20 @@ async def start_auto_trader(
         default=None,
         examples=[
             {
+                "order_mode": "paper",
                 "side": "BUY",
-                "symbols": "NIFTY,BANKNIFTY,HDFCBANK",
-                "interval_seconds": 5,
-                "limit": 3,
-                "place_orders": False,
+                "symbols": "BANKNIFTY",
+                "interval_seconds": 30,
+                "limit": 5,
                 "monitor_outcomes": True,
                 "outcome_interval_seconds": 30,
             },
             {
+                "order_mode": "live",
                 "side": "BUY",
-                "symbols": "NIFTY,BANKNIFTY",
-                "interval_seconds": 5,
+                "symbols": "BANKNIFTY",
+                "interval_seconds": 30,
                 "limit": 1,
-                "place_orders": True,
-                "confirm_live": False,
                 "monitor_outcomes": True,
             },
         ],
@@ -507,13 +1503,15 @@ async def start_auto_trader(
     elif isinstance(symbols_value, list):
         symbols = [str(item).strip().upper() for item in symbols_value if str(item).strip()]
 
+    order_mode = str(payload.get("order_mode") or settings.default_order_mode or "paper").lower()
     status = auto_trader_service.start(
         side=str(payload.get("side") or "BUY"),
         symbols=symbols,
         interval_seconds=int(payload.get("interval_seconds") or settings.scanner_interval_seconds),
         limit=int(payload.get("limit") or 5),
-        place_orders=bool(payload.get("place_orders", False)),
-        confirm_live=bool(payload.get("confirm_live", False)),
+        place_orders=bool(payload.get("place_orders", True)),
+        confirm_live=bool(payload.get("confirm_live", order_mode == "live")),
+        order_mode=order_mode,
     )
     if bool(payload.get("monitor_outcomes", True)):
         opportunity_outcome_service.start(interval_seconds=int(payload.get("outcome_interval_seconds") or 30))
@@ -668,9 +1666,9 @@ def scan_once_auto_trader(
         examples=[
             {
                 "side": "BUY",
-                "symbols": "NIFTY,BANKNIFTY",
+                "symbols": "BANKNIFTY",
                 "limit": 3,
-                "place_orders": False,
+                "order_mode": "paper",
             }
         ],
     ),
@@ -689,7 +1687,8 @@ def scan_once_auto_trader(
             "interval_seconds": int(payload.get("interval_seconds") or settings.scanner_interval_seconds),
             "limit": int(payload.get("limit") or 5),
             "place_orders": bool(payload.get("place_orders", False)),
-            "confirm_live": bool(payload.get("confirm_live", False)),
+            "confirm_live": False,
+            "order_mode": str(payload.get("order_mode") or settings.default_order_mode or "paper").lower(),
         }
     return auto_trader_service.scan_once()
 

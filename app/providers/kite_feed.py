@@ -5,6 +5,7 @@ from typing import Any, Dict, List
 
 from app.config import settings
 from app.providers.token_store import load_access_token
+from app.services.database import Candle, get_session
 from app.services.indicator_service import compute_ema, compute_macd, compute_rsi
 
 try:
@@ -35,7 +36,7 @@ class KiteFeed:
             self.client = None
         else:
             self.client = KiteConnect(api_key=settings.kite_api_key)
-            access_token = settings.kite_access_token or load_access_token()
+            access_token = load_access_token() or settings.kite_access_token
             if access_token:
                 try:
                     # Some kite client versions provide set_access_token, others expect direct header.
@@ -81,7 +82,7 @@ class KiteFeed:
         }
 
         if self.client is None:
-            return snapshot
+            return self._stored_snapshot(symbol, snapshot)
 
         # Attempt to fetch LTP via quote() — this expects instrument token or "exchange:tradingsymbol"
         try:
@@ -108,7 +109,7 @@ class KiteFeed:
         try:
             token = self._find_instrument_token(symbol)
             if token is None:
-                return snapshot
+                return self._stored_snapshot(symbol, snapshot)
             snapshot["instrument_token"] = token
             now = datetime.utcnow()
             to_dt = now
@@ -166,6 +167,8 @@ class KiteFeed:
         except Exception:
             pass
 
+        if not snapshot.get("is_real_data"):
+            return self._stored_snapshot(symbol, snapshot)
         return snapshot
 
     def get_instruments(self, exchange: str) -> List[Dict[str, Any]]:
@@ -192,6 +195,77 @@ class KiteFeed:
             if str(item.get("tradingsymbol", "")).upper() == exchange_symbol:
                 return self._safe_int(item.get("instrument_token"), None)  # type: ignore
         return None
+
+    def _stored_snapshot(self, symbol: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        candles = self._recent_stored_candles(symbol)
+        if len(candles) < 26:
+            return snapshot
+
+        closes = [float(c["close"]) for c in candles]
+        highs = [float(c["high"]) for c in candles]
+        lows = [float(c["low"]) for c in candles]
+        volumes = [float(c.get("volume", 0.0)) for c in candles]
+        rsi = compute_rsi(closes)[-1]
+        ema_9 = compute_ema(closes, 9)[-1]
+        ema_21 = compute_ema(closes, 21)[-1]
+        macd, signal = compute_macd(closes)
+        typical_price_volume = [
+            ((highs[idx] + lows[idx] + closes[idx]) / 3) * volumes[idx]
+            for idx in range(min(len(highs), len(lows), len(closes), len(volumes)))
+        ]
+        volume_sum = sum(volumes[-20:])
+        if volume_sum > 0:
+            vwap = sum(typical_price_volume[-20:]) / volume_sum
+        else:
+            typical_prices = [(highs[idx] + lows[idx] + closes[idx]) / 3 for idx in range(min(len(highs), len(lows), len(closes)))]
+            vwap = sum(typical_prices[-20:]) / max(len(typical_prices[-20:]), 1)
+        avg_volume = sum(volumes[-21:-1]) / max(len(volumes[-21:-1]), 1)
+        stored = {
+            **snapshot,
+            "source": "stored_candles",
+            "is_real_data": True,
+            "price": closes[-1],
+            "candles": candles,
+            "rsi": int(rsi),
+            "macd": round(macd[-1], 4) if macd else 0.0,
+            "macd_signal": round(signal[-1], 4) if signal else 0.0,
+            "macd_positive": bool(macd and signal and macd[-1] > signal[-1]),
+            "ema_9": round(ema_9, 2),
+            "ema_21": round(ema_21, 2),
+            "ema_alignment": ema_9 > ema_21,
+            "vwap": round(vwap, 2),
+            "vwap_above_price": closes[-1] > vwap,
+            "volume_confirmed": volumes[-1] > avg_volume * 1.15 if avg_volume else False,
+            "adx": self._simple_trend_strength(closes),
+            "trend_bullish": closes[-1] >= ema_21 and ema_9 >= ema_21,
+        }
+        stored["market_context"] = "strong" if stored["adx"] >= 20 and stored["volume_confirmed"] else "neutral"
+        stored.update(self._daily_levels(candles))
+        return stored
+
+    def _recent_stored_candles(self, symbol: str) -> List[Dict[str, Any]]:
+        session = get_session()
+        try:
+            rows = (
+                session.query(Candle)
+                .filter(Candle.symbol == symbol.upper(), Candle.timeframe == "5minute")
+                .order_by(Candle.timestamp.desc())
+                .limit(160)
+                .all()
+            )
+            return [
+                {
+                    "date": row.timestamp.isoformat(sep=" ") if row.timestamp else "",
+                    "open": float(row.open_price),
+                    "high": float(row.high_price),
+                    "low": float(row.low_price),
+                    "close": float(row.close_price),
+                    "volume": float(row.volume or 0.0),
+                }
+                for row in reversed(rows)
+            ]
+        finally:
+            session.close()
 
     def _kite_symbol(self, symbol: str) -> str:
         raw_symbol = symbol.split(":", 1)[-1].upper()

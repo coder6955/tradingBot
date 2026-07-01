@@ -8,8 +8,10 @@ from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.models import Signal
+from app.services.notification_service import NotificationService
 from app.services.opportunity_repository import OpportunityRepository
 from app.services.order_service import OrderService
+from app.services.risk_management_service import RiskManagementService
 from app.services.scanner_service import ScannerService
 
 
@@ -25,10 +27,14 @@ class AutoTraderService:
         scanner_factory: ScannerFactory,
         order_service_factory: OrderServiceFactory,
         opportunity_repository: OpportunityRepository | None = None,
+        risk_management_service: RiskManagementService | None = None,
+        notification_service: NotificationService | None = None,
     ) -> None:
         self.scanner_factory = scanner_factory
         self.order_service_factory = order_service_factory
         self.opportunity_repository = opportunity_repository
+        self.risk_management_service = risk_management_service or RiskManagementService()
+        self.notification_service = notification_service or NotificationService()
         self.task: asyncio.Task[None] | None = None
         self.running = False
         self.config: dict[str, Any] = {}
@@ -50,6 +56,7 @@ class AutoTraderService:
         limit: int = 5,
         place_orders: bool = False,
         confirm_live: bool = False,
+        order_mode: str | None = None,
     ) -> dict[str, Any]:
         if self.running:
             return self.status()
@@ -62,9 +69,11 @@ class AutoTraderService:
             "limit": max(1, int(limit)),
             "place_orders": bool(place_orders),
             "confirm_live": bool(confirm_live),
+            "order_mode": (order_mode or settings.default_order_mode or "paper").lower(),
         }
         self.running = True
         self.task = asyncio.create_task(self._run())
+        self.notification_service.send(f"Auto trader started: side={side.upper()}, symbols={symbols or 'default'}, interval={max(1, int(interval))}s")
         return self.status()
 
     async def stop(self) -> dict[str, Any]:
@@ -79,6 +88,7 @@ class AutoTraderService:
         return self.status()
 
     def status(self) -> dict[str, Any]:
+        order_mode = str(self.config.get("order_mode") or settings.default_order_mode or "paper").lower()
         return {
             "running": self.running,
             "config": self.config,
@@ -86,8 +96,10 @@ class AutoTraderService:
             "latest_count": len(self.latest_opportunities),
             "execution_count": len(self.executions),
             "error_count": len(self.errors),
-            "mode": "live" if settings.live_trading_mode else "paper",
+            "mode": order_mode,
             "live_ordering_requires_confirm_live": True,
+            "risk_limits_apply_to_order_mode": order_mode == "live",
+            "risk": self.risk_management_service.evaluate_entry(),
         }
 
     async def _run(self) -> None:
@@ -109,21 +121,54 @@ class AutoTraderService:
         opportunities = scanner.scan_symbols(
             symbols=symbols,
             side=str(self.config.get("side", "BUY")),
+            order_mode=str(self.config.get("order_mode") or "paper"),
         )
         limited = opportunities[: int(self.config.get("limit", 5))]
         self.latest_opportunities = [asdict(signal) for signal in limited]
         saved_ids: list[int] = []
+        saved_id_by_order_key: dict[str, int] = {}
         if self.opportunity_repository is not None:
             for signal in limited:
-                saved_ids.append(self.opportunity_repository.save_opportunity(signal).id)
+                saved = self.opportunity_repository.save_opportunity(signal)
+                saved_ids.append(saved.id)
+                saved_id_by_order_key[self._order_key(signal)] = saved.id
         self.last_scan_at = self._now_ist()
 
         placed: list[dict[str, Any]] = []
         if self.config.get("place_orders"):
+            order_mode = str(self.config.get("order_mode") or "paper").lower()
             for signal in limited:
-                result = self._place_once(signal)
-                if result is not None:
-                    placed.append(result)
+                try:
+                    result = self._place_once(signal, opportunity_id=saved_id_by_order_key.get(self._order_key(signal)))
+                    if result is not None:
+                        placed.append(result)
+                except Exception as exc:
+                    message = str(exc)
+                    if order_mode == "live" and message.startswith("risk guard blocked order:"):
+                        try:
+                            shadow = self._place_shadow_paper(
+                                signal,
+                                opportunity_id=saved_id_by_order_key.get(self._order_key(signal)),
+                                reason=message,
+                            )
+                            placed.append(shadow)
+                        except Exception as shadow_exc:
+                            self.errors.append(
+                                {
+                                    "time": self._now_ist(),
+                                    "error": str(shadow_exc),
+                                    "shadow_reason": message,
+                                    "order_key": self._order_key(signal),
+                                }
+                            )
+                    else:
+                        self.errors.append(
+                            {
+                                "time": self._now_ist(),
+                                "error": message,
+                                "order_key": self._order_key(signal),
+                            }
+                        )
 
         return {
             "last_scan_at": self.last_scan_at,
@@ -133,8 +178,8 @@ class AutoTraderService:
             "placed": placed,
         }
 
-    def _place_once(self, signal: Signal) -> dict[str, Any] | None:
-        order_key = "|".join(
+    def _order_key(self, signal: Signal) -> str:
+        return "|".join(
             [
                 str(signal.tradingsymbol or signal.symbol),
                 signal.side.upper(),
@@ -143,14 +188,21 @@ class AutoTraderService:
                 str(signal.strike or ""),
             ]
         )
-        if order_key in self.seen_order_keys:
+
+    def _place_once(self, signal: Signal, opportunity_id: int | None = None) -> dict[str, Any] | None:
+        order_key = self._order_key(signal)
+        order_mode = str(self.config.get("order_mode") or "paper").lower()
+        if order_mode == "live" and order_key in self.seen_order_keys:
             return None
 
-        self.seen_order_keys.add(order_key)
+        if order_mode == "live":
+            self.seen_order_keys.add(order_key)
         service = self.order_service_factory()
         result = service.place_signal_order(
             signal,
             confirm_live=bool(self.config.get("confirm_live", False)),
+            opportunity_id=opportunity_id,
+            order_mode=str(self.config.get("order_mode") or "paper"),
         )
         execution = {
             "time": self._now_ist(),
@@ -159,4 +211,24 @@ class AutoTraderService:
             "result": result,
         }
         self.executions.append(execution)
+        self.notification_service.send(f"Auto trader placed {result.get('status')} order for {signal.tradingsymbol or signal.symbol}")
+        return execution
+
+    def _place_shadow_paper(self, signal: Signal, opportunity_id: int | None = None, reason: str = "") -> dict[str, Any]:
+        service = self.order_service_factory()
+        result = service.place_signal_order(
+            signal,
+            confirm_live=False,
+            opportunity_id=opportunity_id,
+            order_mode="paper",
+        )
+        result = {**result, "shadow_for_live": True, "shadow_reason": reason}
+        execution = {
+            "time": self._now_ist(),
+            "order_key": self._order_key(signal),
+            "signal": asdict(signal),
+            "result": result,
+        }
+        self.executions.append(execution)
+        self.notification_service.send(f"Auto trader recorded paper shadow for {signal.tradingsymbol or signal.symbol}")
         return execution

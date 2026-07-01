@@ -55,6 +55,12 @@ class PriceActionService:
         else:
             reasons.append("price has not confirmed breakout/rejection around key levels")
 
+        candle_confirmed = self._candle_confirmed(snapshot, levels, bullish)
+        if candle_confirmed:
+            score += 8
+        elif settings.require_candle_confirmation:
+            reasons.append(f"{settings.candle_confirmation_timeframe} candle close has not confirmed trade direction")
+
         rsi = float(snapshot.get("rsi") or 50.0)
         if bullish and 48 <= rsi <= 68:
             score += 15
@@ -63,16 +69,50 @@ class PriceActionService:
         else:
             reasons.append("RSI is outside preferred momentum zone")
 
-        passed = score >= 55 and not (side.upper() == "BUY" and room < min_room)
-        if not passed:
-            reasons.append("price action score is below threshold")
+        chop = self._banknifty_chop_reason(snapshot, levels)
+        if chop:
+            reasons.append(chop)
+            score = max(0, score - 20)
+
+        hard_block_reasons: List[str] = []
+        if side.upper() == "BUY" and room < min_room:
+            hard_block_reasons.append("directional option buying has insufficient room to nearest level")
+        if chop:
+            hard_block_reasons.append(chop)
+        passed = not hard_block_reasons
+        if score < settings.min_price_action_score:
+            reasons.append("price action score is below preferred threshold")
 
         return {
             "score": min(100, score),
             "passed": passed,
             "reasons": reasons,
-            "details": {"levels": levels, "room_to_level_pct": round(room * 100, 2)},
+            "details": {
+                "levels": levels,
+                "room_to_level_pct": round(room * 100, 2),
+                "candle_confirmed": candle_confirmed,
+                "chop_filter": chop or "",
+                "hard_block": bool(hard_block_reasons),
+                "hard_block_reasons": list(dict.fromkeys(hard_block_reasons)),
+            },
         }
+
+    def _banknifty_chop_reason(self, snapshot: Dict[str, Any], levels: Dict[str, float]) -> str:
+        if str(snapshot.get("symbol") or "").upper() != "BANKNIFTY":
+            return ""
+        price = float(snapshot.get("price") or 0.0)
+        adx = float(snapshot.get("adx") or 0.0)
+        cpr_top = float(levels.get("cpr_top") or 0.0)
+        cpr_bottom = float(levels.get("cpr_bottom") or 0.0)
+        day_high = float(levels.get("day_high") or 0.0)
+        day_low = float(levels.get("day_low") or 0.0)
+        inside_cpr = cpr_bottom > 0 and cpr_top > 0 and cpr_bottom <= price <= cpr_top
+        day_range_pct = ((day_high - day_low) / price) * 100 if price > 0 and day_high > day_low else 0.0
+        if inside_cpr and adx < 18:
+            return "Bank Nifty is inside CPR with weak trend strength"
+        if adx < 12 and day_range_pct < 0.35 and not bool(snapshot.get("volume_confirmed")):
+            return "Bank Nifty is too compressed/choppy for directional option buying"
+        return ""
 
     def _levels(self, snapshot: Dict[str, Any]) -> Dict[str, float]:
         pdh = float(snapshot.get("previous_day_high") or 0.0)
@@ -112,3 +152,14 @@ class PriceActionService:
         if bullish:
             return bool((pivot and price >= pivot) or (cpr_top and price >= cpr_top))
         return bool((pivot and price <= pivot) or (cpr_bottom and price <= cpr_bottom))
+
+    def _candle_confirmed(self, snapshot: Dict[str, Any], levels: Dict[str, float], bullish: bool) -> bool:
+        close = float(snapshot.get("last_candle_close") or snapshot.get("candle_close") or snapshot.get("price") or 0.0)
+        if close <= 0:
+            return False
+        pivot = levels.get("pivot", 0.0)
+        cpr_top = levels.get("cpr_top", 0.0)
+        cpr_bottom = levels.get("cpr_bottom", 0.0)
+        if bullish:
+            return bool((pivot and close >= pivot) or (cpr_top and close >= cpr_top))
+        return bool((pivot and close <= pivot) or (cpr_bottom and close <= cpr_bottom))

@@ -102,6 +102,14 @@ class KiteProvider:
         self._ensure_ready()
         return self.client.positions()  # type: ignore
 
+    def orders(self) -> List[Dict[str, Any]]:
+        self._ensure_ready()
+        return self.client.orders()  # type: ignore
+
+    def order_history(self, order_id: str) -> List[Dict[str, Any]]:
+        self._ensure_ready()
+        return self.client.order_history(order_id)  # type: ignore
+
     def place_order(
         self,
         tradingsymbol: str,

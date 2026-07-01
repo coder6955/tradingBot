@@ -1,38 +1,35 @@
 from __future__ import annotations
 
+import logging
 from typing import List
 
 from app.models import Signal
 from app.config import settings
 from app.services.indicator_scoring_service import IndicatorScoringService
+from app.services.day_type_service import DayTypeService
 from app.services.mock_market_feed import MockMarketFeed
 from app.providers.kite_feed import KiteFeed
 from app.providers.token_store import load_access_token
 from app.services.market_regime_service import MarketRegimeService
 from app.services.option_chain_service import OptionChainService
+from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
+from app.services.option_quality_service import OptionQualityService
+from app.services.outcome_learning_service import OutcomeLearningService
 from app.services.price_action_service import PriceActionService
 from app.services.signal_service import SignalService
+from app.services.strategy_edge_service import StrategyEdgeService
+from app.services.time_bucket_edge_service import TimeBucketEdgeService
 from app.services.trade_setup_service import OptionContract, TradeSetupService
+
+
+logger = logging.getLogger(__name__)
 
 
 class ScannerService:
     """Produce ranked trade recommendations using mock feed data and indicator scoring."""
 
-    DEFAULT_UNIVERSE = [
-        "NIFTY",
-        "BANKNIFTY",
-        "FINNIFTY",
-        "RELIANCE",
-        "TCS",
-        "INFY",
-        "HDFCBANK",
-        "ICICIBANK",
-        "SBIN",
-        "AXISBANK",
-        "LT",
-        "TATAMOTORS",
-        "MARUTI",
-    ]
+    FOCUS_UNDERLYINGS = {"BANKNIFTY"}
+    DEFAULT_UNIVERSE = ["BANKNIFTY"]
 
     def __init__(
         self,
@@ -43,6 +40,12 @@ class ScannerService:
         market_regime_service: MarketRegimeService | None = None,
         price_action_service: PriceActionService | None = None,
         option_chain_service: OptionChainService | None = None,
+        option_quality_service: OptionQualityService | None = None,
+        strategy_edge_service: StrategyEdgeService | None = None,
+        day_type_service: DayTypeService | None = None,
+        option_premium_confirmation_service: OptionPremiumConfirmationService | None = None,
+        time_bucket_edge_service: TimeBucketEdgeService | None = None,
+        outcome_learning_service: OutcomeLearningService | None = None,
     ) -> None:
         self.signal_service = signal_service or SignalService()
         self.scoring_service = scoring_service or IndicatorScoringService()
@@ -50,6 +53,12 @@ class ScannerService:
         self.market_regime_service = market_regime_service or MarketRegimeService()
         self.price_action_service = price_action_service or PriceActionService()
         self.option_chain_service = option_chain_service or OptionChainService()
+        self.option_quality_service = option_quality_service or OptionQualityService()
+        self.strategy_edge_service = strategy_edge_service or StrategyEdgeService()
+        self.day_type_service = day_type_service or DayTypeService()
+        self.option_premium_confirmation_service = option_premium_confirmation_service or OptionPremiumConfirmationService()
+        self.time_bucket_edge_service = time_bucket_edge_service or TimeBucketEdgeService()
+        self.outcome_learning_service = outcome_learning_service or OutcomeLearningService()
 
         # Market data is independent from live order placement. When Kite data is
         # requested, fail closed instead of silently returning mock opportunities.
@@ -70,8 +79,13 @@ class ScannerService:
         trends: dict[str, str] | None = None,
         market_contexts: dict[str, str] | None = None,
         side: str = "BUY",
+        order_mode: str = "paper",
     ) -> List[Signal]:
-        return [item["signal"] for item in self.scan_with_diagnostics(symbols, scores, confidences, trends, market_contexts, side) if item.get("signal")]
+        return [
+            item["signal"]
+            for item in self.scan_with_diagnostics(symbols, scores, confidences, trends, market_contexts, side, order_mode=order_mode)
+            if item.get("signal")
+        ]
 
     def scan_with_diagnostics(
         self,
@@ -81,6 +95,7 @@ class ScannerService:
         trends: dict[str, str] | None = None,
         market_contexts: dict[str, str] | None = None,
         side: str = "BUY",
+        order_mode: str = "paper",
     ) -> List[dict[str, object]]:
         diagnostics: List[dict[str, object]] = []
         scores = scores or {}
@@ -88,12 +103,20 @@ class ScannerService:
         trends = trends or {}
         market_contexts = market_contexts or {}
         option_instruments = self._get_option_instruments()
-        symbols = symbols or self._derive_scan_universe(option_instruments)
+        symbols = self._focus_symbols(symbols or self._derive_scan_universe(option_instruments))
         market_snapshots = self._market_snapshots()
+        enforce_budget = str(order_mode).lower() == "live"
 
         for symbol in symbols:
             snapshot = self.feed.get_snapshot(symbol)
             if settings.use_kite_market_data and not snapshot.get("is_real_data"):
+                self._log_decision(
+                    symbol=symbol,
+                    accepted=False,
+                    score=0,
+                    reasons=["real Kite market data was not available for this symbol"],
+                    breakdown=self._empty_score_breakdown(),
+                )
                 diagnostics.append(
                     self._diagnostic(
                         symbol,
@@ -122,19 +145,19 @@ class ScannerService:
                 trend=trend,
                 side=side,
                 quotes=chain_quote_map,
+                enforce_budget=enforce_budget,
             )
             if contract is None:
-                if score < settings.min_signal_score:
-                    reasons.append("technical score is below threshold")
                 if not option_instruments:
                     reasons.append("no NFO option instruments available from Kite")
                 else:
                     reasons.append("no matching option contract found")
+                self._log_decision(symbol=symbol, accepted=False, score=score, reasons=reasons, breakdown=self._empty_score_breakdown())
                 diagnostics.append(self._diagnostic(symbol, snapshot, score, trend, market_context, side, None, reasons))
                 continue
 
             entry_price = contract.ask or contract.last_price if side.upper() == "BUY" else contract.bid or contract.last_price
-            prices = self.trade_setup_service.build_prices(entry_price=max(entry_price, 0.05), side=side)
+            prices = self.trade_setup_service.build_prices(entry_price=max(entry_price, 0.05), side=side, underlying=symbol, snapshot=snapshot)
             liquidity_score = self.trade_setup_service.liquidity_score(contract)
             chain_contracts = self.trade_setup_service.build_contracts(option_instruments, symbol, chain_quote_map)
             market_eval = self.market_regime_service.evaluate(
@@ -153,22 +176,46 @@ class ScannerService:
                 selected=contract,
                 contracts=chain_contracts,
             )
-            combined_score = self._final_score(
+            quality_eval = self.option_quality_service.evaluate(
+                spot_price=float(snapshot["price"]),
+                contract=contract,
+                entry_price=prices["entry_price"],
+                side=side,
+            )
+            day_type_eval = self.day_type_service.evaluate(symbol=symbol, trend=trend)
+            premium_eval = self.option_premium_confirmation_service.evaluate(contract=contract, side=side)
+            time_bucket_eval = self.time_bucket_edge_service.evaluate(symbol=symbol, trend=trend)
+            edge_eval = self._strategy_edge_eval(symbol, trend)
+            score_breakdown = self._score_breakdown(
                 technical_score=score,
                 market_score=int(market_eval["score"]),
                 price_score=int(price_eval["score"]),
                 chain_score=int(chain_eval["score"]),
                 liquidity_score=liquidity_score,
+                quality_score=int(quality_eval["score"]),
             )
+            combined_score = int(score_breakdown["score"])
             factor_scores = {
                 "technical": score,
+                "score_breakdown": score_breakdown,
                 "market_regime": market_eval,
                 "price_action": price_eval,
                 "option_chain": chain_eval,
+                "option_quality": quality_eval,
+                "day_type": day_type_eval,
+                "option_premium_confirmation": premium_eval,
+                "time_bucket_edge": time_bucket_eval,
+                "strategy_edge": edge_eval,
                 "liquidity": liquidity_score,
                 "contract": self._contract_payload(contract),
                 "prices": prices,
             }
+            outcome_learning_eval = self.outcome_learning_service.evaluate(
+                symbol=symbol,
+                action=self._action(side, trend),
+                factor_scores=factor_scores,
+            )
+            factor_scores["outcome_learning"] = outcome_learning_eval
             risk_failures = self._gate_failures(
                 combined_score=combined_score,
                 contract=contract,
@@ -177,8 +224,16 @@ class ScannerService:
                 market_eval=market_eval,
                 price_eval=price_eval,
                 chain_eval=chain_eval,
+                quality_eval=quality_eval,
+                day_type_eval=day_type_eval,
+                premium_eval=premium_eval,
+                time_bucket_eval=time_bucket_eval,
+                edge_eval=edge_eval,
+                outcome_learning_eval=outcome_learning_eval,
+                enforce_budget=enforce_budget,
             )
             if risk_failures:
+                self._log_decision(symbol=symbol, accepted=False, score=combined_score, reasons=risk_failures, breakdown=score_breakdown)
                 diagnostics.append(
                     self._diagnostic(
                         symbol,
@@ -233,8 +288,11 @@ class ScannerService:
                     factor_scores=factor_scores,
                     risk_notes=[],
                 )
+                self._log_decision(symbol=symbol, accepted=True, score=combined_score, reasons=[], breakdown=score_breakdown)
                 diagnostics.append(self._diagnostic(symbol, snapshot, combined_score, trend, market_context, side, signal, [], factor_scores))
             else:
+                score_reasons = ["final weighted score is below threshold"]
+                self._log_decision(symbol=symbol, accepted=False, score=combined_score, reasons=score_reasons, breakdown=score_breakdown)
                 diagnostics.append(
                     self._diagnostic(
                         symbol,
@@ -244,7 +302,7 @@ class ScannerService:
                         market_context,
                         side,
                         None,
-                        ["final multi-factor score is below threshold"],
+                        score_reasons,
                         factor_scores,
                     )
                 )
@@ -267,6 +325,10 @@ class ScannerService:
         priority = [symbol for symbol in self.DEFAULT_UNIVERSE if symbol in names]
         remaining = sorted(name for name in names if name and name not in priority)
         return (priority + remaining)[: settings.max_scan_symbols]
+
+    def _focus_symbols(self, symbols: List[str]) -> List[str]:
+        focused = [symbol.upper() for symbol in symbols if symbol.upper() in self.FOCUS_UNDERLYINGS]
+        return focused or self.DEFAULT_UNIVERSE
 
     def _market_snapshots(self) -> dict[str, dict[str, object]]:
         if not settings.use_kite_market_data:
@@ -325,6 +387,46 @@ class ScannerService:
         tradingsymbol = str(item.get("tradingsymbol") or "").upper().replace(" ", "")
         return name == target or tradingsymbol.startswith(target)
 
+    def _score_breakdown(
+        self,
+        technical_score: int,
+        market_score: int,
+        price_score: int,
+        chain_score: int,
+        liquidity_score: int,
+        quality_score: int,
+    ) -> dict[str, object]:
+        capped_trend = min(technical_score, settings.max_trend_momentum_score)
+        weights = {
+            "trend_momentum": 0.18,
+            "market_regime": 0.15,
+            "price_action": 0.24,
+            "option_chain_context": 0.08,
+            "liquidity": 0.15,
+            "option_quality": 0.20,
+        }
+        components = {
+            "trend_momentum": capped_trend,
+            "market_regime": market_score,
+            "price_action": price_score,
+            "option_chain_context": chain_score,
+            "liquidity": liquidity_score,
+            "option_quality": quality_score,
+        }
+        contributions = {key: round(components[key] * value, 2) for key, value in weights.items()}
+        score = min(100, max(0, round(sum(contributions.values()))))
+        return {
+            "score": score,
+            "threshold": settings.min_signal_score,
+            "weights": weights,
+            "components": components,
+            "contributions": contributions,
+            "caps": {
+                "trend_momentum_raw": technical_score,
+                "trend_momentum_capped_at": settings.max_trend_momentum_score,
+            },
+        }
+
     def _final_score(
         self,
         technical_score: int,
@@ -332,15 +434,18 @@ class ScannerService:
         price_score: int,
         chain_score: int,
         liquidity_score: int,
+        quality_score: int,
     ) -> int:
-        score = (
-            technical_score * 0.22
-            + market_score * 0.16
-            + price_score * 0.22
-            + chain_score * 0.25
-            + liquidity_score * 0.15
+        return int(
+            self._score_breakdown(
+                technical_score=technical_score,
+                market_score=market_score,
+                price_score=price_score,
+                chain_score=chain_score,
+                liquidity_score=liquidity_score,
+                quality_score=quality_score,
+            )["score"]
         )
-        return min(100, max(0, round(score)))
 
     def _technical_score(self, snapshot: dict[str, object], trend: str) -> int:
         bullish = trend.lower() == "bullish"
@@ -386,24 +491,82 @@ class ScannerService:
         market_eval: dict[str, object],
         price_eval: dict[str, object],
         chain_eval: dict[str, object],
+        quality_eval: dict[str, object],
+        day_type_eval: dict[str, object],
+        premium_eval: dict[str, object],
+        time_bucket_eval: dict[str, object],
+        edge_eval: dict[str, object],
+        outcome_learning_eval: dict[str, object],
+        enforce_budget: bool = False,
     ) -> list[str]:
-        failures = self.trade_setup_service.risk_checks(combined_score, contract, prices["entry_price"], side)
+        failures = self.trade_setup_service.risk_checks(combined_score, contract, prices["entry_price"], side, enforce_budget=enforce_budget)
         if prices["risk_reward"] < settings.min_risk_reward:
             failures.append("risk/reward is below threshold")
         if int(market_eval["score"]) < settings.min_market_regime_score or not market_eval["passed"]:
             failures.extend(str(reason) for reason in market_eval.get("reasons", []))
-        if int(price_eval["score"]) < settings.min_price_action_score or not price_eval["passed"]:
-            failures.extend(str(reason) for reason in price_eval.get("reasons", []))
-        if int(chain_eval["score"]) < settings.min_option_chain_score or not chain_eval["passed"]:
-            failures.extend(str(reason) for reason in chain_eval.get("reasons", []))
-        if combined_score < settings.min_signal_score:
-            failures.append("final multi-factor score is below threshold")
+        price_details = price_eval.get("details", {}) if isinstance(price_eval.get("details"), dict) else {}
+        if price_details.get("hard_block"):
+            failures.extend(str(reason) for reason in price_details.get("hard_block_reasons", price_eval.get("reasons", [])))
+        if not chain_eval.get("passed", False) and not chain_eval.get("details"):
+            failures.extend(str(reason) for reason in chain_eval.get("reasons", ["option chain data is unavailable"]))
+        if int(quality_eval["score"]) < settings.min_option_quality_score or not quality_eval["passed"]:
+            failures.extend(str(reason) for reason in quality_eval.get("reasons", []))
+        if settings.enable_day_type_filter and not day_type_eval.get("passed", False):
+            failures.extend(str(reason) for reason in day_type_eval.get("reasons", ["day type filter failed"]))
+        if settings.enable_option_premium_confirmation and not premium_eval.get("passed", False):
+            failures.extend(str(reason) for reason in premium_eval.get("reasons", ["option premium confirmation failed"]))
+        if settings.enable_time_bucket_filter and not time_bucket_eval.get("passed", False):
+            failures.extend(str(reason) for reason in time_bucket_eval.get("reasons", ["time bucket edge failed"]))
+        if settings.enable_strategy_edge_guard and not edge_eval.get("passed", False):
+            failures.extend(str(reason) for reason in edge_eval.get("reasons", ["strategy edge guard failed"]))
+        if settings.enable_outcome_learning_guard and not outcome_learning_eval.get("passed", False):
+            failures.extend(str(reason) for reason in outcome_learning_eval.get("reasons", ["outcome learning guard failed"]))
         return list(dict.fromkeys(failures))
+
+    def _log_decision(self, *, symbol: str, accepted: bool, score: int, reasons: list[str], breakdown: dict[str, object]) -> None:
+        payload = {
+            "symbol": symbol,
+            "decision": "accepted" if accepted else "rejected",
+            "score": score,
+            "threshold": settings.min_signal_score,
+            "reasons": reasons,
+            "score_breakdown": breakdown,
+        }
+        logger.info("trade_decision %s", payload)
+
+    def _empty_score_breakdown(self) -> dict[str, object]:
+        return {
+            "score": 0,
+            "threshold": settings.min_signal_score,
+            "weights": {},
+            "components": {},
+            "contributions": {},
+            "caps": {"trend_momentum_capped_at": settings.max_trend_momentum_score},
+        }
+
+    def _strategy_edge_eval(self, symbol: str, trend: str) -> dict[str, object]:
+        if not settings.enable_strategy_edge_guard:
+            return {"enabled": False, "passed": True, "reasons": []}
+        direction = "CALL" if trend.lower() == "bullish" else "PUT"
+        try:
+            result = self.strategy_edge_service.evaluate(symbol=symbol, direction=direction)
+            return {"enabled": True, **result}
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "passed": False,
+                "reasons": [f"strategy edge validation unavailable: {exc}"],
+            }
 
     def _setup_type(self, side: str, trend: str) -> str:
         if side.upper() == "SELL":
             return "credit_put_sell" if trend.lower() == "bullish" else "credit_call_sell"
         return "directional_call_buy" if trend.lower() == "bullish" else "directional_put_buy"
+
+    def _action(self, side: str, trend: str) -> str:
+        if side.upper() == "SELL":
+            return "SELL_PE" if trend.lower() == "bullish" else "SELL_CE"
+        return "BUY_CE" if trend.lower() == "bullish" else "BUY_PE"
 
     def _contract_payload(self, contract: OptionContract) -> dict[str, object]:
         return {

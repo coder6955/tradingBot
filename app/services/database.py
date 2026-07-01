@@ -35,6 +35,30 @@ class Candle(Base):
     volume = Column(Float, nullable=False)
 
 
+class OptionQuoteSnapshot(Base):
+    __tablename__ = "option_quote_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    underlying = Column(String(50), nullable=False, index=True)
+    tradingsymbol = Column(String(100), nullable=False, index=True)
+    exchange = Column(String(20), nullable=False, default="NFO")
+    timestamp = Column(DateTime, nullable=False, index=True)
+    expiry = Column(String(20), nullable=False, index=True)
+    strike = Column(Float, nullable=False, index=True)
+    option_type = Column(String(5), nullable=False, index=True)
+    last_price = Column(Float, nullable=False, default=0.0)
+    bid = Column(Float, nullable=False, default=0.0)
+    ask = Column(Float, nullable=False, default=0.0)
+    implied_volatility = Column(Float, nullable=True)
+    delta = Column(Float, nullable=True)
+    gamma = Column(Float, nullable=True)
+    theta = Column(Float, nullable=True)
+    vega = Column(Float, nullable=True)
+    open_interest = Column(Float, nullable=False, default=0.0)
+    volume = Column(Float, nullable=False, default=0.0)
+
+
 class SignalRecord(Base):
     __tablename__ = "signals"
 
@@ -80,6 +104,57 @@ class OpportunityRecord(Base):
     review_notes = Column(Text, nullable=True)
 
 
+class TradeRecord(Base):
+    __tablename__ = "trades"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    opportunity_id = Column(Integer, nullable=True, index=True)
+    symbol = Column(String(50), nullable=False, index=True)
+    tradingsymbol = Column(String(100), nullable=False, index=True)
+    exchange = Column(String(20), nullable=False, default="NFO")
+    action = Column(String(20), nullable=False, index=True)
+    side = Column(String(10), nullable=False, index=True)
+    mode = Column(String(20), nullable=False, index=True)
+    status = Column(String(30), nullable=False, default="created", index=True)
+    broker_order_id = Column(String(100), nullable=True, index=True)
+    requested_quantity = Column(Integer, nullable=False, default=0)
+    placed_quantity = Column(Integer, nullable=False, default=0)
+    filled_quantity = Column(Integer, nullable=False, default=0)
+    entry_price = Column(Float, nullable=True)
+    average_price = Column(Float, nullable=True)
+    stop_loss = Column(Float, nullable=True)
+    target_1 = Column(Float, nullable=True)
+    target_2 = Column(Float, nullable=True)
+    target_3 = Column(Float, nullable=True)
+    exit_price = Column(Float, nullable=True)
+    pnl = Column(Float, nullable=True)
+    outcome = Column(String(30), nullable=True, index=True)
+    order_response_json = Column(Text, nullable=True)
+    broker_status_json = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+
+
+class StrategyValidationRecord(Base):
+    __tablename__ = "strategy_validations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    strategy_name = Column(String(100), nullable=False, index=True)
+    symbol = Column(String(50), nullable=False, index=True)
+    timeframe = Column(String(20), nullable=False, index=True)
+    direction = Column(String(20), nullable=False, index=True)
+    mode = Column(String(50), nullable=False, index=True)
+    trades = Column(Integer, nullable=False, default=0)
+    win_rate = Column(Float, nullable=False, default=0.0)
+    expectancy_pct = Column(Float, nullable=False, default=0.0)
+    profit_factor = Column(Float, nullable=True)
+    max_drawdown_pct = Column(Float, nullable=False, default=0.0)
+    passed = Column(Integer, nullable=False, default=0, index=True)
+    result_json = Column(Text, nullable=False)
+
+
 def init_db(database_url: Optional[str] = None) -> None:
     global engine, SessionLocal
     url = database_url or settings.database_url
@@ -88,6 +163,8 @@ def init_db(database_url: Optional[str] = None) -> None:
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     Base.metadata.create_all(bind=engine)
     _ensure_opportunity_columns()
+    _ensure_trade_columns()
+    _ensure_strategy_validation_columns()
 
 
 def _ensure_opportunity_columns() -> None:
@@ -103,9 +180,48 @@ def _ensure_opportunity_columns() -> None:
         connection.execute(text("ALTER TABLE opportunities ADD COLUMN failure_tags_json TEXT"))
 
 
+def _ensure_trade_columns() -> None:
+    if engine is None:
+        return
+    inspector = inspect(engine)
+    if "trades" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("trades")}
+    required = {
+        "opportunity_id": "INTEGER",
+        "broker_status_json": "TEXT",
+        "notes": "TEXT",
+        "outcome": "VARCHAR(30)",
+        "pnl": "FLOAT",
+    }
+    with engine.begin() as connection:
+        for column, column_type in required.items():
+            if column not in existing:
+                connection.execute(text(f"ALTER TABLE trades ADD COLUMN {column} {column_type}"))
+
+
+def _ensure_strategy_validation_columns() -> None:
+    if engine is None:
+        return
+    inspector = inspect(engine)
+    if "strategy_validations" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("strategy_validations")}
+    required = {
+        "max_drawdown_pct": "FLOAT",
+        "passed": "INTEGER",
+    }
+    with engine.begin() as connection:
+        for column, column_type in required.items():
+            if column not in existing:
+                connection.execute(text(f"ALTER TABLE strategy_validations ADD COLUMN {column} {column_type}"))
+
+
 def get_session():
     if SessionLocal is None:
         init_db()
     else:
         _ensure_opportunity_columns()
+        _ensure_trade_columns()
+        _ensure_strategy_validation_columns()
     return SessionLocal()

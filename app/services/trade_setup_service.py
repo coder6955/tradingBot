@@ -6,6 +6,7 @@ from math import floor
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.config import settings
+from app.services.account_funds_service import AccountFundsService
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,9 @@ class OptionContract:
 class TradeSetupService:
     """Select liquid option contracts and convert ranked setups into executable plans."""
 
+    def __init__(self, account_funds_service: AccountFundsService | None = None) -> None:
+        self.account_funds_service = account_funds_service or AccountFundsService()
+
     def nearest_expiry(self, instruments: Iterable[Dict[str, Any]], underlying: str) -> Optional[str]:
         expiries: List[date] = []
         for item in instruments:
@@ -51,6 +55,7 @@ class TradeSetupService:
         trend: str,
         side: str = "BUY",
         quotes: Dict[str, Any] | None = None,
+        enforce_budget: bool = False,
     ) -> OptionContract | None:
         option_type = self.option_type_for(trend, side)
         expiry = self.nearest_expiry(instruments, underlying)
@@ -75,6 +80,10 @@ class TradeSetupService:
 
         interval = self._strike_interval(candidates)
         target = self._target_strike(spot_price, option_type, side, interval)
+        if enforce_budget and side.upper() == "BUY":
+            affordable = self._affordable_buy_candidates(candidates)
+            if affordable:
+                return max(affordable, key=lambda contract: self._contract_score(contract, target))
         return max(candidates, key=lambda contract: self._contract_score(contract, target))
 
     def build_contracts(
@@ -123,7 +132,9 @@ class TradeSetupService:
             score += 15
         return min(score, 100)
 
-    def build_prices(self, entry_price: float, side: str) -> Dict[str, float]:
+    def build_prices(self, entry_price: float, side: str, underlying: str | None = None, snapshot: Dict[str, Any] | None = None) -> Dict[str, float]:
+        if (underlying or "").upper() == "BANKNIFTY" and side.upper() == "BUY":
+            return self._banknifty_buy_prices(entry_price, snapshot or {})
         if side.upper() == "SELL":
             stop_loss = entry_price * 1.35
             target_1 = entry_price * 0.75
@@ -147,13 +158,46 @@ class TradeSetupService:
             "risk_reward": round(reward / risk, 2) if risk > 0 else 0.0,
         }
 
+    def _banknifty_buy_prices(self, entry_price: float, snapshot: Dict[str, Any]) -> Dict[str, float]:
+        risk_pct = self._banknifty_premium_risk_pct(snapshot)
+        target_1_pct = risk_pct * 1.45
+        target_2_pct = risk_pct * 2.05
+        target_3_pct = risk_pct * 2.75
+        stop_loss = entry_price * (1 - risk_pct)
+        target_1 = entry_price * (1 + target_1_pct)
+        target_2 = entry_price * (1 + target_2_pct)
+        target_3 = entry_price * (1 + target_3_pct)
+        return {
+            "entry_price": round(entry_price, 2),
+            "stop_loss": round(stop_loss, 2),
+            "target_1": round(target_1, 2),
+            "target_2": round(target_2, 2),
+            "target_3": round(target_3, 2),
+            "risk_reward": round(target_1_pct / risk_pct, 2) if risk_pct > 0 else 0.0,
+            "risk_model": "banknifty_adaptive_premium",
+            "premium_risk_pct": round(risk_pct * 100, 2),
+        }
+
+    def _banknifty_premium_risk_pct(self, snapshot: Dict[str, Any]) -> float:
+        price = float(snapshot.get("price") or 0.0)
+        day_high = float(snapshot.get("day_high") or 0.0)
+        day_low = float(snapshot.get("day_low") or 0.0)
+        day_range_pct = ((day_high - day_low) / price) if price > 0 and day_high > day_low else 0.006
+        adx = float(snapshot.get("adx") or 15.0)
+        risk_pct = 0.16 + min(day_range_pct * 10, 0.08)
+        if adx >= 22:
+            risk_pct += 0.02
+        if not bool(snapshot.get("volume_confirmed")):
+            risk_pct -= 0.02
+        return max(0.16, min(0.28, risk_pct))
+
     def position_size(self, entry_price: float, stop_loss: float, lot_size: int, side: str, account_equity: float | None = None) -> int:
         if lot_size <= 0:
             return 0
         per_unit_risk = abs(entry_price - stop_loss)
         if per_unit_risk <= 0:
             return 0
-        equity = account_equity if account_equity is not None else settings.account_equity
+        equity = account_equity if account_equity is not None else self._available_cash()
         max_risk = equity * (settings.max_risk_per_trade_pct / 100)
         lots = floor(max_risk / (per_unit_risk * lot_size))
         return max(lot_size, lots * lot_size) if lots > 0 else lot_size
@@ -166,10 +210,8 @@ class TradeSetupService:
         affordable_lots = floor(available_funds / (entry_price * lot_size))
         return max(0, affordable_lots * lot_size)
 
-    def risk_checks(self, score: int, contract: OptionContract, entry_price: float, side: str) -> List[str]:
+    def risk_checks(self, score: int, contract: OptionContract, entry_price: float, side: str, enforce_budget: bool = False) -> List[str]:
         failures: List[str] = []
-        if score < settings.min_signal_score:
-            failures.append("technical score is below threshold")
         if self.liquidity_score(contract) < settings.min_option_liquidity_score:
             failures.append("option liquidity is below threshold")
         if side.upper() == "BUY":
@@ -178,9 +220,15 @@ class TradeSetupService:
             expiry = self._parse_expiry(contract.expiry)
             if settings.block_expiry_day_option_buying and expiry is not None and expiry <= date.today():
                 failures.append("expiry-day option buying is blocked")
-            max_premium = settings.account_equity * (settings.max_option_premium_pct / 100)
-            if entry_price * contract.lot_size > max_premium:
-                failures.append("option premium is too large for configured account risk")
+            if enforce_budget:
+                available_cash = self._available_cash()
+                max_premium = available_cash * (settings.max_option_premium_pct / 100)
+                one_lot_cost = entry_price * contract.lot_size
+                if one_lot_cost > max_premium:
+                    failures.append(
+                        "option premium is too large for configured account risk "
+                        f"(one lot costs {one_lot_cost:.2f}, allowed {max_premium:.2f} from Kite cash {available_cash:.2f})"
+                    )
         else:
             if not settings.allow_option_selling:
                 failures.append("option selling is disabled by configuration")
@@ -191,6 +239,12 @@ class TradeSetupService:
         if contract.open_interest < settings.min_option_oi:
             failures.append("option open interest is below threshold")
         return failures
+
+    def _available_cash(self) -> float:
+        try:
+            return self.account_funds_service.available_cash()
+        except Exception:
+            return 0.0
 
     def option_type_for(self, trend: str, side: str) -> str:
         bullish = trend.lower() == "bullish"
@@ -239,6 +293,20 @@ class TradeSetupService:
     def _contract_score(self, contract: OptionContract, target: float) -> float:
         distance_penalty = abs(contract.strike - target)
         return self.liquidity_score(contract) - (distance_penalty / max(contract.strike, 1.0) * 1000)
+
+    def _affordable_buy_candidates(self, contracts: List[OptionContract]) -> List[OptionContract]:
+        available_cash = self._available_cash()
+        if available_cash <= 0:
+            return []
+        max_premium = available_cash * (settings.max_option_premium_pct / 100)
+        affordable: List[OptionContract] = []
+        for contract in contracts:
+            entry_price = contract.ask or contract.last_price
+            if entry_price <= 0:
+                continue
+            if entry_price * contract.lot_size <= max_premium:
+                affordable.append(contract)
+        return affordable
 
     def _spread_pct(self, contract: OptionContract) -> float:
         if not contract.bid or not contract.ask or not contract.last_price:

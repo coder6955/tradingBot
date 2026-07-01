@@ -149,7 +149,7 @@ with control_col:
     st.subheader("Auto Trade Controls")
     with st.form("auto_trader_form"):
         side = st.selectbox("Side", ["BUY", "SELL"], index=0)
-        symbols = st.text_input("Symbols", value="NIFTY,BANKNIFTY,HDFCBANK")
+        symbols = st.text_input("Symbols", value="BANKNIFTY")
         interval_seconds = st.number_input("Scan interval seconds", min_value=3, max_value=300, value=5, step=1)
         limit = st.number_input("Max opportunities per scan", min_value=1, max_value=25, value=3, step=1)
         place_orders = st.toggle("Auto place orders", value=False)
@@ -221,8 +221,8 @@ with links_col:
         ("Swagger Docs", "/docs"),
         ("Kite Login", "/kite/auth"),
         ("Kite Health", "/kite/health"),
-        ("Scanner", "/scanner/opportunities?side=BUY&symbols=NIFTY,BANKNIFTY&limit=3"),
-        ("Diagnostics", "/scanner/diagnostics?side=BUY&symbols=NIFTY&limit=10"),
+        ("Scanner", "/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3"),
+        ("Diagnostics", "/scanner/diagnostics?side=BUY&symbols=BANKNIFTY&limit=10"),
         ("Opportunities", "/opportunities?limit=20"),
         ("Failure Analysis", "/opportunities/failure-analysis"),
         ("Paper Positions", "/paper/positions"),
