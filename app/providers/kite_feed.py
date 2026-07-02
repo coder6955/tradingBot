@@ -7,6 +7,7 @@ from app.config import settings
 from app.providers.token_store import load_access_token
 from app.services.database import Candle, get_session
 from app.services.indicator_service import compute_ema, compute_macd, compute_rsi
+from app.services.time_utils import ist_now_naive
 
 try:
     from kiteconnect import KiteConnect
@@ -32,6 +33,10 @@ class KiteFeed:
 
     def __init__(self) -> None:
         self._instrument_cache: Dict[str, List[Dict[str, Any]]] = {}
+        self._instrument_cache_at: Dict[str, datetime] = {}
+        self._snapshot_cache: Dict[str, tuple[datetime, Dict[str, Any]]] = {}
+        self._quote_cache: Dict[str, tuple[datetime, Dict[str, Any]]] = {}
+        self._call_counts: Dict[str, int] = {"quote": 0, "historical_data": 0, "instruments": 0, "snapshot_cache_hits": 0, "quote_cache_hits": 0}
         if KiteConnect is None:
             self.client = None
         else:
@@ -52,6 +57,11 @@ class KiteFeed:
             return default
 
     def get_snapshot(self, symbol: str) -> Dict[str, Any]:
+        cached = self._cached_snapshot(symbol)
+        if cached is not None:
+            return cached
+
+        started_at = ist_now_naive()
         # Default fallback snapshot
         snapshot = {
             "symbol": symbol,
@@ -79,6 +89,8 @@ class KiteFeed:
             "day_open": 0.0,
             "day_high": 0.0,
             "day_low": 0.0,
+            "quote_timestamp": None,
+            "candle_timestamp": None,
         }
 
         if self.client is None:
@@ -89,6 +101,7 @@ class KiteFeed:
             # try common NSE format
             kite_symbol = self._kite_symbol(symbol)
             instrument = f"NSE:{kite_symbol}" if ":" not in kite_symbol else kite_symbol
+            self._call_counts["quote"] += 1
             q = self.client.quote([instrument])  # type: ignore
             # q structure may vary; try to extract last_price
             last_price = None
@@ -101,6 +114,7 @@ class KiteFeed:
             if last_price is not None:
                 snapshot["price"] = float(last_price)
                 snapshot["is_real_data"] = snapshot["price"] > 0
+                snapshot["quote_timestamp"] = started_at.isoformat(sep=" ")
         except Exception:
             # ignore network / key errors
             pass
@@ -111,9 +125,10 @@ class KiteFeed:
             if token is None:
                 return self._stored_snapshot(symbol, snapshot)
             snapshot["instrument_token"] = token
-            now = datetime.utcnow()
+            now = ist_now_naive()
             to_dt = now
             from_dt = now - timedelta(days=14)
+            self._call_counts["historical_data"] += 1
             hist = self.client.historical_data(token, from_dt, to_dt, "15minute")  # type: ignore
             if hist and isinstance(hist, list):
                 closes = [float(c["close"]) for c in hist if "close" in c]
@@ -131,6 +146,8 @@ class KiteFeed:
                     }
                     for c in hist[-160:]
                 ]
+                if snapshot["candles"]:
+                    snapshot["candle_timestamp"] = snapshot["candles"][-1]["date"]
                 if len(closes) >= 26:
                     snapshot["price"] = closes[-1]
                     snapshot["is_real_data"] = closes[-1] > 0
@@ -168,15 +185,20 @@ class KiteFeed:
             pass
 
         if not snapshot.get("is_real_data"):
-            return self._stored_snapshot(symbol, snapshot)
+            snapshot = self._stored_snapshot(symbol, snapshot)
+        self._snapshot_cache[symbol.upper()] = (ist_now_naive(), snapshot)
         return snapshot
 
     def get_instruments(self, exchange: str) -> List[Dict[str, Any]]:
         if self.client is None:
             return []
-        if exchange not in self._instrument_cache:
+        cached_at = self._instrument_cache_at.get(exchange)
+        ttl = timedelta(seconds=max(1, settings.kite_instrument_cache_ttl_seconds))
+        if exchange not in self._instrument_cache or cached_at is None or ist_now_naive() - cached_at > ttl:
             try:
+                self._call_counts["instruments"] += 1
                 self._instrument_cache[exchange] = self.client.instruments(exchange)  # type: ignore
+                self._instrument_cache_at[exchange] = ist_now_naive()
             except Exception:
                 self._instrument_cache[exchange] = []
         return self._instrument_cache[exchange]
@@ -184,10 +206,49 @@ class KiteFeed:
     def get_quotes(self, instruments: List[str]) -> Dict[str, Any]:
         if self.client is None or not instruments:
             return {}
+        now = ist_now_naive()
+        ttl = timedelta(seconds=max(1, settings.kite_quote_cache_ttl_seconds))
+        result: Dict[str, Any] = {}
+        missing: List[str] = []
+        for instrument in instruments:
+            cached = self._quote_cache.get(instrument)
+            if cached is not None and now - cached[0] <= ttl:
+                self._call_counts["quote_cache_hits"] += 1
+                result[instrument] = cached[1]
+            else:
+                missing.append(instrument)
+        if not missing:
+            return result
         try:
-            return self.client.quote(instruments)  # type: ignore
+            self._call_counts["quote"] += 1
+            fetched = self.client.quote(missing)  # type: ignore
+            stamp = ist_now_naive()
+            for key, value in fetched.items():
+                payload = dict(value) if isinstance(value, dict) else value
+                if isinstance(payload, dict):
+                    payload.setdefault("quote_timestamp", stamp.isoformat(sep=" "))
+                self._quote_cache[key] = (stamp, payload)
+                result[key] = payload
+            return result
         except Exception:
-            return {}
+            return result
+
+    def call_counts(self) -> Dict[str, int]:
+        return dict(self._call_counts)
+
+    def reset_call_counts(self) -> None:
+        for key in self._call_counts:
+            self._call_counts[key] = 0
+
+    def _cached_snapshot(self, symbol: str) -> Dict[str, Any] | None:
+        cached = self._snapshot_cache.get(symbol.upper())
+        if cached is None:
+            return None
+        age = ist_now_naive() - cached[0]
+        if age.total_seconds() <= max(1, settings.kite_snapshot_cache_ttl_seconds):
+            self._call_counts["snapshot_cache_hits"] += 1
+            return cached[1]
+        return None
 
     def _find_instrument_token(self, symbol: str) -> int | None:
         exchange_symbol = self._kite_symbol(symbol).split(":", 1)[-1].upper()
@@ -226,6 +287,8 @@ class KiteFeed:
             "is_real_data": True,
             "price": closes[-1],
             "candles": candles,
+            "quote_timestamp": snapshot.get("quote_timestamp"),
+            "candle_timestamp": candles[-1]["date"] if candles else None,
             "rsi": int(rsi),
             "macd": round(macd[-1], 4) if macd else 0.0,
             "macd_signal": round(signal[-1], 4) if signal else 0.0,

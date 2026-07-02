@@ -6,7 +6,10 @@ from typing import List
 from app.models import Signal
 from app.config import settings
 from app.services.indicator_scoring_service import IndicatorScoringService
+from app.services.banknifty_intelligence_service import BankNiftyIntelligenceService
 from app.services.day_type_service import DayTypeService
+from app.services.data_freshness_service import DataFreshnessService
+from app.services.decision_engine_service import DecisionEngineService
 from app.services.mock_market_feed import MockMarketFeed
 from app.providers.kite_feed import KiteFeed
 from app.providers.token_store import load_access_token
@@ -16,6 +19,7 @@ from app.services.option_premium_confirmation_service import OptionPremiumConfir
 from app.services.option_quality_service import OptionQualityService
 from app.services.outcome_learning_service import OutcomeLearningService
 from app.services.price_action_service import PriceActionService
+from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
 from app.services.signal_service import SignalService
 from app.services.strategy_edge_service import StrategyEdgeService
 from app.services.time_bucket_edge_service import TimeBucketEdgeService
@@ -46,6 +50,10 @@ class ScannerService:
         option_premium_confirmation_service: OptionPremiumConfirmationService | None = None,
         time_bucket_edge_service: TimeBucketEdgeService | None = None,
         outcome_learning_service: OutcomeLearningService | None = None,
+        banknifty_intelligence_service: BankNiftyIntelligenceService | None = None,
+        data_freshness_service: DataFreshnessService | None = None,
+        rejected_opportunity_repository: RejectedOpportunityRepository | None = None,
+        decision_engine_service: DecisionEngineService | None = None,
     ) -> None:
         self.signal_service = signal_service or SignalService()
         self.scoring_service = scoring_service or IndicatorScoringService()
@@ -59,6 +67,10 @@ class ScannerService:
         self.option_premium_confirmation_service = option_premium_confirmation_service or OptionPremiumConfirmationService()
         self.time_bucket_edge_service = time_bucket_edge_service or TimeBucketEdgeService()
         self.outcome_learning_service = outcome_learning_service or OutcomeLearningService()
+        self.banknifty_intelligence_service = banknifty_intelligence_service or BankNiftyIntelligenceService()
+        self.data_freshness_service = data_freshness_service or DataFreshnessService()
+        self.rejected_opportunity_repository = rejected_opportunity_repository or RejectedOpportunityRepository()
+        self.decision_engine_service = decision_engine_service or DecisionEngineService()
 
         # Market data is independent from live order placement. When Kite data is
         # requested, fail closed instead of silently returning mock opportunities.
@@ -110,13 +122,18 @@ class ScannerService:
         for symbol in symbols:
             snapshot = self.feed.get_snapshot(symbol)
             if settings.use_kite_market_data and not snapshot.get("is_real_data"):
+                reasons = ["real Kite market data was not available for this symbol"]
                 self._log_decision(
                     symbol=symbol,
                     accepted=False,
                     score=0,
-                    reasons=["real Kite market data was not available for this symbol"],
+                    reasons=reasons,
                     breakdown=self._empty_score_breakdown(),
+                    snapshot=snapshot,
+                    side=side,
+                    trend="unknown",
                 )
+                self._save_rejection(symbol=symbol, side=side, trend="unknown", score=0, reasons=reasons, breakdown=self._empty_score_breakdown(), snapshot=snapshot)
                 diagnostics.append(
                     self._diagnostic(
                         symbol,
@@ -126,7 +143,7 @@ class ScannerService:
                         "unknown",
                         side,
                         None,
-                        ["real Kite market data was not available for this symbol"],
+                        reasons,
                     )
                 )
                 continue
@@ -152,12 +169,25 @@ class ScannerService:
                     reasons.append("no NFO option instruments available from Kite")
                 else:
                     reasons.append("no matching option contract found")
-                self._log_decision(symbol=symbol, accepted=False, score=score, reasons=reasons, breakdown=self._empty_score_breakdown())
+                self._log_decision(symbol=symbol, accepted=False, score=score, reasons=reasons, breakdown=self._empty_score_breakdown(), snapshot=snapshot, side=side, trend=trend)
+                self._save_rejection(symbol=symbol, side=side, trend=trend, score=score, reasons=reasons, breakdown=self._empty_score_breakdown(), snapshot=snapshot)
                 diagnostics.append(self._diagnostic(symbol, snapshot, score, trend, market_context, side, None, reasons))
                 continue
 
             entry_price = contract.ask or contract.last_price if side.upper() == "BUY" else contract.bid or contract.last_price
-            prices = self.trade_setup_service.build_prices(entry_price=max(entry_price, 0.05), side=side, underlying=symbol, snapshot=snapshot)
+            freshness_eval = self.data_freshness_service.validate_scan_inputs(
+                order_mode=order_mode,
+                snapshot=snapshot,
+                chain_quotes=chain_quote_map,
+                contract=contract,
+            )
+            prices = self.trade_setup_service.build_prices(
+                entry_price=max(entry_price, 0.05),
+                side=side,
+                underlying=symbol,
+                snapshot=snapshot,
+                contract=contract,
+            )
             liquidity_score = self.trade_setup_service.liquidity_score(contract)
             chain_contracts = self.trade_setup_service.build_contracts(option_instruments, symbol, chain_quote_map)
             market_eval = self.market_regime_service.evaluate(
@@ -186,6 +216,16 @@ class ScannerService:
             premium_eval = self.option_premium_confirmation_service.evaluate(contract=contract, side=side)
             time_bucket_eval = self.time_bucket_edge_service.evaluate(symbol=symbol, trend=trend)
             edge_eval = self._strategy_edge_eval(symbol, trend)
+            banknifty_eval = self.banknifty_intelligence_service.evaluate(
+                trend=trend,
+                snapshot=snapshot,
+                market_snapshots=market_snapshots,
+                contract=contract,
+                chain_contracts=chain_contracts,
+                prices=prices,
+                premium_eval=premium_eval,
+                day_type_eval=day_type_eval,
+            )
             score_breakdown = self._score_breakdown(
                 technical_score=score,
                 market_score=int(market_eval["score"]),
@@ -193,6 +233,7 @@ class ScannerService:
                 chain_score=int(chain_eval["score"]),
                 liquidity_score=liquidity_score,
                 quality_score=int(quality_eval["score"]),
+                banknifty_score=int(banknifty_eval["score"]),
             )
             combined_score = int(score_breakdown["score"])
             factor_scores = {
@@ -206,10 +247,15 @@ class ScannerService:
                 "option_premium_confirmation": premium_eval,
                 "time_bucket_edge": time_bucket_eval,
                 "strategy_edge": edge_eval,
+                "banknifty_intelligence": banknifty_eval,
                 "liquidity": liquidity_score,
                 "contract": self._contract_payload(contract),
                 "prices": prices,
+                "data_freshness": freshness_eval,
+                "kite_calls": self._feed_call_counts(),
             }
+            banknifty_fields = self._banknifty_response_fields(banknifty_eval)
+            factor_scores.update(banknifty_fields)
             outcome_learning_eval = self.outcome_learning_service.evaluate(
                 symbol=symbol,
                 action=self._action(side, trend),
@@ -229,11 +275,36 @@ class ScannerService:
                 premium_eval=premium_eval,
                 time_bucket_eval=time_bucket_eval,
                 edge_eval=edge_eval,
+                banknifty_eval=banknifty_eval,
                 outcome_learning_eval=outcome_learning_eval,
                 enforce_budget=enforce_budget,
             )
+            if not freshness_eval.get("passed", False):
+                risk_failures = list(freshness_eval.get("reasons", [])) + risk_failures
             if risk_failures:
-                self._log_decision(symbol=symbol, accepted=False, score=combined_score, reasons=risk_failures, breakdown=score_breakdown)
+                self._log_decision(
+                    symbol=symbol,
+                    accepted=False,
+                    score=combined_score,
+                    reasons=risk_failures,
+                    breakdown=score_breakdown,
+                    snapshot=snapshot,
+                    side=side,
+                    trend=trend,
+                    contract=contract,
+                    factor_scores=factor_scores,
+                )
+                self._save_rejection(
+                    symbol=symbol,
+                    side=side,
+                    trend=trend,
+                    score=combined_score,
+                    reasons=risk_failures,
+                    breakdown=score_breakdown,
+                    snapshot=snapshot,
+                    contract=contract,
+                    factor_scores=factor_scores,
+                )
                 diagnostics.append(
                     self._diagnostic(
                         symbol,
@@ -287,12 +358,47 @@ class ScannerService:
                     liquidity_score=liquidity_score,
                     factor_scores=factor_scores,
                     risk_notes=[],
+                    banknifty_fields=banknifty_fields,
                 )
-                self._log_decision(symbol=symbol, accepted=True, score=combined_score, reasons=[], breakdown=score_breakdown)
+                self._log_decision(
+                    symbol=symbol,
+                    accepted=True,
+                    score=combined_score,
+                    reasons=[],
+                    breakdown=score_breakdown,
+                    snapshot=snapshot,
+                    side=side,
+                    trend=trend,
+                    contract=contract,
+                    factor_scores=factor_scores,
+                    prices=prices,
+                )
                 diagnostics.append(self._diagnostic(symbol, snapshot, combined_score, trend, market_context, side, signal, [], factor_scores))
             else:
                 score_reasons = ["final weighted score is below threshold"]
-                self._log_decision(symbol=symbol, accepted=False, score=combined_score, reasons=score_reasons, breakdown=score_breakdown)
+                self._log_decision(
+                    symbol=symbol,
+                    accepted=False,
+                    score=combined_score,
+                    reasons=score_reasons,
+                    breakdown=score_breakdown,
+                    snapshot=snapshot,
+                    side=side,
+                    trend=trend,
+                    contract=contract,
+                    factor_scores=factor_scores,
+                )
+                self._save_rejection(
+                    symbol=symbol,
+                    side=side,
+                    trend=trend,
+                    score=combined_score,
+                    reasons=score_reasons,
+                    breakdown=score_breakdown,
+                    snapshot=snapshot,
+                    contract=contract,
+                    factor_scores=factor_scores,
+                )
                 diagnostics.append(
                     self._diagnostic(
                         symbol,
@@ -337,6 +443,15 @@ class ScannerService:
             "NIFTY": self.feed.get_snapshot("NIFTY"),
             "BANKNIFTY": self.feed.get_snapshot("BANKNIFTY"),
             "INDIAVIX": self.feed.get_snapshot("INDIAVIX"),
+            "HDFCBANK": self.feed.get_snapshot("HDFCBANK"),
+            "ICICIBANK": self.feed.get_snapshot("ICICIBANK"),
+            "SBIN": self.feed.get_snapshot("SBIN"),
+            "AXISBANK": self.feed.get_snapshot("AXISBANK"),
+            "KOTAKBANK": self.feed.get_snapshot("KOTAKBANK"),
+            "INDUSINDBK": self.feed.get_snapshot("INDUSINDBK"),
+            "BANKBARODA": self.feed.get_snapshot("BANKBARODA"),
+            "PNB": self.feed.get_snapshot("PNB"),
+            "CANBK": self.feed.get_snapshot("CANBK"),
         }
 
     def _quote_chain_options(
@@ -395,37 +510,17 @@ class ScannerService:
         chain_score: int,
         liquidity_score: int,
         quality_score: int,
+        banknifty_score: int = 50,
     ) -> dict[str, object]:
-        capped_trend = min(technical_score, settings.max_trend_momentum_score)
-        weights = {
-            "trend_momentum": 0.18,
-            "market_regime": 0.15,
-            "price_action": 0.24,
-            "option_chain_context": 0.08,
-            "liquidity": 0.15,
-            "option_quality": 0.20,
-        }
-        components = {
-            "trend_momentum": capped_trend,
-            "market_regime": market_score,
-            "price_action": price_score,
-            "option_chain_context": chain_score,
-            "liquidity": liquidity_score,
-            "option_quality": quality_score,
-        }
-        contributions = {key: round(components[key] * value, 2) for key, value in weights.items()}
-        score = min(100, max(0, round(sum(contributions.values()))))
-        return {
-            "score": score,
-            "threshold": settings.min_signal_score,
-            "weights": weights,
-            "components": components,
-            "contributions": contributions,
-            "caps": {
-                "trend_momentum_raw": technical_score,
-                "trend_momentum_capped_at": settings.max_trend_momentum_score,
-            },
-        }
+        return self.decision_engine_service.score_breakdown(
+            technical_score=technical_score,
+            market_score=market_score,
+            price_score=price_score,
+            chain_score=chain_score,
+            liquidity_score=liquidity_score,
+            quality_score=quality_score,
+            banknifty_score=banknifty_score,
+        )
 
     def _final_score(
         self,
@@ -435,6 +530,7 @@ class ScannerService:
         chain_score: int,
         liquidity_score: int,
         quality_score: int,
+        banknifty_score: int = 50,
     ) -> int:
         return int(
             self._score_breakdown(
@@ -444,6 +540,7 @@ class ScannerService:
                 chain_score=chain_score,
                 liquidity_score=liquidity_score,
                 quality_score=quality_score,
+                banknifty_score=banknifty_score,
             )["score"]
         )
 
@@ -496,6 +593,7 @@ class ScannerService:
         premium_eval: dict[str, object],
         time_bucket_eval: dict[str, object],
         edge_eval: dict[str, object],
+        banknifty_eval: dict[str, object],
         outcome_learning_eval: dict[str, object],
         enforce_budget: bool = False,
     ) -> list[str]:
@@ -519,20 +617,126 @@ class ScannerService:
             failures.extend(str(reason) for reason in time_bucket_eval.get("reasons", ["time bucket edge failed"]))
         if settings.enable_strategy_edge_guard and not edge_eval.get("passed", False):
             failures.extend(str(reason) for reason in edge_eval.get("reasons", ["strategy edge guard failed"]))
+        if settings.enable_banknifty_intelligence and not banknifty_eval.get("passed", False):
+            failures.extend(str(reason) for reason in banknifty_eval.get("hard_reasons", ["Bank Nifty intelligence no-trade filter failed"]))
         if settings.enable_outcome_learning_guard and not outcome_learning_eval.get("passed", False):
             failures.extend(str(reason) for reason in outcome_learning_eval.get("reasons", ["outcome learning guard failed"]))
         return list(dict.fromkeys(failures))
 
-    def _log_decision(self, *, symbol: str, accepted: bool, score: int, reasons: list[str], breakdown: dict[str, object]) -> None:
+    def _log_decision(
+        self,
+        *,
+        symbol: str,
+        accepted: bool,
+        score: int,
+        reasons: list[str],
+        breakdown: dict[str, object],
+        snapshot: dict[str, object] | None = None,
+        side: str = "BUY",
+        trend: str = "",
+        contract: OptionContract | None = None,
+        factor_scores: dict[str, object] | None = None,
+        prices: dict[str, float] | None = None,
+    ) -> None:
+        action = self._action(side, trend) if trend else ""
+        quality = factor_scores.get("option_quality", {}) if factor_scores else {}
+        premium = factor_scores.get("option_premium_confirmation", {}) if factor_scores else {}
+        liquidity = factor_scores.get("liquidity") if factor_scores else None
         payload = {
             "symbol": symbol,
+            "timestamp": self._decision_timestamp(),
             "decision": "accepted" if accepted else "rejected",
+            "direction": action,
+            "strike": contract.strike if contract else None,
+            "expiry": contract.expiry if contract else None,
+            "tradingsymbol": contract.tradingsymbol if contract else None,
             "score": score,
             "threshold": settings.min_signal_score,
             "reasons": reasons,
+            "market_state": {
+                "price": (snapshot or {}).get("price"),
+                "source": (snapshot or {}).get("source"),
+                "is_real_data": (snapshot or {}).get("is_real_data"),
+                "rsi": (snapshot or {}).get("rsi"),
+                "adx": (snapshot or {}).get("adx"),
+                "vwap": (snapshot or {}).get("vwap"),
+                "ema_9": (snapshot or {}).get("ema_9"),
+                "ema_21": (snapshot or {}).get("ema_21"),
+            },
+            "option_state": {
+                "delta": self._nested_value(quality, "details", "greeks", "delta"),
+                "iv": self._nested_value(quality, "details", "greeks", "implied_volatility"),
+                "theta": self._nested_value(quality, "details", "greeks", "theta"),
+                "spread_pct": self._nested_value(quality, "details", "spread_pct"),
+                "volume": contract.volume if contract else None,
+                "open_interest": contract.open_interest if contract else None,
+                "liquidity_score": liquidity,
+                "premium_confirmation": premium,
+            },
+            "planned_exit": {
+                "entry": (prices or {}).get("entry_price"),
+                "stop_loss": (prices or {}).get("stop_loss"),
+                "target_1": (prices or {}).get("target_1"),
+                "target_2": (prices or {}).get("target_2"),
+                "target_3": (prices or {}).get("target_3"),
+                "time_stop_minutes": settings.option_time_stop_minutes,
+                "trailing_stop_lock_pct": settings.option_trailing_stop_lock_pct,
+                "near_close_exit_minutes": settings.exit_open_trades_before_close_minutes,
+            },
             "score_breakdown": breakdown,
         }
         logger.info("trade_decision %s", payload)
+
+    def _save_rejection(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        trend: str,
+        score: int,
+        reasons: list[str],
+        breakdown: dict[str, object],
+        snapshot: dict[str, object] | None = None,
+        contract: OptionContract | None = None,
+        factor_scores: dict[str, object] | None = None,
+    ) -> None:
+        try:
+            action = self._action(side, trend) if str(trend).lower() in {"bullish", "bearish"} else None
+            self.rejected_opportunity_repository.save_rejection(
+                symbol=symbol,
+                side=side,
+                action=action,
+                score=score,
+                reasons=reasons,
+                snapshot=snapshot,
+                contract=contract,
+                factor_scores=factor_scores,
+                score_breakdown=breakdown,
+            )
+        except Exception as exc:
+            logger.warning("failed_to_save_rejected_opportunity symbol=%s error=%s", symbol, exc)
+
+    def _feed_call_counts(self) -> dict[str, object]:
+        if hasattr(self.feed, "call_counts"):
+            try:
+                return self.feed.call_counts()  # type: ignore[no-any-return]
+            except Exception:
+                return {}
+        return {}
+
+    def _decision_timestamp(self) -> str:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        return datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
+
+    def _nested_value(self, value: object, *keys: str) -> object:
+        current = value
+        for key in keys:
+            if not isinstance(current, dict):
+                return None
+            current = current.get(key)
+        return current
 
     def _empty_score_breakdown(self) -> dict[str, object]:
         return {
@@ -581,6 +785,28 @@ class ScannerService:
             "ask": contract.ask,
             "open_interest": contract.open_interest,
             "volume": contract.volume,
+        }
+
+    def _banknifty_response_fields(self, banknifty_eval: dict[str, object]) -> dict[str, object]:
+        details = banknifty_eval.get("details", {}) if isinstance(banknifty_eval.get("details"), dict) else {}
+        return {
+            "bankNiftySpecificScore": details.get("bankNiftySpecificScore", banknifty_eval.get("score")),
+            "topBankAlignment": details.get("topBankAlignment"),
+            "privateBankStrength": details.get("privateBankStrength"),
+            "psuBankStrength": details.get("psuBankStrength"),
+            "relativeStrengthVsNifty": details.get("relativeStrengthVsNifty"),
+            "openingRangeStatus": details.get("openingRangeStatus"),
+            "optionPremiumConfirmation": details.get("optionPremiumConfirmation"),
+            "expectedMoveCheck": details.get("expectedMoveCheck"),
+            "dteMode": details.get("dteMode"),
+            "eventDayMode": details.get("eventDayMode"),
+            "nearestMajorZone": details.get("nearestMajorZone"),
+            "optionChainNearAtmSignal": details.get("optionChainNearAtmSignal"),
+            "dayType": details.get("dayType"),
+            "noTradeReasons": details.get("noTradeReasons", []),
+            "tradeQuality": details.get("tradeQuality", "NO_TRADE" if banknifty_eval.get("passed") is False else "B"),
+            "confidenceReason": details.get("confidenceReason", ""),
+            "invalidationReason": details.get("invalidationReason", ""),
         }
 
     def _diagnostic(

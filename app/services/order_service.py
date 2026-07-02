@@ -96,6 +96,7 @@ class OrderService:
             "placed_quantity": quantity,
             "trade_id": record.id,
             "execution_quality": quality,
+            "broker_emergency_sl": self._broker_emergency_protection(signal),
         }
 
     def _validate_signal(self, signal: Signal) -> None:
@@ -180,6 +181,17 @@ class OrderService:
                 "entry_price": entry_price,
                 "deviation_pct": round(deviation_pct, 2),
             },
+        }
+
+    def _broker_emergency_protection(self, signal: Signal) -> dict[str, Any]:
+        if not settings.enable_broker_emergency_sl:
+            return {"enabled": False}
+        return {
+            "enabled": True,
+            "submitted": False,
+            "reason": "current KiteProvider wrapper does not support trigger_price/GTT protective orders",
+            "software_stop_loss": signal.stop_loss,
+            "fallback": "TradeExitService software square-off and startup broker reconciliation",
         }
 
     def _float(self, value: Any) -> float:

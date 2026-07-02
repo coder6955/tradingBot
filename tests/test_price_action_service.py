@@ -45,6 +45,30 @@ class PriceActionServiceTests(unittest.TestCase):
 
         self.assertFalse(result["passed"])
         self.assertIn("directional option buying has insufficient room to nearest level", result["reasons"])
+        self.assertTrue(result["details"]["hard_block"])
+
+    def test_missing_candle_confirmation_is_scoring_evidence_not_hard_block(self) -> None:
+        service = PriceActionService()
+        snapshot = {
+            "price": 106.0,
+            "ema_alignment": True,
+            "vwap": 103.0,
+            "macd_positive": True,
+            "volume_confirmed": True,
+            "rsi": 58,
+            "last_candle_close": 99.0,
+            "previous_day_high": 110.0,
+            "previous_day_low": 98.0,
+            "previous_day_close": 102.0,
+            "day_high": 106.0,
+            "day_low": 101.0,
+        }
+
+        result = service.evaluate(snapshot, "bullish", "BUY")
+
+        self.assertTrue(result["passed"])
+        self.assertFalse(result["details"]["hard_block"])
+        self.assertIn("5minute candle close has not confirmed trade direction", result["reasons"])
 
 
 if __name__ == "__main__":

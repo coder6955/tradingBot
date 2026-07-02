@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.services.database import Candle, get_session
+from app.services.time_utils import to_ist_naive
 
 
 class MarketDataService:
@@ -106,9 +107,9 @@ class MarketDataService:
         if value is None:
             return None
         if isinstance(value, datetime):
-            return value.replace(tzinfo=None)
+            return to_ist_naive(value)
         text = str(value).replace("Z", "+00:00")
         try:
-            return datetime.fromisoformat(text).replace(tzinfo=None)
+            return to_ist_naive(datetime.fromisoformat(text))
         except ValueError:
             return None

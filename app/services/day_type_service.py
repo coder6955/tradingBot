@@ -5,6 +5,7 @@ from typing import Any
 
 from app.config import settings
 from app.services.database import Candle, get_session
+from app.services.time_utils import ist_today
 
 
 class DayTypeService:
@@ -86,7 +87,7 @@ class DayTypeService:
     def _today_candles(self, *, symbol: str, timeframe: str) -> list[Candle]:
         session = get_session()
         try:
-            today = datetime.now().date()
+            today = ist_today()
             start = datetime.combine(today, time.min)
             end = datetime.combine(today, time.max)
             return (

@@ -3,7 +3,6 @@ from __future__ import annotations
 import sys
 from typing import Optional
 
-from datetime import datetime
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -15,6 +14,7 @@ from sqlalchemy import Column, DateTime, Float, Integer, String, Text, create_en
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.config import settings
+from app.services.time_utils import ist_now_naive
 
 Base = declarative_base()
 engine = None
@@ -39,7 +39,7 @@ class OptionQuoteSnapshot(Base):
     __tablename__ = "option_quote_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
     underlying = Column(String(50), nullable=False, index=True)
     tradingsymbol = Column(String(100), nullable=False, index=True)
     exchange = Column(String(20), nullable=False, default="NFO")
@@ -75,7 +75,7 @@ class OpportunityRecord(Base):
     __tablename__ = "opportunities"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
     symbol = Column(String(50), nullable=False, index=True)
     action = Column(String(20), nullable=False, index=True)
     side = Column(String(10), nullable=False, index=True)
@@ -104,12 +104,39 @@ class OpportunityRecord(Base):
     review_notes = Column(Text, nullable=True)
 
 
+class RejectedOpportunityRecord(Base):
+    __tablename__ = "rejected_opportunities"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    symbol = Column(String(50), nullable=False, index=True)
+    action = Column(String(20), nullable=True, index=True)
+    side = Column(String(10), nullable=False, index=True)
+    tradingsymbol = Column(String(100), nullable=True, index=True)
+    exchange = Column(String(20), nullable=True)
+    expiry = Column(String(20), nullable=True, index=True)
+    strike = Column(Float, nullable=True)
+    option_type = Column(String(5), nullable=True, index=True)
+    score = Column(Integer, nullable=False, default=0, index=True)
+    primary_gate = Column(String(100), nullable=True, index=True)
+    reasons_json = Column(Text, nullable=False)
+    market_state_json = Column(Text, nullable=True)
+    option_quality_json = Column(Text, nullable=True)
+    premium_state_json = Column(Text, nullable=True)
+    score_breakdown_json = Column(Text, nullable=True)
+    factor_scores_json = Column(Text, nullable=True)
+    later_outcome = Column(String(30), nullable=True, index=True)
+    later_exit_price = Column(Float, nullable=True)
+    later_evaluated_at = Column(DateTime, nullable=True)
+    later_notes = Column(Text, nullable=True)
+
+
 class TradeRecord(Base):
     __tablename__ = "trades"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
-    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    updated_at = Column(DateTime, nullable=False, default=ist_now_naive)
     opportunity_id = Column(Integer, nullable=True, index=True)
     symbol = Column(String(50), nullable=False, index=True)
     tradingsymbol = Column(String(100), nullable=False, index=True)
@@ -130,6 +157,13 @@ class TradeRecord(Base):
     target_3 = Column(Float, nullable=True)
     exit_price = Column(Float, nullable=True)
     pnl = Column(Float, nullable=True)
+    gross_pnl = Column(Float, nullable=True)
+    net_pnl = Column(Float, nullable=True)
+    charges = Column(Float, nullable=True)
+    slippage_cost = Column(Float, nullable=True)
+    spread_cost = Column(Float, nullable=True)
+    remaining_quantity = Column(Integer, nullable=True)
+    partial_exit_json = Column(Text, nullable=True)
     outcome = Column(String(30), nullable=True, index=True)
     order_response_json = Column(Text, nullable=True)
     broker_status_json = Column(Text, nullable=True)
@@ -140,7 +174,7 @@ class StrategyValidationRecord(Base):
     __tablename__ = "strategy_validations"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
     strategy_name = Column(String(100), nullable=False, index=True)
     symbol = Column(String(50), nullable=False, index=True)
     timeframe = Column(String(20), nullable=False, index=True)
@@ -193,6 +227,13 @@ def _ensure_trade_columns() -> None:
         "notes": "TEXT",
         "outcome": "VARCHAR(30)",
         "pnl": "FLOAT",
+        "gross_pnl": "FLOAT",
+        "net_pnl": "FLOAT",
+        "charges": "FLOAT",
+        "slippage_cost": "FLOAT",
+        "spread_cost": "FLOAT",
+        "remaining_quantity": "INTEGER",
+        "partial_exit_json": "TEXT",
     }
     with engine.begin() as connection:
         for column, column_type in required.items():

@@ -1,6 +1,5 @@
 import os
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +9,8 @@ import streamlit as st
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from app.services.time_utils import ist_now
 
 
 API_BASE_URL = os.getenv("DASHBOARD_API_BASE_URL", "http://localhost:8000").rstrip("/")
@@ -120,7 +121,7 @@ st.markdown(
 
 
 st.title("AI Option Trader Command Center")
-st.caption(f"Connected API: {API_BASE_URL} | Refreshed: {datetime.now().strftime('%H:%M:%S')}")
+st.caption(f"Connected API: {API_BASE_URL} | Refreshed: {ist_now().strftime('%H:%M:%S IST')}")
 
 health, health_error = api_get("/health")
 db_health, db_error = api_get("/db/health")

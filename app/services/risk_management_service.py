@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.services.account_funds_service import AccountFundsService
 from app.services.trade_repository import TradeRepository
+from app.services.time_utils import ist_now
 
 
 class RiskManagementService:
@@ -86,9 +87,8 @@ class RiskManagementService:
         if not stop_trades:
             return None
         latest = max(stop_trades, key=lambda trade: trade.updated_at)
-        latest_utc = latest.updated_at.replace(tzinfo=ZoneInfo("UTC")) if latest.updated_at.tzinfo is None else latest.updated_at
-        now_utc = datetime.now(ZoneInfo("UTC"))
-        cooldown_until = latest_utc + timedelta(minutes=settings.cooldown_after_stop_minutes)
-        if now_utc < cooldown_until:
+        latest_ist = latest.updated_at.replace(tzinfo=ZoneInfo("Asia/Kolkata")) if latest.updated_at.tzinfo is None else latest.updated_at.astimezone(ZoneInfo("Asia/Kolkata"))
+        cooldown_until = latest_ist + timedelta(minutes=settings.cooldown_after_stop_minutes)
+        if ist_now() < cooldown_until:
             return "cooldown after stop loss is active"
         return None

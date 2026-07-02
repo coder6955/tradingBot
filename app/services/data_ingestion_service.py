@@ -8,6 +8,7 @@ from app.providers.kite_provider import KiteProvider
 from app.services.greeks_service import GreeksService
 from app.services.market_data_service import MarketDataService
 from app.services.option_history_repository import OptionHistoryRepository
+from app.services.time_utils import ist_now_naive
 
 
 class DataIngestionService:
@@ -105,7 +106,7 @@ class DataIngestionService:
         provider = self.kite_provider_factory()
         option_instruments = provider.instruments(settings.option_exchange)
         nse_instruments = provider.instruments(settings.default_exchange)
-        now = datetime.now()
+        now = ist_now_naive()
         all_rows: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
 
@@ -265,7 +266,7 @@ class DataIngestionService:
         }
 
     def _date_range(self, *, from_date: str | None, to_date: str | None, days: int) -> tuple[datetime, datetime]:
-        to_dt = self._parse_date(to_date) if to_date else datetime.now()
+        to_dt = self._parse_date(to_date) if to_date else ist_now_naive()
         from_dt = self._parse_date(from_date) if from_date else to_dt - timedelta(days=days)
         return from_dt, to_dt
 
@@ -292,7 +293,7 @@ class DataIngestionService:
 
     def _parse_date(self, value: str | None) -> datetime:
         if not value:
-            return datetime.now()
+            return ist_now_naive()
         return datetime.fromisoformat(value).replace(tzinfo=None)
 
     def _find_underlying_token(self, instruments: list[dict[str, Any]], symbol: str) -> int | None:

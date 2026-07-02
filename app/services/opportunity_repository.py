@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import datetime
 from collections import Counter
 from typing import Any
 
 from app.models import Signal
 from app.services.database import OpportunityRecord, get_session
+from app.services.time_utils import ist_now_naive
 
 
 class OpportunityRepository:
@@ -80,7 +80,7 @@ class OpportunityRepository:
             record.status = "closed"
             record.outcome = outcome
             record.exit_price = exit_price
-            record.closed_at = datetime.utcnow()
+            record.closed_at = ist_now_naive()
             record.review_notes = review_notes
             record.failure_tags_json = json.dumps(failure_tags or [])
             if exit_price is not None and record.entry_price is not None:

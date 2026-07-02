@@ -37,6 +37,7 @@ class SignalService:
         liquidity_score: int = 0,
         factor_scores: dict[str, object] | None = None,
         risk_notes: list[str] | None = None,
+        banknifty_fields: dict[str, object] | None = None,
     ) -> Signal:
         if score < settings.min_signal_score:
             raise ValueError(f"score must be at least {settings.min_signal_score} to qualify")
@@ -62,6 +63,7 @@ class SignalService:
             "Risk controls must still be followed; this is not a guaranteed-profit trade."
         )
 
+        banknifty_fields = banknifty_fields or {}
         return Signal(
             symbol=symbol,
             action=action,
@@ -88,6 +90,23 @@ class SignalService:
             liquidity_score=liquidity_score,
             factor_scores=factor_scores or {},
             risk_notes=risk_notes or [],
+            bankNiftySpecificScore=int(banknifty_fields.get("bankNiftySpecificScore") or 0),
+            topBankAlignment=banknifty_fields.get("topBankAlignment") if isinstance(banknifty_fields.get("topBankAlignment"), dict) else None,
+            privateBankStrength=float(banknifty_fields.get("privateBankStrength") or 0.0),
+            psuBankStrength=float(banknifty_fields.get("psuBankStrength") or 0.0),
+            relativeStrengthVsNifty=banknifty_fields.get("relativeStrengthVsNifty") if isinstance(banknifty_fields.get("relativeStrengthVsNifty"), dict) else None,
+            openingRangeStatus=banknifty_fields.get("openingRangeStatus") if isinstance(banknifty_fields.get("openingRangeStatus"), dict) else None,
+            optionPremiumConfirmation=banknifty_fields.get("optionPremiumConfirmation") if isinstance(banknifty_fields.get("optionPremiumConfirmation"), dict) else None,
+            expectedMoveCheck=banknifty_fields.get("expectedMoveCheck") if isinstance(banknifty_fields.get("expectedMoveCheck"), dict) else None,
+            dteMode=banknifty_fields.get("dteMode") if isinstance(banknifty_fields.get("dteMode"), dict) else None,
+            eventDayMode=banknifty_fields.get("eventDayMode") if isinstance(banknifty_fields.get("eventDayMode"), dict) else None,
+            nearestMajorZone=banknifty_fields.get("nearestMajorZone") if isinstance(banknifty_fields.get("nearestMajorZone"), dict) else None,
+            optionChainNearAtmSignal=banknifty_fields.get("optionChainNearAtmSignal") if isinstance(banknifty_fields.get("optionChainNearAtmSignal"), dict) else None,
+            dayType=str(banknifty_fields.get("dayType") or ""),
+            noTradeReasons=list(banknifty_fields.get("noTradeReasons") or []),
+            tradeQuality=str(banknifty_fields.get("tradeQuality") or ""),
+            confidenceReason=str(banknifty_fields.get("confidenceReason") or ""),
+            invalidationReason=str(banknifty_fields.get("invalidationReason") or ""),
             confidence=confidence,
             score=score,
             explanation=explanation,

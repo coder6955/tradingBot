@@ -29,14 +29,15 @@ class OutcomeLearningService:
             item = stats.get(group)
             if not item:
                 continue
-            if item["trades"] < settings.min_outcome_learning_trades:
-                matched.append({**item, "group": group, "used_as_guard": False, "reason": "sample size below guard threshold"})
+            confidence = self._sample_confidence(int(item["trades"]))
+            if confidence in {"insufficient", "weak"}:
+                matched.append({**item, "group": group, "used_as_guard": False, "sample_confidence": confidence, "reason": "sample size too small for blocking"})
                 continue
             item_passed = (
                 item["expectancy_pct"] >= settings.min_outcome_learning_expectancy_pct
                 and item["win_rate_pct"] >= settings.min_outcome_learning_win_rate_pct
             )
-            matched.append({**item, "group": group, "used_as_guard": True, "passed": item_passed})
+            matched.append({**item, "group": group, "used_as_guard": True, "passed": item_passed, "sample_confidence": confidence})
             if not item_passed:
                 passed = False
                 reasons.append(
@@ -50,6 +51,12 @@ class OutcomeLearningService:
             "reasons": reasons,
             "details": {
                 "min_trades": settings.min_outcome_learning_trades,
+                "confidence_rules": {
+                    "below_50": "weak confidence only; never blocks",
+                    "50_to_99": "moderate confidence",
+                    "100_to_199": "stronger confidence",
+                    "200_plus": "high confidence",
+                },
                 "min_expectancy_pct": settings.min_outcome_learning_expectancy_pct,
                 "min_win_rate_pct": settings.min_outcome_learning_win_rate_pct,
                 "groups_checked": groups,
@@ -68,7 +75,7 @@ class OutcomeLearningService:
         credible = [
             {"group": group, **item}
             for group, item in stats
-            if item["trades"] >= settings.min_outcome_learning_trades
+            if item["trades"] >= 50
         ]
         weak = [
             item
@@ -87,6 +94,7 @@ class OutcomeLearningService:
             "history_count": len(history),
             "thresholds": {
                 "min_trades": settings.min_outcome_learning_trades,
+                "blocking_min_trades": 50,
                 "min_expectancy_pct": settings.min_outcome_learning_expectancy_pct,
                 "min_win_rate_pct": settings.min_outcome_learning_win_rate_pct,
                 "lookback": settings.outcome_learning_lookback,
@@ -142,6 +150,7 @@ class OutcomeLearningService:
             gross_loss = abs(sum(min(float(item["pnl_pct"]), 0.0) for item in items))
             stats[group] = {
                 "trades": len(items),
+                "sample_confidence": self._sample_confidence(len(items)),
                 "wins": len(wins),
                 "losses": len(losses),
                 "win_rate_pct": round((len(wins) / len(items)) * 100, 2) if items else 0.0,
@@ -151,6 +160,15 @@ class OutcomeLearningService:
                 "profit_factor": round(gross_win / gross_loss, 3) if gross_loss else None,
             }
         return stats
+
+    def _sample_confidence(self, trades: int) -> str:
+        if trades < 50:
+            return "weak" if trades > 0 else "insufficient"
+        if trades < 100:
+            return "moderate"
+        if trades < 200:
+            return "stronger"
+        return "high"
 
     def _candidate_groups(self, *, symbol: str, action: str, factor_scores: dict[str, Any]) -> list[str]:
         groups = [

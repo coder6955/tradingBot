@@ -21,10 +21,17 @@ class OptionPremiumConfirmationService:
 
         closes = [float(candle.close_price) for candle in candles]
         volumes = [float(candle.volume) for candle in candles]
+        highs = [float(candle.high_price) for candle in candles]
+        lows = [float(candle.low_price) for candle in candles]
         last_close = closes[-1]
         prev_close = closes[-2]
         recent_high = max(float(candle.high_price) for candle in candles[:-1])
         avg_volume = sum(volumes[:-1]) / max(len(volumes[:-1]), 1)
+        total_volume = sum(volumes)
+        if total_volume > 0:
+            option_vwap = sum(((highs[idx] + lows[idx] + closes[idx]) / 3) * volumes[idx] for idx in range(len(closes))) / total_volume
+        else:
+            option_vwap = sum((highs[idx] + lows[idx] + closes[idx]) / 3 for idx in range(len(closes))) / max(len(closes), 1)
         premium_change_pct = ((last_close - closes[0]) / max(closes[0], 0.01)) * 100
         last_change_pct = ((last_close - prev_close) / max(prev_close, 0.01)) * 100
         breakout = last_close >= recent_high
@@ -44,12 +51,16 @@ class OptionPremiumConfirmationService:
             score += 20
         else:
             reasons.append("option premium has not broken recent high")
+        if last_close >= option_vwap:
+            score += 10
+        else:
+            reasons.append("option premium is below option VWAP")
         if volume_expansion:
             score += 10
         else:
             reasons.append("option premium volume expansion is weak")
         if spread_pct <= settings.max_bid_ask_spread_pct:
-            score += 10
+            score += 5
         else:
             reasons.append("selected option spread is not suitable for premium confirmation")
 
@@ -74,6 +85,7 @@ class OptionPremiumConfirmationService:
                 "premium_change_pct": round(premium_change_pct, 2),
                 "last_change_pct": round(last_change_pct, 2),
                 "recent_high": round(recent_high, 2),
+                "option_vwap": round(option_vwap, 2),
                 "breakout": breakout,
                 "volume_expansion": volume_expansion,
                 "participation_confirmed": participation_confirmed,

@@ -6,6 +6,14 @@ from app.services.paper_trading_service import PaperTradingService
 
 
 class FailingKiteProvider:
+    def quote(self, instruments):  # type: ignore[no-untyped-def]
+        return {
+            instruments[0]: {
+                "last_price": 100,
+                "depth": {"buy": [{"price": 99.5}], "sell": [{"price": 100}]},
+            }
+        }
+
     def place_order(self, **kwargs):  # type: ignore[no-untyped-def]
         raise AssertionError("live order should not be called")
 
@@ -17,9 +25,22 @@ class LiveKiteProvider:
     def margins(self):  # type: ignore[no-untyped-def]
         return {"equity": {"available": {"cash": 10000}}}
 
+    def quote(self, instruments):  # type: ignore[no-untyped-def]
+        return {
+            instruments[0]: {
+                "last_price": 100,
+                "depth": {"buy": [{"price": 99.5}], "sell": [{"price": 100}]},
+            }
+        }
+
     def place_order(self, **kwargs):  # type: ignore[no-untyped-def]
         self.order = kwargs
         return {"order_id": "test-order"}
+
+
+class PassingRiskService:
+    def evaluate_signal(self, symbol):  # type: ignore[no-untyped-def]
+        return {"passed": True, "reasons": []}
 
 
 class OrderServiceTests(unittest.TestCase):
@@ -49,6 +70,7 @@ class OrderServiceTests(unittest.TestCase):
         service = OrderService(
             kite_provider=provider,  # type: ignore[arg-type]
             paper_trading_service=PaperTradingService(),
+            risk_management_service=PassingRiskService(),  # type: ignore[arg-type]
         )
         signal = Signal(
             symbol="NIFTY",
@@ -69,7 +91,7 @@ class OrderServiceTests(unittest.TestCase):
         try:
             object.__setattr__(order_service.settings, "live_trading_mode", True)
             object.__setattr__(order_service.settings, "paper_trading_mode", False)
-            result = service.place_signal_order(signal, confirm_live=True)
+            result = service.place_signal_order(signal, confirm_live=True, order_mode="live")
         finally:
             object.__setattr__(order_service.settings, "live_trading_mode", original_live)
             object.__setattr__(order_service.settings, "paper_trading_mode", original_paper)

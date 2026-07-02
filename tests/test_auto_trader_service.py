@@ -5,7 +5,7 @@ from app.services.auto_trader_service import AutoTraderService
 
 
 class FakeScanner:
-    def scan_symbols(self, symbols=None, side="BUY"):  # type: ignore[no-untyped-def]
+    def scan_symbols(self, symbols=None, side="BUY", order_mode="paper"):  # type: ignore[no-untyped-def]
         return [
             Signal(
                 symbol="NIFTY",
@@ -24,13 +24,13 @@ class FakeOrderService:
     def __init__(self) -> None:
         self.calls = 0
 
-    def place_signal_order(self, signal, confirm_live=False):  # type: ignore[no-untyped-def]
+    def place_signal_order(self, signal, confirm_live=False, opportunity_id=None, order_mode="paper"):  # type: ignore[no-untyped-def]
         self.calls += 1
-        return {"status": "paper", "symbol": signal.tradingsymbol, "confirm_live": confirm_live}
+        return {"status": order_mode, "symbol": signal.tradingsymbol, "confirm_live": confirm_live}
 
 
 class AutoTraderServiceTests(unittest.TestCase):
-    def test_scan_once_caches_latest_and_places_only_once_per_signal(self) -> None:
+    def test_paper_scan_once_records_repeated_qualified_signals_for_learning(self) -> None:
         order_service = FakeOrderService()
         service = AutoTraderService(
             scanner_factory=lambda: FakeScanner(),  # type: ignore[arg-type]
@@ -43,6 +43,7 @@ class AutoTraderServiceTests(unittest.TestCase):
             "limit": 5,
             "place_orders": True,
             "confirm_live": False,
+            "order_mode": "paper",
         }
 
         first = service.scan_once()
@@ -50,8 +51,8 @@ class AutoTraderServiceTests(unittest.TestCase):
 
         self.assertEqual(first["count"], 1)
         self.assertEqual(len(first["placed"]), 1)
-        self.assertEqual(len(second["placed"]), 0)
-        self.assertEqual(order_service.calls, 1)
+        self.assertEqual(len(second["placed"]), 1)
+        self.assertEqual(order_service.calls, 2)
         self.assertEqual(len(service.latest_opportunities), 1)
 
 

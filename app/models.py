@@ -31,6 +31,23 @@ class Signal:
     liquidity_score: int = 0
     factor_scores: dict[str, object] = field(default_factory=dict)
     risk_notes: list[str] = field(default_factory=list)
+    bankNiftySpecificScore: int = 0
+    topBankAlignment: Optional[dict[str, object]] = None
+    privateBankStrength: float = 0.0
+    psuBankStrength: float = 0.0
+    relativeStrengthVsNifty: Optional[dict[str, object]] = None
+    openingRangeStatus: Optional[dict[str, object]] = None
+    optionPremiumConfirmation: Optional[dict[str, object]] = None
+    expectedMoveCheck: Optional[dict[str, object]] = None
+    dteMode: Optional[dict[str, object]] = None
+    eventDayMode: Optional[dict[str, object]] = None
+    nearestMajorZone: Optional[dict[str, object]] = None
+    optionChainNearAtmSignal: Optional[dict[str, object]] = None
+    dayType: str = ""
+    noTradeReasons: list[str] = field(default_factory=list)
+    tradeQuality: str = ""
+    confidenceReason: str = ""
+    invalidationReason: str = ""
     confidence: float = 0.0
     score: int = 0
     explanation: str = ""

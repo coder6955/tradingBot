@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 from typing import Any
 
 from app.services.data_ingestion_service import DataIngestionService
+from app.services.time_utils import ist_now_naive
 
 
 class OptionSnapshotCollectorService:
@@ -70,7 +70,7 @@ class OptionSnapshotCollectorService:
             strike_window_pct=self.strike_window_pct,
             max_contracts_per_symbol=self.max_contracts_per_symbol,
         )
-        self.last_run_at = datetime.now().isoformat(timespec="seconds")
+        self.last_run_at = ist_now_naive().isoformat(timespec="seconds")
         self.last_result = result
         return result
 
@@ -79,5 +79,5 @@ class OptionSnapshotCollectorService:
             try:
                 self.collect_once()
             except Exception as exc:
-                self.errors.append({"time": datetime.now().isoformat(timespec="seconds"), "error": str(exc)})
+                self.errors.append({"time": ist_now_naive().isoformat(timespec="seconds"), "error": str(exc)})
             await asyncio.sleep(float(self.interval_seconds))

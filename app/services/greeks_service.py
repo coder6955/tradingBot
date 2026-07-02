@@ -5,6 +5,8 @@ from datetime import date, datetime
 from math import erf, exp, log, pi, sqrt
 from typing import Any
 
+from app.services.time_utils import ist_today
+
 
 @dataclass(frozen=True)
 class Greeks:
@@ -117,7 +119,7 @@ class GreeksService:
         parsed = self._parse_date(expiry)
         if parsed is None:
             return 7
-        return max(0, (parsed - date.today()).days)
+        return max(0, (parsed - ist_today()).days)
 
     def _parse_date(self, value: Any) -> date | None:
         if value is None:

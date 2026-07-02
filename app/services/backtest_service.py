@@ -37,6 +37,8 @@ class OptionBacktestTrade:
     pnl_pct: float
     gross_pnl_pct: float
     charges_pct: float
+    slippage_pct: float
+    spread_impact_pct: float
     bars_held: int
     reason: str
 
@@ -46,6 +48,22 @@ class OptionBacktestTrade:
 
 class BacktestService:
     """Replay stored underlying candles to validate directional option-buying rules."""
+
+    ABLATION_VARIANTS: dict[str, dict[str, Any]] = {
+        "baseline": {},
+        "without_rsi": {"disabled": {"rsi"}},
+        "without_macd": {"disabled": {"macd"}},
+        "without_adx": {"unsupported": "ADX is not stored in historical candle backtest inputs yet."},
+        "without_pcr": {"unsupported": "PCR is option-chain context and not part of candle replay yet."},
+        "without_max_pain": {"unsupported": "Max pain is option-chain context and not part of candle replay yet."},
+        "without_nifty_context": {"unsupported": "Nifty context is live scanner context and not part of single-symbol replay yet."},
+        "without_vix_context": {"unsupported": "VIX context is live scanner context and not part of single-symbol replay yet."},
+        "without_premium_confirmation": {"unsupported": "Premium confirmation requires live/stored option premium snapshots, not underlying-only signals."},
+        "without_candle_confirmation": {"disabled": {"breakout"}},
+        "without_day_type_hard_gate": {"unsupported": "Day-type hard gate uses intraday context and is not represented in this option premium replay."},
+        "only_vwap_premium_quality": {"unsupported": "VWAP/premium/quality ablation needs stored VWAP and option-quality snapshots."},
+        "only_trend_quality_premium": {"unsupported": "Quality and premium confirmation are not fully represented in this candle signal replay."},
+    }
 
     def run(
         self,
@@ -188,6 +206,7 @@ class BacktestService:
             "slippage_pct": settings.backtest_slippage_pct,
             "charges_pct": settings.backtest_charges_pct,
             "summary": summary,
+            "segments": self._segment_option_trades(trades, timeframe=timeframe),
             "examples": [trade.to_dict() for trade in trades[-20:]],
         }
 
@@ -233,6 +252,67 @@ class BacktestService:
             },
         }
 
+    def run_ablation(
+        self,
+        *,
+        symbol: str,
+        timeframe: str = "5minute",
+        direction: str | None = None,
+        horizon_candles: int | None = None,
+        limit: int = 2000,
+    ) -> dict[str, Any]:
+        symbol = symbol.upper()
+        direction = (direction or "BOTH").upper()
+        horizon = horizon_candles or settings.backtest_horizon_candles
+        underlying = self._load_candles(symbol=symbol, timeframe=timeframe, limit=limit)
+        if len(underlying) < 60:
+            return {"status": "insufficient_data", "symbol": symbol, "candles": len(underlying), "minimum_required": 60}
+        option_candles = self._load_option_candles(underlying=symbol, timeframe=timeframe)
+        if not option_candles:
+            return {"status": "insufficient_option_data", "symbol": symbol, "message": "No stored option premium candles found for ablation replay."}
+
+        variants: dict[str, Any] = {}
+        baseline_summary: dict[str, Any] | None = None
+        for name, config in self.ABLATION_VARIANTS.items():
+            if config.get("unsupported"):
+                variants[name] = {"status": "unsupported", "reason": config["unsupported"]}
+                continue
+            signals = self._signals_from_underlying(
+                underlying,
+                direction=direction,
+                horizon=horizon,
+                disabled_factors=set(config.get("disabled", set())),
+            )
+            trades = [
+                trade
+                for idx, signal_direction, reason in signals
+                if (trade := self._simulate_option_trade(underlying=underlying, option_candles=option_candles, idx=idx, direction=signal_direction, horizon=horizon, reason=f"{name}: {reason}"))
+                is not None
+            ]
+            variants[name] = {
+                "status": "ok",
+                "disabled_factors": sorted(config.get("disabled", [])),
+                "summary": self._summarize_option_trades(trades, timeframe=timeframe),
+                "segments": self._segment_option_trades(trades, timeframe=timeframe),
+            }
+            if name == "baseline":
+                baseline_summary = variants[name]["summary"]
+        if baseline_summary:
+            for name, result in variants.items():
+                if result.get("status") != "ok":
+                    continue
+                result["impact_vs_baseline"] = self._ablation_impact(baseline_summary, result.get("summary", {}))
+        return {
+            "status": "ok",
+            "mode": "ablation_option_replay",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "direction": direction,
+            "horizon_candles": horizon,
+            "variants": variants,
+            "note": "Unsupported variants need stored option-chain/VIX/VWAP/quality snapshots before they can affect replay.",
+        }
+
     def _run_option_premium_on_candles(
         self,
         *,
@@ -252,7 +332,11 @@ class BacktestService:
             if (trade := self._simulate_option_trade(underlying=underlying, option_candles=option_candles, idx=idx, direction=signal_direction, horizon=horizon, reason=reason))
             is not None
         ]
-        return {"summary": self._summarize_option_trades(trades, timeframe=timeframe), "examples": [trade.to_dict() for trade in trades[-20:]]}
+        return {
+            "summary": self._summarize_option_trades(trades, timeframe=timeframe),
+            "segments": self._segment_option_trades(trades, timeframe=timeframe),
+            "examples": [trade.to_dict() for trade in trades[-20:]],
+        }
 
     def _load_candles(self, *, symbol: str, timeframe: str, limit: int) -> list[Candle]:
         session = get_session()
@@ -285,7 +369,7 @@ class BacktestService:
         finally:
             session.close()
 
-    def _signals_from_underlying(self, candles: list[Candle], *, direction: str, horizon: int) -> list[tuple[int, str, str]]:
+    def _signals_from_underlying(self, candles: list[Candle], *, direction: str, horizon: int, disabled_factors: set[str] | None = None) -> list[tuple[int, str, str]]:
         closes = [float(item.close_price) for item in candles]
         highs = [float(item.high_price) for item in candles]
         lows = [float(item.low_price) for item in candles]
@@ -313,6 +397,7 @@ class BacktestService:
                 rsi=rsi,
                 macd=macd,
                 macd_signal=macd_signal,
+                disabled_factors=disabled_factors or set(),
             )
             if signal_direction is None:
                 continue
@@ -338,25 +423,37 @@ class BacktestService:
         rsi: list[float],
         macd: list[float],
         macd_signal: list[float],
+        disabled_factors: set[str] | None = None,
     ) -> tuple[str | None, str]:
+        disabled_factors = disabled_factors or set()
         recent_high = max(highs[idx - 10 : idx])
         recent_low = min(lows[idx - 10 : idx])
         avg_volume = sum(volumes[idx - 20 : idx]) / 20
         volume_ok = volumes[idx] >= avg_volume * 1.15
+        breakout_call = "breakout" in disabled_factors or closes[idx] > recent_high
+        breakout_put = "breakout" in disabled_factors or closes[idx] < recent_low
+        ema_call = "ema" in disabled_factors or ema9[idx] > ema21[idx] > ema50[idx]
+        ema_put = "ema" in disabled_factors or ema9[idx] < ema21[idx] < ema50[idx]
+        macd_call = "macd" in disabled_factors or macd[idx] > macd_signal[idx]
+        macd_put = "macd" in disabled_factors or macd[idx] < macd_signal[idx]
+        rsi_call = "rsi" in disabled_factors or 48 <= rsi[idx] <= 72
+        rsi_put = "rsi" in disabled_factors or 28 <= rsi[idx] <= 52
+        volume_call = "volume" in disabled_factors or volume_ok
+        volume_put = "volume" in disabled_factors or volume_ok
 
         bullish = (
-            closes[idx] > recent_high
-            and ema9[idx] > ema21[idx] > ema50[idx]
-            and macd[idx] > macd_signal[idx]
-            and 48 <= rsi[idx] <= 72
-            and volume_ok
+            breakout_call
+            and ema_call
+            and macd_call
+            and rsi_call
+            and volume_call
         )
         bearish = (
-            closes[idx] < recent_low
-            and ema9[idx] < ema21[idx] < ema50[idx]
-            and macd[idx] < macd_signal[idx]
-            and 28 <= rsi[idx] <= 52
-            and volume_ok
+            breakout_put
+            and ema_put
+            and macd_put
+            and rsi_put
+            and volume_put
         )
         if bullish:
             return "CALL", "breakout with EMA alignment, MACD confirmation, RSI room, and volume expansion"
@@ -448,10 +545,12 @@ class BacktestService:
         entry_raw = float(series[option_idx].close_price)
         if entry_raw <= 0:
             return None
-        entry = entry_raw * (1 + settings.backtest_slippage_pct / 100)
+        entry_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
+        exit_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
+        entry = entry_raw * (1 + entry_friction_pct / 100)
         stop = entry * (1 - settings.backtest_option_stop_loss_pct / 100)
         target = entry * (1 + settings.backtest_option_target_pct / 100)
-        exit_price = float(series[min(option_idx + horizon, len(series) - 1)].close_price) * (1 - settings.backtest_slippage_pct / 100)
+        exit_price = float(series[min(option_idx + horizon, len(series) - 1)].close_price) * (1 - exit_friction_pct / 100)
         outcome = "expired"
         bars_held = min(horizon, len(series) - option_idx - 1)
 
@@ -460,12 +559,12 @@ class BacktestService:
             low = float(candle.low_price)
             high = float(candle.high_price)
             if low <= stop:
-                exit_price = stop * (1 - settings.backtest_slippage_pct / 100)
+                exit_price = stop * (1 - exit_friction_pct / 100)
                 outcome = "stop_loss"
                 bars_held = offset
                 break
             if high >= target:
-                exit_price = target * (1 - settings.backtest_slippage_pct / 100)
+                exit_price = target * (1 - exit_friction_pct / 100)
                 outcome = "target"
                 bars_held = offset
                 break
@@ -484,6 +583,8 @@ class BacktestService:
             pnl_pct=round(pnl_pct, 3),
             gross_pnl_pct=round(gross_pnl_pct, 3),
             charges_pct=round(charges_pct, 3),
+            slippage_pct=round(settings.backtest_slippage_pct * 2, 3),
+            spread_impact_pct=round(settings.paper_spread_impact_pct_per_side * 2, 3),
             bars_held=bars_held,
             reason=reason,
         )
@@ -542,11 +643,15 @@ class BacktestService:
                 "slippage_pct_per_side": settings.backtest_slippage_pct,
                 "avg_bars_held": 0.0,
                 "avg_time_in_trade_minutes": 0.0,
+                "gross_pnl_pct": 0.0,
+                "net_pnl_pct": 0.0,
             }
         wins = [trade for trade in trades if trade.pnl_pct > 0]
         losses = [trade for trade in trades if trade.pnl_pct < 0]
         gross_win = sum(trade.pnl_pct for trade in wins)
         gross_loss = abs(sum(trade.pnl_pct for trade in losses))
+        raw_gross_win = sum(trade.gross_pnl_pct for trade in trades if trade.gross_pnl_pct > 0)
+        raw_gross_loss = abs(sum(trade.gross_pnl_pct for trade in trades if trade.gross_pnl_pct < 0))
         avg_bars = sum(trade.bars_held for trade in trades) / len(trades)
         avg_minutes = avg_bars * self._timeframe_minutes(timeframe)
         return {
@@ -559,13 +664,99 @@ class BacktestService:
             "average_loss_pct": round(gross_loss / len(losses), 3) if losses else 0.0,
             "avg_pnl_pct": round(sum(trade.pnl_pct for trade in trades) / len(trades), 3),
             "expectancy_pct": round((gross_win - gross_loss) / len(trades), 3),
+            "gross_expectancy_pct": round((raw_gross_win - raw_gross_loss) / len(trades), 3),
             "profit_factor": round(gross_win / gross_loss, 2) if gross_loss else None,
+            "gross_profit_factor": round(raw_gross_win / raw_gross_loss, 2) if raw_gross_loss else None,
             "max_drawdown_pct": round(self._max_drawdown([trade.pnl_pct for trade in trades]), 3),
             "charges_pct_per_trade": settings.backtest_charges_pct,
             "slippage_pct_per_side": settings.backtest_slippage_pct,
+            "spread_impact_pct_per_side": settings.paper_spread_impact_pct_per_side,
             "avg_bars_held": round(avg_bars, 2),
             "avg_time_in_trade_minutes": round(avg_minutes, 2),
+            "gross_pnl_pct": round(sum(trade.gross_pnl_pct for trade in trades), 3),
+            "net_pnl_pct": round(sum(trade.pnl_pct for trade in trades), 3),
         }
+
+    def _ablation_impact(self, baseline: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+        baseline_trades = int(baseline.get("trades") or 0)
+        current_trades = int(current.get("trades") or 0)
+        baseline_wins = int(baseline.get("wins") or 0)
+        current_wins = int(current.get("wins") or 0)
+        return {
+            "net_expectancy_delta": round(float(current.get("expectancy_pct") or 0.0) - float(baseline.get("expectancy_pct") or 0.0), 3),
+            "win_rate_delta": round(float(current.get("win_rate") or 0.0) - float(baseline.get("win_rate") or 0.0), 2),
+            "profit_factor_delta": self._optional_delta(current.get("profit_factor"), baseline.get("profit_factor")),
+            "max_drawdown_delta": round(float(current.get("max_drawdown_pct") or 0.0) - float(baseline.get("max_drawdown_pct") or 0.0), 3),
+            "trade_count_delta": current_trades - baseline_trades,
+            "missed_winning_trades": max(0, baseline_wins - current_wins),
+        }
+
+    def _optional_delta(self, current: Any, baseline: Any) -> float | None:
+        if current is None or baseline is None:
+            return None
+        return round(float(current) - float(baseline), 3)
+
+    def _segment_option_trades(self, trades: list[OptionBacktestTrade], timeframe: str = "5minute") -> dict[str, Any]:
+        return {
+            "ce_vs_pe": self._summarize_groups(trades, lambda trade: "CE" if trade.direction == "CALL" else "PE", timeframe),
+            "expiry_day": self._summarize_groups(trades, lambda trade: "expiry_day" if self._is_expiry_day_trade(trade) else "non_expiry_or_unknown", timeframe),
+            "time_bucket": self._summarize_groups(trades, lambda trade: self._time_bucket(trade.timestamp), timeframe),
+            "moneyness": self._summarize_groups(trades, self._moneyness_bucket, timeframe),
+            "setup": self._summarize_groups(trades, lambda trade: trade.reason.split(":", 1)[0] if ":" in trade.reason else trade.reason[:60], timeframe),
+        }
+
+    def _summarize_groups(self, trades: list[OptionBacktestTrade], key_fn: Any, timeframe: str) -> dict[str, Any]:
+        groups: dict[str, list[OptionBacktestTrade]] = {}
+        for trade in trades:
+            groups.setdefault(str(key_fn(trade)), []).append(trade)
+        return {key: self._summarize_option_trades(items, timeframe=timeframe) for key, items in groups.items()}
+
+    def _time_bucket(self, timestamp: str) -> str:
+        try:
+            parsed = datetime.fromisoformat(timestamp)
+        except ValueError:
+            return "unknown"
+        total = parsed.hour * 60 + parsed.minute
+        if total < 10 * 60:
+            return "open_early"
+        if total < 11 * 60 + 30:
+            return "morning"
+        if total < 13 * 60 + 30:
+            return "midday"
+        if total < 14 * 60 + 45:
+            return "afternoon"
+        return "closing"
+
+    def _moneyness_bucket(self, trade: OptionBacktestTrade) -> str:
+        parsed = self._parse_option_symbol(trade.tradingsymbol)
+        if parsed is None:
+            return "unknown"
+        distance_pct = ((float(parsed["strike"]) - trade.underlying_entry) / max(trade.underlying_entry, 0.01)) * 100
+        if abs(distance_pct) <= 0.15:
+            return "ATM"
+        if trade.direction == "CALL":
+            return "ITM" if distance_pct < 0 else "OTM"
+        return "ITM" if distance_pct > 0 else "OTM"
+
+    def _is_expiry_day_trade(self, trade: OptionBacktestTrade) -> bool:
+        expiry = self._parse_expiry_from_symbol(trade.tradingsymbol, trade.timestamp)
+        if expiry is None:
+            return False
+        try:
+            trade_date = datetime.fromisoformat(trade.timestamp).date()
+        except ValueError:
+            return False
+        return trade_date == expiry.date()
+
+    def _parse_expiry_from_symbol(self, symbol: str, timestamp: str) -> datetime | None:
+        match = re.search(r"(?P<day>\d{2})(?P<month>[A-Z]{3})\d+(?:\.\d+)?(?:CE|PE)$", symbol.upper())
+        if not match:
+            return None
+        try:
+            year = datetime.fromisoformat(timestamp).year
+            return datetime.strptime(f"{year}-{match.group('month')}-{match.group('day')}", "%Y-%b-%d")
+        except ValueError:
+            return None
 
     def _max_drawdown(self, returns_pct: list[float]) -> float:
         equity = 0.0

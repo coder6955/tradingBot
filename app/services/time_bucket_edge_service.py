@@ -5,6 +5,7 @@ from typing import Any
 
 from app.config import settings
 from app.services.backtest_service import BacktestService
+from app.services.time_utils import ist_now_naive
 
 
 class TimeBucketEdgeService:
@@ -62,7 +63,7 @@ class TimeBucketEdgeService:
         return stats
 
     def _current_bucket(self) -> str:
-        now = datetime.now()
+        now = ist_now_naive()
         return self._bucket_for_time(now.hour, now.minute)
 
     def _bucket_for_timestamp(self, value: str) -> str | None:

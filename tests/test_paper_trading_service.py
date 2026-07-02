@@ -15,10 +15,13 @@ class PaperTradingServiceTests(unittest.TestCase):
     def test_close_trade_updates_pnl(self) -> None:
         service = PaperTradingService()
         service.execute_trade("NIFTY", 100.0, 1, 110.0, "BUY_CE")
-        service.close_trade("NIFTY", 115.0)
+        trade = service.close_trade("NIFTY", 115.0)
         summary = service.get_summary()
         self.assertEqual(summary["closed_trades"], 1)
-        self.assertEqual(summary["pnl"], 15.0)
+        self.assertEqual(trade["gross_pnl"], 15.0)
+        self.assertGreater(trade["charges"], 0)
+        self.assertEqual(summary["pnl"], trade["net_pnl"])
+        self.assertLess(summary["pnl"], trade["gross_pnl"])
 
 
 if __name__ == "__main__":

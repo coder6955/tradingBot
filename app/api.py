@@ -14,6 +14,7 @@ from app.services.auto_trader_service import AutoTraderService
 from app.services.automation_supervisor_service import AutomationSupervisorService
 from app.services.opportunity_repository import OpportunityRepository
 from app.services.opportunity_outcome_service import OpportunityOutcomeService
+from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
 from app.services.broker_sync_service import BrokerSyncService
 from app.services.backtest_service import BacktestService
 from app.services.data_ingestion_service import DataIngestionService
@@ -21,11 +22,14 @@ from app.services.day_type_service import DayTypeService
 from app.services.database import get_session
 from app.services.greeks_service import GreeksService
 from app.services.notification_service import NotificationService
+from app.services.execution_analytics_service import ExecutionAnalyticsService
+from app.services.opportunity_analytics_service import OpportunityAnalyticsService
 from app.services.option_history_repository import OptionHistoryRepository
 from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
 from app.services.option_quality_service import OptionQualityService
 from app.services.option_snapshot_collector_service import OptionSnapshotCollectorService
 from app.services.outcome_learning_service import OutcomeLearningService
+from app.services.professional_readiness_service import ProfessionalReadinessService
 from app.services.risk_management_service import RiskManagementService
 from app.services.strategy_edge_service import StrategyEdgeService
 from app.services.strategy_validation_repository import StrategyValidationRepository
@@ -33,7 +37,9 @@ from app.services.time_bucket_edge_service import TimeBucketEdgeService
 from app.services.trade_exit_service import TradeExitService
 from app.services.trade_repository import TradeRepository
 from app.services.trade_setup_service import OptionContract
+from app.services.time_utils import format_ist
 from app.providers.kite_provider import KiteProvider
+from app.providers.kite_feed import KiteFeed
 from app.providers.token_store import save_access_token, load_access_token
 from fastapi.responses import RedirectResponse, HTMLResponse
 
@@ -48,7 +54,7 @@ Recommended sequence:
 4. Start automation: `POST /automation/start`
 5. Watch automation: `GET /automation/status`, `GET /dashboard`
 6. Manual override if needed: `GET /scanner/diagnostics?side=BUY&symbols=BANKNIFTY`
-7. Research quality: `POST /research/market-insights`, `GET /research/outcome-learning`, `POST /research/greeks`, `POST /research/option-quality`, `POST /research/backtest`
+7. Research quality: `GET /research/professional-readiness`, `GET /research/opportunity-analytics`, `GET /research/execution-analytics`, `GET /research/outcome-learning`, `POST /research/backtest/options`, `POST /research/walk-forward`
 8. Watch saved opportunities: `GET /opportunities`, `GET /opportunities/performance`
 9. Study failures: `POST /opportunities/evaluate-open`, `GET /opportunities/failure-analysis`
 10. Live orders only after validation: set `LIVE_TRADING_MODE=true`, `PAPER_TRADING_MODE=false`, `AUTOMATION_PLACE_ORDERS=true`, and `AUTOMATION_CONFIRM_LIVE=true`
@@ -81,6 +87,7 @@ market_data_service = MarketDataService()
 signal_repository = SignalRepository()
 paper_trading_service = PaperTradingService()
 opportunity_repository = OpportunityRepository()
+rejected_opportunity_repository = RejectedOpportunityRepository()
 trade_repository = TradeRepository()
 risk_management_service = RiskManagementService(trade_repository)
 notification_service = NotificationService()
@@ -88,12 +95,21 @@ greeks_service = GreeksService()
 option_quality_service = OptionQualityService(greeks_service)
 backtest_service = BacktestService()
 option_history_repository = OptionHistoryRepository()
+shared_kite_feed = KiteFeed() if settings.use_kite_market_data else None
 strategy_validation_repository = StrategyValidationRepository()
 strategy_edge_service = StrategyEdgeService(backtest_service=backtest_service, repository=strategy_validation_repository)
 day_type_service = DayTypeService()
 option_premium_confirmation_service = OptionPremiumConfirmationService()
 time_bucket_edge_service = TimeBucketEdgeService(backtest_service=backtest_service)
 outcome_learning_service = OutcomeLearningService()
+opportunity_analytics_service = OpportunityAnalyticsService()
+execution_analytics_service = ExecutionAnalyticsService()
+professional_readiness_service = ProfessionalReadinessService(
+    backtest_service=backtest_service,
+    opportunity_analytics_service=opportunity_analytics_service,
+    execution_analytics_service=execution_analytics_service,
+    option_history_repository=option_history_repository,
+)
 
 
 def get_kite_provider() -> KiteProvider:
@@ -114,7 +130,11 @@ option_snapshot_collector_service = OptionSnapshotCollectorService(data_ingestio
 
 
 def get_scanner_service() -> ScannerService:
-    return ScannerService(strategy_edge_service=strategy_edge_service)
+    return ScannerService(
+        strategy_edge_service=strategy_edge_service,
+        feed=shared_kite_feed,
+        rejected_opportunity_repository=rejected_opportunity_repository,
+    )
 
 
 def get_order_service() -> OrderService:
@@ -159,6 +179,10 @@ automation_supervisor_service = AutomationSupervisorService(
 
 @app.on_event("startup")
 async def startup_automation() -> None:
+    try:
+        broker_sync_service.sync_open_trades(limit=100)
+    except Exception:
+        pass
     if settings.automation_enabled:
         automation_supervisor_service.start()
 
@@ -446,7 +470,7 @@ async function refreshAll() {
   }, null, 2);
   document.getElementById("ordersJson").textContent = JSON.stringify({executions: val(execs), lifecycle_trades: t, paper: val(paper)}, null, 2);
   document.getElementById("accountJson").textContent = JSON.stringify({margins: val(margins), positions: val(positions)}, null, 2);
-  document.getElementById("refreshText").textContent = `Last refreshed ${new Date().toLocaleTimeString()}`;
+  document.getElementById("refreshText").textContent = `Last refreshed ${new Date().toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })} IST`;
 }
 refreshAll();
 setInterval(refreshAll, 5000);
@@ -464,7 +488,7 @@ def opportunity_record_to_dict(record) -> dict[str, object]:
         failure_tags = []
     return {
         "id": record.id,
-        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "created_at": format_ist(record.created_at),
         "symbol": record.symbol,
         "action": record.action,
         "side": record.side,
@@ -485,7 +509,7 @@ def opportunity_record_to_dict(record) -> dict[str, object]:
         "status": record.status,
         "outcome": record.outcome,
         "exit_price": record.exit_price,
-        "closed_at": record.closed_at.isoformat() if record.closed_at else None,
+        "closed_at": format_ist(record.closed_at),
         "pnl": record.pnl,
         "failure_tags": failure_tags,
         "review_notes": record.review_notes,
@@ -495,8 +519,8 @@ def opportunity_record_to_dict(record) -> dict[str, object]:
 def trade_record_to_dict(record) -> dict[str, object]:
     return {
         "id": record.id,
-        "created_at": record.created_at.isoformat() if record.created_at else None,
-        "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+        "created_at": format_ist(record.created_at),
+        "updated_at": format_ist(record.updated_at),
         "opportunity_id": record.opportunity_id,
         "symbol": record.symbol,
         "tradingsymbol": record.tradingsymbol,
@@ -516,7 +540,13 @@ def trade_record_to_dict(record) -> dict[str, object]:
         "target_2": record.target_2,
         "target_3": record.target_3,
         "exit_price": record.exit_price,
-        "pnl": record.pnl,
+        "gross_pnl": getattr(record, "gross_pnl", None),
+        "net_pnl": getattr(record, "net_pnl", None),
+        "charges": getattr(record, "charges", None),
+        "slippage_cost": getattr(record, "slippage_cost", None),
+        "spread_cost": getattr(record, "spread_cost", None),
+        "remaining_quantity": getattr(record, "remaining_quantity", None),
+        "pnl": getattr(record, "net_pnl", None) if getattr(record, "net_pnl", None) is not None else record.pnl,
         "outcome": record.outcome,
         "notes": record.notes,
     }
@@ -528,7 +558,7 @@ def option_quote_snapshot_to_dict(record) -> dict[str, object]:
         "underlying": record.underlying,
         "tradingsymbol": record.tradingsymbol,
         "exchange": record.exchange,
-        "timestamp": record.timestamp.isoformat() if record.timestamp else None,
+        "timestamp": format_ist(record.timestamp),
         "expiry": record.expiry,
         "strike": record.strike,
         "option_type": record.option_type,
@@ -864,7 +894,29 @@ def get_research_settings() -> dict[str, object]:
             "max_trend_momentum_score": settings.max_trend_momentum_score,
             "option_time_stop_minutes": settings.option_time_stop_minutes,
             "option_time_stop_min_move_pct": settings.option_time_stop_min_move_pct,
+            "option_trailing_stop_lock_pct": settings.option_trailing_stop_lock_pct,
             "exit_open_trades_before_close_minutes": settings.exit_open_trades_before_close_minutes,
+            "fast_exit_interval_seconds": settings.fast_exit_interval_seconds,
+            "underlying_invalidation_exit": settings.enable_underlying_invalidation_exit,
+            "premium_invalidation_exit": settings.enable_premium_invalidation_exit,
+            "broker_emergency_sl": {
+                "enabled": settings.enable_broker_emergency_sl,
+                "status": "not_supported_by_current_order_service",
+                "fallback": "startup broker sync plus software square-off",
+            },
+            "partial_booking": {
+                "enabled": settings.enable_partial_booking,
+                "target1_pct": settings.partial_target1_pct,
+                "move_sl_to_cost": settings.partial_move_sl_to_cost,
+                "note": "disabled by default; only practical when quantity can be split by lot size",
+            },
+        },
+        "freshness": {
+            "max_live_quote_age_seconds": settings.max_live_quote_age_seconds,
+            "max_live_option_quote_age_seconds": settings.max_live_option_quote_age_seconds,
+            "max_live_chain_age_seconds": settings.max_live_chain_age_seconds,
+            "max_live_candle_age_seconds": settings.max_live_candle_age_seconds,
+            "max_paper_candle_age_seconds": settings.max_paper_candle_age_seconds,
         },
     }
 
@@ -961,6 +1013,41 @@ def get_market_insights(
 )
 def get_outcome_learning() -> dict[str, object]:
     return {"status": "ok", "learning": outcome_learning_service.analyze()}
+
+
+@app.get(
+    "/research/opportunity-analytics",
+    tags=["10 Research"],
+    summary="Analyze scanner opportunity outcomes by professional segments",
+    description="Studies saved opportunities by CE/PE, expiry day, time bucket, score bucket, setup type, and failure tags.",
+)
+def get_opportunity_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+    return opportunity_analytics_service.analyze(symbol=symbol, limit=limit)
+
+
+@app.get(
+    "/research/execution-analytics",
+    tags=["10 Research"],
+    summary="Analyze paper/live execution quality and trade outcomes",
+    description="Separates execution quality from signal quality: fill rate, entry deviation, CE/PE results, time bucket, and P&L metrics.",
+)
+def get_execution_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+    return execution_analytics_service.analyze(symbol=symbol, limit=limit)
+
+
+@app.get(
+    "/research/professional-readiness",
+    tags=["10 Research"],
+    summary="Combined professional-readiness report for Bank Nifty option buying",
+    description="Combines option data coverage, opportunity outcomes, execution analytics, option backtest, ablation, and walk-forward validation.",
+)
+def get_professional_readiness(
+    symbol: str = "BANKNIFTY",
+    timeframe: str = "5minute",
+    direction: str = "BOTH",
+    limit: int = 3000,
+) -> dict[str, object]:
+    return professional_readiness_service.report(symbol=symbol, timeframe=timeframe, direction=direction, limit=limit)
 
 
 @app.post(
@@ -1118,6 +1205,37 @@ def run_option_premium_backtest(
             direction=str(payload.get("direction") or "BOTH"),
             horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
             limit=int(payload.get("limit") or 3000),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/research/backtest/ablation",
+    tags=["10 Research"],
+    summary="Compare backtest performance with selected factors removed",
+    description="Runs option-premium replay variants to identify which available factors improve or hurt net expectancy.",
+)
+def run_ablation_backtest(
+    payload: dict[str, object] = Body(
+        examples=[
+            {
+                "symbol": "BANKNIFTY",
+                "timeframe": "5minute",
+                "direction": "BOTH",
+                "horizon_candles": 12,
+                "limit": 1000,
+            }
+        ]
+    ),
+) -> dict[str, object]:
+    try:
+        return backtest_service.run_ablation(
+            symbol=str(payload.get("symbol") or "BANKNIFTY"),
+            timeframe=str(payload.get("timeframe") or "5minute"),
+            direction=str(payload.get("direction") or "BOTH"),
+            horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
+            limit=int(payload.get("limit") or 1000),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1290,6 +1408,7 @@ def list_option_history(underlying: str | None = None, limit: int = 20) -> dict[
     return {
         "count": len(records),
         "total_snapshots": option_history_repository.count_snapshots(underlying),
+        "coverage": option_history_repository.coverage_summary(underlying),
         "snapshots": [option_quote_snapshot_to_dict(record) for record in records],
     }
 
@@ -1616,6 +1735,41 @@ def get_opportunity_performance() -> dict[str, object]:
 )
 def get_opportunity_failure_analysis() -> dict[str, object]:
     return opportunity_repository.failure_analysis()
+
+
+@app.get(
+    "/opportunities/rejections",
+    tags=["06 Opportunity Journal"],
+    summary="Analyze rejected scanner setups",
+    description="Shows hard-gate rejection reasons and any later manually/evaluated outcome for rejected setups.",
+)
+def get_rejected_opportunities(symbol: str | None = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+    return rejected_opportunity_repository.analyze(symbol=symbol, limit=limit)
+
+
+@app.post(
+    "/opportunities/rejections/{rejection_id}/outcome",
+    tags=["06 Opportunity Journal"],
+    summary="Mark later outcome for a rejected setup",
+)
+def update_rejected_opportunity_outcome(
+    rejection_id: int,
+    payload: dict[str, object] = Body(examples=[{"outcome": "would_have_hit_target", "exit_price": 250.0, "notes": "Rejected setup later moved well"}]),
+) -> dict[str, object]:
+    outcome = str(payload.get("outcome") or "")
+    if not outcome:
+        raise HTTPException(status_code=400, detail="outcome is required")
+    exit_price = float(payload["exit_price"]) if payload.get("exit_price") is not None else None
+    try:
+        record = rejected_opportunity_repository.mark_later_outcome(
+            rejection_id,
+            outcome=outcome,
+            exit_price=exit_price,
+            notes=str(payload.get("notes") or ""),
+        )
+        return {"rejection": rejected_opportunity_repository.to_dict(record)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post(

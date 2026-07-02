@@ -9,6 +9,7 @@ from app.config import settings
 from app.providers.kite_provider import KiteProvider
 from app.services.database import OpportunityRecord
 from app.services.opportunity_repository import OpportunityRepository
+from app.services.time_utils import ist_now_naive, ist_today
 from app.services.trade_exit_service import TradeExitService
 
 
@@ -38,7 +39,8 @@ class OpportunityOutcomeService:
     def start(self, interval_seconds: int = 30) -> dict[str, Any]:
         if self.running:
             return self.status()
-        self.interval_seconds = max(5, int(interval_seconds))
+        minimum = max(1, int(settings.fast_exit_interval_seconds))
+        self.interval_seconds = max(minimum, int(interval_seconds))
         self.running = True
         self.task = asyncio.create_task(self._run())
         return self.status()
@@ -69,7 +71,7 @@ class OpportunityOutcomeService:
             try:
                 self.evaluate_once()
             except Exception as exc:
-                self.errors.append({"time": datetime.utcnow().isoformat(), "error": str(exc)})
+                self.errors.append({"time": ist_now_naive().isoformat(), "error": str(exc)})
             await asyncio.sleep(float(self.interval_seconds))
 
     def evaluate_once(self, limit: int = 100) -> dict[str, Any]:
@@ -79,7 +81,7 @@ class OpportunityOutcomeService:
         for record in open_records:
             results.append(self._evaluate_record(provider, record))
         trade_exit_result = self.trade_exit_service.evaluate_once(limit=limit) if self.trade_exit_service else None
-        self.last_run_at = datetime.utcnow().isoformat()
+        self.last_run_at = ist_now_naive().isoformat()
         self.last_results = results
         self.last_trade_exit_result = trade_exit_result
         return {
@@ -147,13 +149,13 @@ class OpportunityOutcomeService:
 
     def _expired_result(self, record: OpportunityRecord) -> float | None:
         expiry = self._parse_date(record.expiry)
-        if expiry is None or expiry >= date.today():
+        if expiry is None or expiry >= ist_today():
             return None
         return 0.0 if record.side == "BUY" else record.entry_price
 
     def _outcome_for_price(self, record: OpportunityRecord, price: float) -> str | None:
         expiry = self._parse_date(record.expiry)
-        if expiry is not None and expiry < date.today():
+        if expiry is not None and expiry < ist_today():
             return "expired"
 
         if record.side == "SELL":
@@ -189,7 +191,7 @@ class OpportunityOutcomeService:
         prices = factors.get("prices", {}) if isinstance(factors.get("prices"), dict) else {}
 
         expiry = self._parse_date(record.expiry)
-        if expiry is not None and expiry <= date.today():
+        if expiry is not None and expiry <= ist_today():
             tags.append("expiry_day_or_expired_option")
         if record.side == "BUY" and record.entry_price is not None and record.entry_price < settings.min_option_buy_premium:
             tags.append("low_premium_option_noise")

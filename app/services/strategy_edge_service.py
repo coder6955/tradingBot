@@ -7,6 +7,7 @@ from typing import Any
 from app.config import settings
 from app.services.backtest_service import BacktestService
 from app.services.strategy_validation_repository import StrategyValidationRepository
+from app.services.time_utils import format_ist, ist_now_naive
 
 
 class StrategyEdgeService:
@@ -35,7 +36,7 @@ class StrategyEdgeService:
         direction = direction.upper()
         cache_key = f"{symbol.upper()}|{direction}|{timeframe}"
         cached = self.cache.get(cache_key)
-        if cached and not refresh and datetime.utcnow() - cached[0] < timedelta(seconds=settings.strategy_edge_cache_seconds):
+        if cached and not refresh and ist_now_naive() - cached[0] < timedelta(seconds=settings.strategy_edge_cache_seconds):
             return cached[1]
 
         latest = None if refresh else self.repository.latest(
@@ -48,7 +49,7 @@ class StrategyEdgeService:
             result = self.validate(symbol=symbol, direction=direction, timeframe=timeframe)
         else:
             result = self._record_to_evaluation(latest)
-        self.cache[cache_key] = (datetime.utcnow(), result)
+        self.cache[cache_key] = (ist_now_naive(), result)
         return result
 
     def validate(self, *, symbol: str, direction: str = "BOTH", timeframe: str = "5minute", limit: int = 3000) -> dict[str, Any]:
@@ -85,7 +86,7 @@ class StrategyEdgeService:
             "timeframe": record.timeframe,
             "direction": record.direction,
             "mode": record.mode,
-            "created_at": record.created_at.isoformat() if record.created_at else None,
+            "created_at": format_ist(record.created_at),
             "passed": bool(record.passed),
             "reasons": reasons,
             "summary": {

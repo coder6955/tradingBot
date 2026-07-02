@@ -7,6 +7,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from app.config import settings
 from app.services.account_funds_service import AccountFundsService
+from app.services.database import Candle, get_session
+from app.services.time_utils import ist_today
 
 
 @dataclass(frozen=True)
@@ -43,7 +45,7 @@ class TradeSetupService:
                     expiries.append(expiry)
         if not expiries:
             return None
-        today = date.today()
+        today = ist_today()
         valid_expiries = [expiry for expiry in expiries if expiry >= today]
         return min(valid_expiries or expiries).isoformat()
 
@@ -132,9 +134,16 @@ class TradeSetupService:
             score += 15
         return min(score, 100)
 
-    def build_prices(self, entry_price: float, side: str, underlying: str | None = None, snapshot: Dict[str, Any] | None = None) -> Dict[str, float]:
+    def build_prices(
+        self,
+        entry_price: float,
+        side: str,
+        underlying: str | None = None,
+        snapshot: Dict[str, Any] | None = None,
+        contract: OptionContract | None = None,
+    ) -> Dict[str, float]:
         if (underlying or "").upper() == "BANKNIFTY" and side.upper() == "BUY":
-            return self._banknifty_buy_prices(entry_price, snapshot or {})
+            return self._banknifty_buy_prices(entry_price, snapshot or {}, contract=contract)
         if side.upper() == "SELL":
             stop_loss = entry_price * 1.35
             target_1 = entry_price * 0.75
@@ -158,24 +167,45 @@ class TradeSetupService:
             "risk_reward": round(reward / risk, 2) if risk > 0 else 0.0,
         }
 
-    def _banknifty_buy_prices(self, entry_price: float, snapshot: Dict[str, Any]) -> Dict[str, float]:
-        risk_pct = self._banknifty_premium_risk_pct(snapshot)
-        target_1_pct = risk_pct * 1.45
-        target_2_pct = risk_pct * 2.05
-        target_3_pct = risk_pct * 2.75
-        stop_loss = entry_price * (1 - risk_pct)
-        target_1 = entry_price * (1 + target_1_pct)
-        target_2 = entry_price * (1 + target_2_pct)
-        target_3 = entry_price * (1 + target_3_pct)
+    def _banknifty_buy_prices(self, entry_price: float, snapshot: Dict[str, Any], contract: OptionContract | None = None) -> Dict[str, float]:
+        structure = self._option_premium_structure(contract.tradingsymbol if contract else "")
+        spread = max((contract.ask - contract.bid) if contract and contract.ask and contract.bid else 0.0, 0.0)
+        atr = float(structure.get("atr") or 0.0)
+        swing_low = float(structure.get("swing_low") or 0.0)
+        swing_high = float(structure.get("swing_high") or 0.0)
+        atr_pct = atr / max(entry_price, 0.05)
+        spread_pct = spread / max(entry_price, 0.05)
+        fallback_risk_pct = self._banknifty_premium_risk_pct(snapshot)
+        min_noise_risk = max(entry_price * 0.10, atr * 1.05, spread * 2.0, 0.05)
+        max_risk = entry_price * self._max_banknifty_risk_pct(entry_price, atr_pct, spread_pct, snapshot)
+
+        if swing_low > 0 and swing_low < entry_price:
+            structure_risk = entry_price - max(0.05, swing_low - max(spread, atr * 0.20))
+        else:
+            structure_risk = entry_price * fallback_risk_pct
+        risk = max(min_noise_risk, structure_risk)
+        risk = min(max(risk, entry_price * 0.12), max_risk)
+
+        stop_loss = max(0.05, entry_price - risk)
+        target_1 = self._first_target(entry_price=entry_price, risk=risk, atr=atr, swing_high=swing_high, spread=spread, snapshot=snapshot)
+        target_2 = max(target_1 + risk * 0.55, entry_price + risk * 2.05, target_1 * 1.10)
+        target_3 = max(target_2 + risk * 0.65, entry_price + risk * 3.00, target_2 * 1.12)
+        reward = target_1 - entry_price
         return {
             "entry_price": round(entry_price, 2),
             "stop_loss": round(stop_loss, 2),
             "target_1": round(target_1, 2),
             "target_2": round(target_2, 2),
             "target_3": round(target_3, 2),
-            "risk_reward": round(target_1_pct / risk_pct, 2) if risk_pct > 0 else 0.0,
-            "risk_model": "banknifty_adaptive_premium",
-            "premium_risk_pct": round(risk_pct * 100, 2),
+            "risk_reward": round(reward / risk, 2) if risk > 0 else 0.0,
+            "risk_model": "banknifty_structure_atr_premium",
+            "premium_risk_pct": round((risk / max(entry_price, 0.05)) * 100, 2),
+            "premium_atr": round(atr, 2),
+            "premium_atr_pct": round(atr_pct * 100, 2),
+            "premium_swing_low": round(swing_low, 2) if swing_low else 0.0,
+            "premium_swing_high": round(swing_high, 2) if swing_high else 0.0,
+            "spread_cushion": round(spread, 2),
+            "exit_logic": "SL below recent option premium support with ATR/spread noise buffer; targets from premium resistance and R-multiples.",
         }
 
     def _banknifty_premium_risk_pct(self, snapshot: Dict[str, Any]) -> float:
@@ -190,6 +220,59 @@ class TradeSetupService:
         if not bool(snapshot.get("volume_confirmed")):
             risk_pct -= 0.02
         return max(0.16, min(0.28, risk_pct))
+
+    def _option_premium_structure(self, tradingsymbol: str, timeframe: str = "5minute", limit: int = 24) -> Dict[str, float]:
+        if not tradingsymbol:
+            return {"atr": 0.0, "swing_low": 0.0, "swing_high": 0.0}
+        session = get_session()
+        try:
+            rows = (
+                session.query(Candle)
+                .filter(Candle.symbol == tradingsymbol, Candle.timeframe == timeframe)
+                .order_by(Candle.timestamp.desc())
+                .limit(limit)
+                .all()
+            )
+            candles = list(reversed(rows))
+        finally:
+            session.close()
+        if len(candles) < 4:
+            return {"atr": 0.0, "swing_low": 0.0, "swing_high": 0.0}
+        true_ranges: list[float] = []
+        previous_close = float(candles[0].close_price)
+        for candle in candles[1:]:
+            high = float(candle.high_price)
+            low = float(candle.low_price)
+            true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+            previous_close = float(candle.close_price)
+        recent = candles[-8:] if len(candles) >= 8 else candles
+        return {
+            "atr": sum(true_ranges[-14:]) / max(len(true_ranges[-14:]), 1),
+            "swing_low": min(float(candle.low_price) for candle in recent),
+            "swing_high": max(float(candle.high_price) for candle in recent),
+        }
+
+    def _max_banknifty_risk_pct(self, entry_price: float, atr_pct: float, spread_pct: float, snapshot: Dict[str, Any]) -> float:
+        adx = float(snapshot.get("adx") or 15.0)
+        room_pct = float(snapshot.get("room_to_level_pct") or 0.0)
+        cap = 0.30
+        if entry_price < settings.min_option_buy_premium * 1.5:
+            cap = 0.24
+        if atr_pct > 0.20 or spread_pct > 0.03:
+            cap -= 0.03
+        if adx >= 25:
+            cap += 0.03
+        if room_pct and room_pct < settings.min_directional_room_pct * 1.5:
+            cap -= 0.03
+        return max(0.18, min(0.36, cap))
+
+    def _first_target(self, *, entry_price: float, risk: float, atr: float, swing_high: float, spread: float, snapshot: Dict[str, Any]) -> float:
+        minimum_target = entry_price + max(risk * 1.20, atr * 1.35, spread * 3.0, entry_price * 0.14)
+        if swing_high > entry_price and (swing_high - entry_price) >= risk * 1.05:
+            return max(minimum_target, min(swing_high, entry_price + risk * 1.80))
+        adx = float(snapshot.get("adx") or 15.0)
+        multiplier = 1.45 if adx < 24 else 1.65
+        return max(minimum_target, entry_price + risk * multiplier)
 
     def position_size(self, entry_price: float, stop_loss: float, lot_size: int, side: str, account_equity: float | None = None) -> int:
         if lot_size <= 0:
@@ -218,7 +301,7 @@ class TradeSetupService:
             if entry_price < settings.min_option_buy_premium:
                 failures.append("option premium is below minimum configured for buying")
             expiry = self._parse_expiry(contract.expiry)
-            if settings.block_expiry_day_option_buying and expiry is not None and expiry <= date.today():
+            if settings.block_expiry_day_option_buying and expiry is not None and expiry <= ist_today():
                 failures.append("expiry-day option buying is blocked")
             if enforce_budget:
                 available_cash = self._available_cash()

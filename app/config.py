@@ -96,8 +96,23 @@ class Settings:
     enable_option_premium_confirmation: bool = os.getenv("ENABLE_OPTION_PREMIUM_CONFIRMATION", "true").lower() == "true"
     min_option_premium_confirmation_score: int = int(os.getenv("MIN_OPTION_PREMIUM_CONFIRMATION_SCORE", "55"))
     option_premium_lookback_candles: int = int(os.getenv("OPTION_PREMIUM_LOOKBACK_CANDLES", "6"))
+    enable_banknifty_intelligence: bool = os.getenv("ENABLE_BANKNIFTY_INTELLIGENCE", "true").lower() == "true"
+    banknifty_top_bank_min_alignment: float = float(os.getenv("BANKNIFTY_TOP_BANK_MIN_ALIGNMENT", "0.55"))
+    banknifty_top_bank_min_direction_count: int = int(os.getenv("BANKNIFTY_TOP_BANK_MIN_DIRECTION_COUNT", "3"))
+    banknifty_extreme_divergence_pct: float = float(os.getenv("BANKNIFTY_EXTREME_DIVERGENCE_PCT", "0.35"))
+    banknifty_opening_range_start: str = os.getenv("BANKNIFTY_OPENING_RANGE_START", "09:15")
+    banknifty_opening_range_end: str = os.getenv("BANKNIFTY_OPENING_RANGE_END", "09:30")
+    banknifty_no_trade_start_time: str = os.getenv("BANKNIFTY_NO_TRADE_START_TIME", "09:15")
+    banknifty_first_trade_time: str = os.getenv("BANKNIFTY_FIRST_TRADE_TIME", "09:30")
+    banknifty_major_zone_points: int = int(os.getenv("BANKNIFTY_MAJOR_ZONE_POINTS", "500"))
+    banknifty_very_major_zone_points: int = int(os.getenv("BANKNIFTY_VERY_MAJOR_ZONE_POINTS", "1000"))
+    banknifty_zone_risk_points: float = float(os.getenv("BANKNIFTY_ZONE_RISK_POINTS", "80"))
+    banknifty_expected_move_min_coverage: float = float(os.getenv("BANKNIFTY_EXPECTED_MOVE_MIN_COVERAGE", "1.05"))
+    banknifty_event_dates: str = os.getenv("BANKNIFTY_EVENT_DATES", "")
+    banknifty_event_preferred_after_time: str = os.getenv("BANKNIFTY_EVENT_PREFERRED_AFTER_TIME", "10:00")
     option_time_stop_minutes: int = int(os.getenv("OPTION_TIME_STOP_MINUTES", "15"))
     option_time_stop_min_move_pct: float = float(os.getenv("OPTION_TIME_STOP_MIN_MOVE_PCT", "6.0"))
+    option_trailing_stop_lock_pct: float = float(os.getenv("OPTION_TRAILING_STOP_LOCK_PCT", "2.0"))
     exit_open_trades_before_close_minutes: int = int(os.getenv("EXIT_OPEN_TRADES_BEFORE_CLOSE_MINUTES", "10"))
     enable_time_bucket_filter: bool = os.getenv("ENABLE_TIME_BUCKET_FILTER", "false").lower() == "true"
     min_time_bucket_trades: int = int(os.getenv("MIN_TIME_BUCKET_TRADES", "8"))
@@ -126,6 +141,29 @@ class Settings:
     automation_scan_limit: int = int(os.getenv("AUTOMATION_SCAN_LIMIT", "3"))
     automation_strike_window_pct: float = float(os.getenv("AUTOMATION_STRIKE_WINDOW_PCT", "4.0"))
     automation_max_contracts_per_symbol: int = int(os.getenv("AUTOMATION_MAX_CONTRACTS_PER_SYMBOL", "120"))
+    max_live_quote_age_seconds: int = int(os.getenv("MAX_LIVE_QUOTE_AGE_SECONDS", "8"))
+    max_live_option_quote_age_seconds: int = int(os.getenv("MAX_LIVE_OPTION_QUOTE_AGE_SECONDS", "8"))
+    max_live_chain_age_seconds: int = int(os.getenv("MAX_LIVE_CHAIN_AGE_SECONDS", "10"))
+    max_live_candle_age_seconds: int = int(os.getenv("MAX_LIVE_CANDLE_AGE_SECONDS", "420"))
+    max_paper_candle_age_seconds: int = int(os.getenv("MAX_PAPER_CANDLE_AGE_SECONDS", "1800"))
+    kite_snapshot_cache_ttl_seconds: int = int(os.getenv("KITE_SNAPSHOT_CACHE_TTL_SECONDS", "3"))
+    kite_quote_cache_ttl_seconds: int = int(os.getenv("KITE_QUOTE_CACHE_TTL_SECONDS", "2"))
+    kite_instrument_cache_ttl_seconds: int = int(os.getenv("KITE_INSTRUMENT_CACHE_TTL_SECONDS", "21600"))
+    estimated_brokerage_per_order: float = float(os.getenv("ESTIMATED_BROKERAGE_PER_ORDER", "20.0"))
+    estimated_stt_sell_pct: float = float(os.getenv("ESTIMATED_STT_SELL_PCT", "0.0625"))
+    estimated_exchange_txn_pct: float = float(os.getenv("ESTIMATED_EXCHANGE_TXN_PCT", "0.053"))
+    estimated_sebi_pct: float = float(os.getenv("ESTIMATED_SEBI_PCT", "0.0001"))
+    estimated_gst_pct: float = float(os.getenv("ESTIMATED_GST_PCT", "18.0"))
+    estimated_stamp_buy_pct: float = float(os.getenv("ESTIMATED_STAMP_BUY_PCT", "0.003"))
+    paper_slippage_pct_per_side: float = float(os.getenv("PAPER_SLIPPAGE_PCT_PER_SIDE", "0.50"))
+    paper_spread_impact_pct_per_side: float = float(os.getenv("PAPER_SPREAD_IMPACT_PCT_PER_SIDE", "0.25"))
+    fast_exit_interval_seconds: int = int(os.getenv("FAST_EXIT_INTERVAL_SECONDS", "2"))
+    enable_underlying_invalidation_exit: bool = os.getenv("ENABLE_UNDERLYING_INVALIDATION_EXIT", "true").lower() == "true"
+    enable_premium_invalidation_exit: bool = os.getenv("ENABLE_PREMIUM_INVALIDATION_EXIT", "true").lower() == "true"
+    enable_broker_emergency_sl: bool = os.getenv("ENABLE_BROKER_EMERGENCY_SL", "false").lower() == "true"
+    enable_partial_booking: bool = os.getenv("ENABLE_PARTIAL_BOOKING", "false").lower() == "true"
+    partial_target1_pct: float = float(os.getenv("PARTIAL_TARGET1_PCT", "50.0"))
+    partial_move_sl_to_cost: bool = os.getenv("PARTIAL_MOVE_SL_TO_COST", "true").lower() == "true"
 
 
 settings = Settings()
