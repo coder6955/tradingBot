@@ -8,7 +8,9 @@ from typing import Any, Callable
 from app.config import settings
 from app.providers.kite_provider import KiteProvider
 from app.services.database import OpportunityRecord
+from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.opportunity_repository import OpportunityRepository
+from app.services.rejected_opportunity_outcome_service import RejectedOpportunityOutcomeService
 from app.services.time_utils import ist_now_naive, ist_today
 from app.services.trade_exit_service import TradeExitService
 
@@ -24,10 +26,14 @@ class OpportunityOutcomeService:
         repository: OpportunityRepository,
         kite_provider_factory: KiteProviderFactory,
         trade_exit_service: TradeExitService | None = None,
+        rejected_outcome_service: RejectedOpportunityOutcomeService | None = None,
+        market_data_coordinator: MarketDataCoordinator | None = None,
     ) -> None:
         self.repository = repository
         self.kite_provider_factory = kite_provider_factory
         self.trade_exit_service = trade_exit_service
+        self.rejected_outcome_service = rejected_outcome_service
+        self.market_data_coordinator = market_data_coordinator
         self.task: asyncio.Task[None] | None = None
         self.running = False
         self.interval_seconds = 30
@@ -84,11 +90,13 @@ class OpportunityOutcomeService:
         self.last_run_at = ist_now_naive().isoformat()
         self.last_results = results
         self.last_trade_exit_result = trade_exit_result
+        rejected_result = self.rejected_outcome_service.evaluate_once(limit=limit) if self.rejected_outcome_service else None
         return {
             "evaluated": len(results),
             "closed": len([item for item in results if item.get("closed")]),
             "results": results,
             "trade_exits": trade_exit_result,
+            "rejected_opportunities": rejected_result,
         }
 
     def _evaluate_record(self, provider: KiteProvider, record: OpportunityRecord) -> dict[str, Any]:
@@ -132,7 +140,10 @@ class OpportunityOutcomeService:
             return None
         instrument = f"{record.exchange or settings.option_exchange}:{record.tradingsymbol}"
         try:
-            quote = provider.quote([instrument])
+            if self.market_data_coordinator is not None:
+                quote = self.market_data_coordinator.quote([instrument], provider=provider)
+            else:
+                quote = provider.quote([instrument])
         except Exception:
             return None
         data = quote.get(instrument) or quote.get(record.tradingsymbol) or {}

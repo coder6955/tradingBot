@@ -1,0 +1,101 @@
+import os
+import tempfile
+import unittest
+from datetime import date
+
+from app.models import Signal
+from app.services.database import init_db
+from app.services.market_data_coordinator import MarketDataCoordinator
+from app.services.opportunity_outcome_service import OpportunityOutcomeService
+from app.services.opportunity_repository import OpportunityRepository
+from app.services.rejected_opportunity_outcome_service import RejectedOpportunityOutcomeService
+from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
+from app.services.trade_setup_service import OptionContract
+
+
+class CountingProvider:
+    def __init__(self, price: float = 121.0) -> None:
+        self.price = price
+        self.quote_count = 0
+
+    def quote(self, instruments):
+        self.quote_count += 1
+        return {instrument: {"last_price": self.price} for instrument in instruments}
+
+
+class MarketDataCoordinatorTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.temp_db.close()
+        init_db(f"sqlite:///{self.temp_db.name}")
+
+    def tearDown(self) -> None:
+        try:
+            if os.path.exists(self.temp_db.name):
+                os.remove(self.temp_db.name)
+        except PermissionError:
+            pass
+
+    def test_quote_cache_reuses_provider_call_inside_ttl(self) -> None:
+        provider = CountingProvider()
+        coordinator = MarketDataCoordinator(lambda: provider, quote_ttl_seconds=5)
+
+        first = coordinator.quote(["NFO:BANKNIFTY26JUL58000CE"])
+        second = coordinator.quote(["NFO:BANKNIFTY26JUL58000CE"])
+
+        self.assertEqual(provider.quote_count, 1)
+        self.assertEqual(first["NFO:BANKNIFTY26JUL58000CE"]["last_price"], 121.0)
+        self.assertEqual(second["NFO:BANKNIFTY26JUL58000CE"]["last_price"], 121.0)
+        self.assertEqual(coordinator.status()["quote_cache_hits"], 1)
+
+    def test_accepted_and_rejected_outcome_evaluation_share_quote_cache(self) -> None:
+        provider = CountingProvider(price=121.0)
+        coordinator = MarketDataCoordinator(lambda: provider, quote_ttl_seconds=5)
+        opportunity_repo = OpportunityRepository()
+        rejected_repo = RejectedOpportunityRepository()
+        signal = Signal(
+            symbol="BANKNIFTY",
+            action="BUY_CE",
+            side="BUY",
+            tradingsymbol="BANKNIFTY26JUL58000CE",
+            exchange="NFO",
+            expiry=date.today().isoformat(),
+            entry_price=100,
+            stop_loss=90,
+            target_1=120,
+            quantity=15,
+            lot_size=15,
+            score=85,
+        )
+        opportunity_repo.save_opportunity(signal)
+        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", date.today().isoformat(), 58000, "CE", 15)
+        rejected_repo.save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=82,
+            reasons=["premium_candles_stale_or_missing"],
+            contract=contract,
+            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+        )
+        rejected_service = RejectedOpportunityOutcomeService(
+            rejected_repo,
+            kite_provider_factory=lambda: provider,
+            market_data_coordinator=coordinator,
+        )
+        service = OpportunityOutcomeService(
+            opportunity_repo,
+            kite_provider_factory=lambda: provider,
+            rejected_outcome_service=rejected_service,
+            market_data_coordinator=coordinator,
+        )
+
+        result = service.evaluate_once()
+
+        self.assertEqual(result["closed"], 1)
+        self.assertEqual(result["rejected_opportunities"]["updated"], 1)
+        self.assertEqual(provider.quote_count, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

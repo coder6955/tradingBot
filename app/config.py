@@ -146,9 +146,11 @@ class Settings:
     max_live_chain_age_seconds: int = int(os.getenv("MAX_LIVE_CHAIN_AGE_SECONDS", "10"))
     max_live_candle_age_seconds: int = int(os.getenv("MAX_LIVE_CANDLE_AGE_SECONDS", "420"))
     max_paper_candle_age_seconds: int = int(os.getenv("MAX_PAPER_CANDLE_AGE_SECONDS", "1800"))
+    max_premium_confirmation_candle_age_seconds: int = int(os.getenv("MAX_PREMIUM_CONFIRMATION_CANDLE_AGE_SECONDS", "900"))
     kite_snapshot_cache_ttl_seconds: int = int(os.getenv("KITE_SNAPSHOT_CACHE_TTL_SECONDS", "3"))
     kite_quote_cache_ttl_seconds: int = int(os.getenv("KITE_QUOTE_CACHE_TTL_SECONDS", "2"))
     kite_instrument_cache_ttl_seconds: int = int(os.getenv("KITE_INSTRUMENT_CACHE_TTL_SECONDS", "21600"))
+    option_quote_premium_mismatch_tolerance_pct: float = float(os.getenv("OPTION_QUOTE_PREMIUM_MISMATCH_TOLERANCE_PCT", "25.0"))
     estimated_brokerage_per_order: float = float(os.getenv("ESTIMATED_BROKERAGE_PER_ORDER", "20.0"))
     estimated_stt_sell_pct: float = float(os.getenv("ESTIMATED_STT_SELL_PCT", "0.0625"))
     estimated_exchange_txn_pct: float = float(os.getenv("ESTIMATED_EXCHANGE_TXN_PCT", "0.053"))
@@ -158,6 +160,22 @@ class Settings:
     paper_slippage_pct_per_side: float = float(os.getenv("PAPER_SLIPPAGE_PCT_PER_SIDE", "0.50"))
     paper_spread_impact_pct_per_side: float = float(os.getenv("PAPER_SPREAD_IMPACT_PCT_PER_SIDE", "0.25"))
     fast_exit_interval_seconds: int = int(os.getenv("FAST_EXIT_INTERVAL_SECONDS", "2"))
+    enable_kite_websocket: bool = os.getenv("ENABLE_KITE_WEBSOCKET", "false").lower() == "true"
+    websocket_price_stale_seconds: int = int(os.getenv("WEBSOCKET_PRICE_STALE_SECONDS", "3"))
+    websocket_reconnect_enabled: bool = os.getenv("WEBSOCKET_RECONNECT_ENABLED", "true").lower() == "true"
+    websocket_live_stale_blocks: bool = os.getenv("WEBSOCKET_LIVE_STALE_BLOCKS", "true").lower() == "true"
+    websocket_live_require_exchange_timestamp: bool = os.getenv("WEBSOCKET_LIVE_REQUIRE_EXCHANGE_TIMESTAMP", "true").lower() == "true"
+    enable_websocket_premium_candle_builder: bool = os.getenv("ENABLE_WEBSOCKET_PREMIUM_CANDLE_BUILDER", "true").lower() == "true"
+    websocket_premium_candle_timeframe: str = os.getenv("WEBSOCKET_PREMIUM_CANDLE_TIMEFRAME", "1minute")
+    websocket_premium_candle_retention_minutes: int = int(os.getenv("WEBSOCKET_PREMIUM_CANDLE_RETENTION_MINUTES", "60"))
+    enable_banknifty_option_prewarm: bool = os.getenv("ENABLE_BANKNIFTY_OPTION_PREWARM", "true").lower() == "true"
+    banknifty_prewarm_strike_depth: int = int(os.getenv("BANKNIFTY_PREWARM_STRIKE_DEPTH", "1"))
+    banknifty_prewarm_refresh_seconds: int = int(os.getenv("BANKNIFTY_PREWARM_REFRESH_SECONDS", "60"))
+    min_websocket_premium_candles: int = int(os.getenv("MIN_WEBSOCKET_PREMIUM_CANDLES", "3"))
+    max_websocket_premium_candle_age_seconds: int = int(os.getenv("MAX_WEBSOCKET_PREMIUM_CANDLE_AGE_SECONDS", "180"))
+    max_stored_premium_candle_age_seconds: int = int(os.getenv("MAX_STORED_PREMIUM_CANDLE_AGE_SECONDS", "300"))
+    live_exit_max_retry_count: int = int(os.getenv("LIVE_EXIT_MAX_RETRY_COUNT", "2"))
+    live_reconciliation_blocks_automation: bool = os.getenv("LIVE_RECONCILIATION_BLOCKS_AUTOMATION", "true").lower() == "true"
     enable_underlying_invalidation_exit: bool = os.getenv("ENABLE_UNDERLYING_INVALIDATION_EXIT", "true").lower() == "true"
     enable_premium_invalidation_exit: bool = os.getenv("ENABLE_PREMIUM_INVALIDATION_EXIT", "true").lower() == "true"
     enable_broker_emergency_sl: bool = os.getenv("ENABLE_BROKER_EMERGENCY_SL", "false").lower() == "true"

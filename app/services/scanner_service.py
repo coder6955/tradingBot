@@ -7,6 +7,7 @@ from app.models import Signal
 from app.config import settings
 from app.services.indicator_scoring_service import IndicatorScoringService
 from app.services.banknifty_intelligence_service import BankNiftyIntelligenceService
+from app.services.banknifty_option_prewarm_service import BankNiftyOptionPrewarmService
 from app.services.day_type_service import DayTypeService
 from app.services.data_freshness_service import DataFreshnessService
 from app.services.decision_engine_service import DecisionEngineService
@@ -54,6 +55,7 @@ class ScannerService:
         data_freshness_service: DataFreshnessService | None = None,
         rejected_opportunity_repository: RejectedOpportunityRepository | None = None,
         decision_engine_service: DecisionEngineService | None = None,
+        banknifty_option_prewarm_service: BankNiftyOptionPrewarmService | None = None,
     ) -> None:
         self.signal_service = signal_service or SignalService()
         self.scoring_service = scoring_service or IndicatorScoringService()
@@ -71,6 +73,7 @@ class ScannerService:
         self.data_freshness_service = data_freshness_service or DataFreshnessService()
         self.rejected_opportunity_repository = rejected_opportunity_repository or RejectedOpportunityRepository()
         self.decision_engine_service = decision_engine_service or DecisionEngineService()
+        self.banknifty_option_prewarm_service = banknifty_option_prewarm_service
 
         # Market data is independent from live order placement. When Kite data is
         # requested, fail closed instead of silently returning mock opportunities.
@@ -154,6 +157,7 @@ class ScannerService:
             trend = inferred_trend
             market_context = market_contexts.get(symbol, snapshot["market_context"])
             reasons: list[str] = []
+            prewarm_eval = self._prewarm_banknifty_options(symbol, float(snapshot["price"]), option_instruments)
             chain_quote_map = self._quote_chain_options(option_instruments, symbol, float(snapshot["price"]))
             contract = self.trade_setup_service.select_contract(
                 instruments=option_instruments,
@@ -174,15 +178,62 @@ class ScannerService:
                 diagnostics.append(self._diagnostic(symbol, snapshot, score, trend, market_context, side, None, reasons))
                 continue
 
-            entry_price = contract.ask or contract.last_price if side.upper() == "BUY" else contract.bid or contract.last_price
+            entry_price = self._entry_price_from_contract(contract, side)
             freshness_eval = self.data_freshness_service.validate_scan_inputs(
                 order_mode=order_mode,
                 snapshot=snapshot,
                 chain_quotes=chain_quote_map,
                 contract=contract,
             )
+            premium_eval = self.option_premium_confirmation_service.evaluate(contract=contract, side=side)
+            quote_quality = self._selected_option_data_quality(
+                contract=contract,
+                side=side,
+                quote_map=chain_quote_map,
+                premium_eval=premium_eval,
+            )
+            if not quote_quality["passed"]:
+                risk_failures = list(quote_quality["reasons"])
+                if not freshness_eval.get("passed", False):
+                    risk_failures = list(freshness_eval.get("reasons", [])) + risk_failures
+                factor_scores = {
+                    "technical": score,
+                    "score_breakdown": self._empty_score_breakdown(),
+                    "contract": self._contract_payload(contract),
+                    "prices": {},
+                    "data_freshness": freshness_eval,
+                    "data_quality": quote_quality,
+                    "option_premium_confirmation": premium_eval,
+                    "banknifty_option_prewarm": prewarm_eval,
+                    "kite_calls": self._feed_call_counts(),
+                }
+                self._log_decision(
+                    symbol=symbol,
+                    accepted=False,
+                    score=score,
+                    reasons=risk_failures,
+                    breakdown=self._empty_score_breakdown(),
+                    snapshot=snapshot,
+                    side=side,
+                    trend=trend,
+                    contract=contract,
+                    factor_scores=factor_scores,
+                )
+                self._save_rejection(
+                    symbol=symbol,
+                    side=side,
+                    trend=trend,
+                    score=score,
+                    reasons=risk_failures,
+                    breakdown=self._empty_score_breakdown(),
+                    snapshot=snapshot,
+                    contract=contract,
+                    factor_scores=factor_scores,
+                )
+                diagnostics.append(self._diagnostic(symbol, snapshot, score, trend, market_context, side, None, risk_failures, factor_scores))
+                continue
             prices = self.trade_setup_service.build_prices(
-                entry_price=max(entry_price, 0.05),
+                entry_price=entry_price,
                 side=side,
                 underlying=symbol,
                 snapshot=snapshot,
@@ -213,7 +264,6 @@ class ScannerService:
                 side=side,
             )
             day_type_eval = self.day_type_service.evaluate(symbol=symbol, trend=trend)
-            premium_eval = self.option_premium_confirmation_service.evaluate(contract=contract, side=side)
             time_bucket_eval = self.time_bucket_edge_service.evaluate(symbol=symbol, trend=trend)
             edge_eval = self._strategy_edge_eval(symbol, trend)
             banknifty_eval = self.banknifty_intelligence_service.evaluate(
@@ -252,6 +302,8 @@ class ScannerService:
                 "contract": self._contract_payload(contract),
                 "prices": prices,
                 "data_freshness": freshness_eval,
+                "data_quality": quote_quality,
+                "banknifty_option_prewarm": prewarm_eval,
                 "kite_calls": self._feed_call_counts(),
             }
             banknifty_fields = self._banknifty_response_fields(banknifty_eval)
@@ -436,6 +488,17 @@ class ScannerService:
         focused = [symbol.upper() for symbol in symbols if symbol.upper() in self.FOCUS_UNDERLYINGS]
         return focused or self.DEFAULT_UNIVERSE
 
+    def _prewarm_banknifty_options(self, symbol: str, spot_price: float, option_instruments: List[dict[str, object]]) -> dict[str, object]:
+        if symbol.upper() != "BANKNIFTY" or self.banknifty_option_prewarm_service is None:
+            return {"prewarm_enabled": False, "prewarm_reason": "prewarm_service_unavailable"}
+        try:
+            return self.banknifty_option_prewarm_service.prewarm(
+                spot_price=spot_price,
+                option_instruments=[dict(item) for item in option_instruments],
+            )
+        except Exception as exc:
+            return {"prewarm_enabled": settings.enable_banknifty_option_prewarm, "prewarm_reason": "prewarm_error", "message": str(exc)}
+
     def _market_snapshots(self) -> dict[str, dict[str, object]]:
         if not settings.use_kite_market_data:
             return {}
@@ -543,6 +606,108 @@ class ScannerService:
                 banknifty_score=banknifty_score,
             )["score"]
         )
+
+    def _entry_price_from_contract(self, contract: OptionContract, side: str) -> float:
+        if side.upper() == "BUY":
+            return float(contract.ask or contract.last_price or 0.0)
+        return float(contract.bid or contract.last_price or 0.0)
+
+    def _selected_option_data_quality(
+        self,
+        *,
+        contract: OptionContract,
+        side: str,
+        quote_map: dict[str, object],
+        premium_eval: dict[str, object],
+    ) -> dict[str, object]:
+        quote_key = f"{contract.exchange}:{contract.tradingsymbol}"
+        quote_payload = quote_map.get(quote_key) or quote_map.get(contract.tradingsymbol) or {}
+        quote_payload = quote_payload if isinstance(quote_payload, dict) else {}
+        quote_timestamp = quote_payload.get("quote_timestamp") or quote_payload.get("timestamp")
+        quote_source = quote_payload.get("source") or ("kite_quote" if quote_payload else "missing")
+        quote_token = self._safe_int(quote_payload.get("instrument_token"))
+        token_validation_status = "quote_token_missing"
+        if quote_token is not None and contract.instrument_token is not None:
+            token_validation_status = "matched" if quote_token == contract.instrument_token else "mismatch"
+        elif contract.instrument_token is not None:
+            token_validation_status = "instrument_token_from_master_only"
+
+        details = premium_eval.get("details", {}) if isinstance(premium_eval.get("details"), dict) else {}
+        candle_price = self._premium_reference_price(details)
+        candle_timestamp = details.get("last_timestamp") or details.get("timestamp")
+        candle_source = details.get("source") or ("candles" if details.get("last_close") is not None else "snapshots" if details.get("last_price") is not None else None)
+        live_price = float(contract.last_price or 0.0)
+        entry_price = self._entry_price_from_contract(contract, side)
+        mismatch_pct = None
+        reasons: list[str] = []
+
+        if contract.instrument_token is None:
+            reasons.append("selected_option_quote_invalid")
+        if live_price <= 0 or entry_price <= 0:
+            reasons.append("selected_option_quote_invalid")
+        if contract.bid <= 0 or contract.ask <= 0 or contract.ask < contract.bid:
+            reasons.append("selected_option_quote_invalid")
+        if contract.volume <= 0 or contract.open_interest <= 0:
+            reasons.append("selected_option_quote_invalid")
+        if token_validation_status == "mismatch":
+            reasons.append("selected_option_quote_invalid")
+        if live_price > 0 and candle_price and candle_price > 0:
+            mismatch_pct = abs(candle_price - live_price) / live_price * 100
+            if mismatch_pct > settings.option_quote_premium_mismatch_tolerance_pct:
+                reasons.append("option_quote_premium_mismatch")
+
+        passed = not reasons
+        return {
+            "passed": passed,
+            "data_quality": "valid" if passed else "invalid",
+            "reasons": list(dict.fromkeys(reasons)),
+            "selected_option": {
+                "tradingsymbol": contract.tradingsymbol,
+                "exchange": contract.exchange,
+                "instrument_token": contract.instrument_token,
+                "quote_key_used": quote_key,
+                "quote_present": bool(quote_payload),
+                "quote_source": quote_source,
+                "quote_timestamp": quote_timestamp,
+                "quote_instrument_token": quote_token,
+                "token_validation_status": token_validation_status,
+                "last_price": live_price,
+                "bid": contract.bid,
+                "ask": contract.ask,
+                "volume": contract.volume,
+                "open_interest": contract.open_interest,
+            },
+            "premium_reference": {
+                "source": candle_source,
+                "timestamp": candle_timestamp,
+                "price": candle_price,
+            },
+            "mismatch": {
+                "mismatch_pct": round(mismatch_pct, 2) if mismatch_pct is not None else None,
+                "tolerance_pct": settings.option_quote_premium_mismatch_tolerance_pct,
+                "reason": "option_quote_premium_mismatch" if "option_quote_premium_mismatch" in reasons else None,
+            },
+        }
+
+    def _premium_reference_price(self, details: dict[str, object]) -> float | None:
+        for key in ("last_close", "last_price"):
+            value = details.get(key)
+            try:
+                if value is not None:
+                    price = float(value)
+                    if price > 0:
+                        return price
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    def _safe_int(self, value: object) -> int | None:
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            return None
+        return None
 
     def _technical_score(self, snapshot: dict[str, object], trend: str) -> int:
         bullish = trend.lower() == "bullish"

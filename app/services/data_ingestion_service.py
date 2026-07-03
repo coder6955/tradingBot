@@ -6,6 +6,7 @@ from typing import Any
 from app.config import settings
 from app.providers.kite_provider import KiteProvider
 from app.services.greeks_service import GreeksService
+from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.market_data_service import MarketDataService
 from app.services.option_history_repository import OptionHistoryRepository
 from app.services.time_utils import ist_now_naive
@@ -30,11 +31,13 @@ class DataIngestionService:
         market_data_service: MarketDataService | None = None,
         option_history_repository: OptionHistoryRepository | None = None,
         greeks_service: GreeksService | None = None,
+        market_data_coordinator: MarketDataCoordinator | None = None,
     ) -> None:
         self.kite_provider_factory = kite_provider_factory
         self.market_data_service = market_data_service or MarketDataService()
         self.option_history_repository = option_history_repository or OptionHistoryRepository()
         self.greeks_service = greeks_service or GreeksService()
+        self.market_data_coordinator = market_data_coordinator
 
     def ingest_candles(
         self,
@@ -125,7 +128,7 @@ class DataIngestionService:
                 limit=max_contracts_per_symbol,
             )
             quote_keys = [f"{settings.option_exchange}:{item['tradingsymbol']}" for item in contracts if item.get("tradingsymbol")]
-            quotes = provider.quote(quote_keys)
+            quotes = self._quotes(provider, quote_keys)
             rows = [
                 self._option_snapshot_row(
                     symbol=normalized,
@@ -309,7 +312,7 @@ class DataIngestionService:
         kite_symbol = self.INDEX_ALIASES.get(symbol, symbol)
         quote_key = f"{settings.default_exchange}:{kite_symbol}"
         try:
-            quote = provider.quote([quote_key])
+            quote = self._quotes(provider, [quote_key])
             payload = quote.get(quote_key) or {}
             price = float(payload.get("last_price") or 0)
             if price > 0:
@@ -321,7 +324,7 @@ class DataIngestionService:
         if token is None:
             return 0.0
         try:
-            quote = provider.quote([str(token)])
+            quote = self._quotes(provider, [str(token)])
             payload = quote.get(str(token)) or {}
             return float(payload.get("last_price") or 0)
         except Exception:
@@ -345,6 +348,11 @@ class DataIngestionService:
             and abs(float(item.get("strike") or 0) - spot_price) <= max_distance
         ]
         return sorted(matches, key=lambda item: (str(item.get("expiry") or ""), abs(float(item.get("strike") or 0) - spot_price)))[:limit]
+
+    def _quotes(self, provider: KiteProvider, instruments: list[str]) -> dict[str, Any]:
+        if self.market_data_coordinator is not None:
+            return self.market_data_coordinator.quote(instruments, provider=provider)
+        return provider.quote(instruments)
 
     def _option_snapshot_row(
         self,

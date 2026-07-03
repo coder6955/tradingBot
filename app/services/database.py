@@ -141,6 +141,7 @@ class TradeRecord(Base):
     symbol = Column(String(50), nullable=False, index=True)
     tradingsymbol = Column(String(100), nullable=False, index=True)
     exchange = Column(String(20), nullable=False, default="NFO")
+    instrument_token = Column(Integer, nullable=True, index=True)
     action = Column(String(20), nullable=False, index=True)
     side = Column(String(10), nullable=False, index=True)
     mode = Column(String(20), nullable=False, index=True)
@@ -156,6 +157,16 @@ class TradeRecord(Base):
     target_2 = Column(Float, nullable=True)
     target_3 = Column(Float, nullable=True)
     exit_price = Column(Float, nullable=True)
+    exit_order_id = Column(String(100), nullable=True, index=True)
+    exit_order_status = Column(String(50), nullable=True, index=True)
+    exit_order_response_json = Column(Text, nullable=True)
+    exit_attempt_count = Column(Integer, nullable=False, default=0)
+    exit_last_error = Column(Text, nullable=True)
+    exit_requested_at = Column(DateTime, nullable=True)
+    exit_confirmed_at = Column(DateTime, nullable=True)
+    price_source = Column(String(50), nullable=True)
+    price_timestamp = Column(DateTime, nullable=True)
+    price_age_seconds = Column(Float, nullable=True)
     pnl = Column(Float, nullable=True)
     gross_pnl = Column(Float, nullable=True)
     net_pnl = Column(Float, nullable=True)
@@ -234,6 +245,17 @@ def _ensure_trade_columns() -> None:
         "spread_cost": "FLOAT",
         "remaining_quantity": "INTEGER",
         "partial_exit_json": "TEXT",
+        "instrument_token": "INTEGER",
+        "exit_order_id": "VARCHAR(100)",
+        "exit_order_status": "VARCHAR(50)",
+        "exit_order_response_json": "TEXT",
+        "exit_attempt_count": "INTEGER DEFAULT 0",
+        "exit_last_error": "TEXT",
+        "exit_requested_at": "DATETIME",
+        "exit_confirmed_at": "DATETIME",
+        "price_source": "VARCHAR(50)",
+        "price_timestamp": "DATETIME",
+        "price_age_seconds": "FLOAT",
     }
     with engine.begin() as connection:
         for column, column_type in required.items():

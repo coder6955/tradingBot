@@ -142,6 +142,8 @@ class TradeSetupService:
         snapshot: Dict[str, Any] | None = None,
         contract: OptionContract | None = None,
     ) -> Dict[str, float]:
+        if entry_price <= 0:
+            raise ValueError("entry price must be positive before calculating stop loss and targets")
         if (underlying or "").upper() == "BANKNIFTY" and side.upper() == "BUY":
             return self._banknifty_buy_prices(entry_price, snapshot or {}, contract=contract)
         if side.upper() == "SELL":

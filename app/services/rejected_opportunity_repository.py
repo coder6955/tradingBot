@@ -64,6 +64,21 @@ class RejectedOpportunityRepository:
         finally:
             session.close()
 
+    def list_pending_later_outcomes(self, *, symbol: str | None = "BANKNIFTY", limit: int = 100) -> list[RejectedOpportunityRecord]:
+        session = get_session()
+        try:
+            query = (
+                session.query(RejectedOpportunityRecord)
+                .filter(RejectedOpportunityRecord.later_outcome.is_(None))
+                .filter(RejectedOpportunityRecord.tradingsymbol.is_not(None))
+                .order_by(RejectedOpportunityRecord.id.asc())
+            )
+            if symbol:
+                query = query.filter(RejectedOpportunityRecord.symbol == symbol.upper())
+            return query.limit(limit).all()
+        finally:
+            session.close()
+
     def mark_later_outcome(
         self,
         rejection_id: int,

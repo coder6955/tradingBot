@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 from app.config import settings
 from app.models import Signal
 from app.providers.kite_provider import KiteProvider
+from app.services.active_price_feed import ActiveTradePriceFeed
 from app.services.paper_trading_service import PaperTradingService
 from app.services.risk_management_service import RiskManagementService
 from app.services.trade_repository import TradeRepository
@@ -21,12 +22,17 @@ class OrderService:
         trade_setup_service: TradeSetupService | None = None,
         trade_repository: TradeRepository | None = None,
         risk_management_service: RiskManagementService | None = None,
+        active_price_feed: ActiveTradePriceFeed | None = None,
+        live_safety_checker: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.kite_provider = kite_provider or KiteProvider()
         self.paper_trading_service = paper_trading_service or PaperTradingService()
         self.trade_setup_service = trade_setup_service or TradeSetupService()
         self.trade_repository = trade_repository or TradeRepository()
         self.risk_management_service = risk_management_service or RiskManagementService(self.trade_repository)
+        self.active_price_feed = active_price_feed
+        self.live_safety_checker = live_safety_checker
+        self._banknifty_underlying_token: int | None = None
 
     def place_signal_order(
         self,
@@ -60,7 +66,14 @@ class OrderService:
                 order_response=trade,
                 opportunity_id=opportunity_id,
             )
+            self._subscribe_active_trade_tokens(signal)
             return {"status": "paper", "trade": trade, "trade_id": record.id, "execution_quality": quality}
+
+        if not settings.live_trading_mode or settings.paper_trading_mode:
+            raise ValueError("live order blocked: set LIVE_TRADING_MODE=true and PAPER_TRADING_MODE=false")
+        safety = self.live_safety_checker() if self.live_safety_checker is not None else {"blocked": False}
+        if safety.get("blocked"):
+            raise ValueError(f"live order blocked by broker reconciliation: {safety.get('reason') or 'unknown'}")
 
         risk = self.risk_management_service.evaluate_signal(signal.symbol)
         if not risk["passed"]:
@@ -89,6 +102,7 @@ class OrderService:
             broker_order_id=str(order_id) if order_id else None,
             opportunity_id=opportunity_id,
         )
+        self._subscribe_active_trade_tokens(signal)
         return {
             "status": "live",
             "order": result,
@@ -193,6 +207,43 @@ class OrderService:
             "software_stop_loss": signal.stop_loss,
             "fallback": "TradeExitService software square-off and startup broker reconciliation",
         }
+
+    def _subscribe_active_trade_tokens(self, signal: Signal) -> None:
+        if self.active_price_feed is None:
+            return
+        tokens: set[int] = set()
+        if signal.instrument_token:
+            tokens.add(int(signal.instrument_token))
+        underlying_token = self._resolve_banknifty_underlying_token()
+        if underlying_token:
+            tokens.add(underlying_token)
+        if tokens:
+            self.active_price_feed.subscribe(tokens)
+
+    def _resolve_banknifty_underlying_token(self) -> int | None:
+        if self._banknifty_underlying_token:
+            return self._banknifty_underlying_token
+        try:
+            instruments = self.kite_provider.instruments("NSE")
+        except Exception:
+            return None
+        for item in instruments or []:
+            name = str(item.get("name") or item.get("tradingsymbol") or "").upper()
+            tradingsymbol = str(item.get("tradingsymbol") or "").upper()
+            if name == "NIFTY BANK" or tradingsymbol == "NIFTY BANK":
+                token = self._int(item.get("instrument_token"))
+                if token:
+                    self._banknifty_underlying_token = token
+                    return token
+        return None
+
+    def _int(self, value: Any) -> int | None:
+        try:
+            if value is not None:
+                return int(value)
+        except (TypeError, ValueError):
+            return None
+        return None
 
     def _float(self, value: Any) -> float:
         try:

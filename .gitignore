@@ -1,0 +1,61 @@
+# Secrets and local runtime config
+.env
+.env.*
+!.env.example
+!.env.simple.example
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+.venv-*/
+venv/
+env/
+ENV/
+
+# Local databases and runtime state
+*.db
+*.sqlite
+*.sqlite3
+app.db
+*.db-journal
+*.sqlite-journal
+
+# Logs and process files
+*.log
+logs/
+*.pid
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+
+# Node/frontend artifacts, if added later
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS/editor clutter
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp

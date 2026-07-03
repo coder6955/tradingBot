@@ -5,6 +5,9 @@ from dataclasses import asdict
 from datetime import datetime, time
 from typing import Any
 
+from sqlalchemy import func
+
+from app.config import settings
 from app.models import Signal
 from app.services.database import TradeRecord, get_session
 from app.services.realistic_pnl_service import RealisticPnlService
@@ -37,6 +40,7 @@ class TradeRepository:
                 symbol=signal.symbol,
                 tradingsymbol=str(signal.tradingsymbol or signal.symbol),
                 exchange=signal.exchange,
+                instrument_token=signal.instrument_token,
                 action=signal.action,
                 side=signal.side,
                 mode=mode,
@@ -98,7 +102,159 @@ class TradeRepository:
         finally:
             session.close()
 
-    def close_trade(self, trade_id: int, *, outcome: str, exit_price: float, notes: str | None = None) -> TradeRecord:
+    def mark_closing(
+        self,
+        trade_id: int,
+        *,
+        outcome: str,
+        exit_price: float,
+        price_source: str | None = None,
+        price_timestamp: datetime | None = None,
+        price_age_seconds: float | None = None,
+        exit_order_id: str | None = None,
+        exit_order_response: dict[str, Any] | None = None,
+        notes: str | None = None,
+    ) -> TradeRecord | None:
+        session = get_session()
+        try:
+            record = session.get(TradeRecord, trade_id)
+            if record is None:
+                raise ValueError(f"trade {trade_id} was not found")
+            if record.status in {"closed", "closing"}:
+                return None
+            record.status = "closing"
+            record.outcome = outcome
+            record.exit_price = exit_price
+            record.exit_requested_at = ist_now_naive()
+            record.price_source = price_source
+            record.price_timestamp = price_timestamp
+            record.price_age_seconds = price_age_seconds
+            if exit_order_id:
+                record.exit_order_id = exit_order_id
+            if exit_order_response is not None:
+                record.exit_order_response_json = json.dumps(exit_order_response, default=str)
+                record.exit_order_status = str(exit_order_response.get("status") or "submitted")
+            record.updated_at = ist_now_naive()
+            record.notes = notes or record.notes
+            session.commit()
+            session.refresh(record)
+            return record
+        finally:
+            session.close()
+
+    def try_mark_closing(
+        self,
+        trade_id: int,
+        *,
+        outcome: str,
+        exit_price: float,
+        price_source: str | None = None,
+        price_timestamp: datetime | None = None,
+        price_age_seconds: float | None = None,
+        notes: str | None = None,
+    ) -> TradeRecord | None:
+        """Atomically claim a trade for live exit submission.
+
+        This is intentionally a conditional DB update, not read-then-write, so
+        concurrent exit evaluators cannot submit duplicate square-off orders.
+        """
+        session = get_session()
+        try:
+            now = ist_now_naive()
+            updated = (
+                session.query(TradeRecord)
+                .filter(TradeRecord.id == trade_id)
+                .filter(~TradeRecord.status.in_(["closing", "closed", "exit_failed", "reconciliation_mismatch"]))
+                .filter(func.coalesce(TradeRecord.exit_attempt_count, 0) < settings.live_exit_max_retry_count)
+                .update(
+                    {
+                        TradeRecord.status: "closing",
+                        TradeRecord.outcome: outcome,
+                        TradeRecord.exit_price: exit_price,
+                        TradeRecord.exit_requested_at: now,
+                        TradeRecord.price_source: price_source,
+                        TradeRecord.price_timestamp: price_timestamp,
+                        TradeRecord.price_age_seconds: price_age_seconds,
+                        TradeRecord.exit_attempt_count: func.coalesce(TradeRecord.exit_attempt_count, 0) + 1,
+                        TradeRecord.exit_last_error: None,
+                        TradeRecord.updated_at: now,
+                        TradeRecord.notes: notes,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            session.commit()
+            if updated != 1:
+                return None
+            record = session.get(TradeRecord, trade_id)
+            if record is None:
+                return None
+            session.refresh(record)
+            return record
+        finally:
+            session.close()
+
+    def update_exit_order_status(
+        self,
+        trade_id: int,
+        *,
+        status: str,
+        broker_payload: dict[str, Any],
+        exit_order_id: str | None = None,
+        notes: str | None = None,
+    ) -> TradeRecord:
+        session = get_session()
+        try:
+            record = session.get(TradeRecord, trade_id)
+            if record is None:
+                raise ValueError(f"trade {trade_id} was not found")
+            record.exit_order_status = status
+            if exit_order_id:
+                record.exit_order_id = exit_order_id
+            record.exit_order_response_json = json.dumps(broker_payload, default=str)
+            record.updated_at = ist_now_naive()
+            if status.lower() in {"complete", "filled"}:
+                record.exit_confirmed_at = ist_now_naive()
+            if notes:
+                record.notes = notes
+            session.commit()
+            session.refresh(record)
+            return record
+        finally:
+            session.close()
+
+    def mark_exit_failed(self, trade_id: int, *, reason: str, broker_payload: dict[str, Any] | None = None) -> TradeRecord:
+        session = get_session()
+        try:
+            record = session.get(TradeRecord, trade_id)
+            if record is None:
+                raise ValueError(f"trade {trade_id} was not found")
+            record.status = "exit_failed"
+            record.exit_order_status = "failed"
+            record.exit_order_response_json = json.dumps(broker_payload or {"reason": reason}, default=str)
+            record.exit_last_error = reason
+            record.notes = reason
+            record.updated_at = ist_now_naive()
+            session.commit()
+            session.refresh(record)
+            return record
+        finally:
+            session.close()
+
+    def close_trade(
+        self,
+        trade_id: int,
+        *,
+        outcome: str,
+        exit_price: float,
+        notes: str | None = None,
+        price_source: str | None = None,
+        price_timestamp: datetime | None = None,
+        price_age_seconds: float | None = None,
+        exit_order_id: str | None = None,
+        exit_order_status: str | None = None,
+        exit_order_response: dict[str, Any] | None = None,
+    ) -> TradeRecord:
         session = get_session()
         try:
             record = session.get(TradeRecord, trade_id)
@@ -107,6 +263,14 @@ class TradeRepository:
             record.status = "closed"
             record.outcome = outcome
             record.exit_price = exit_price
+            record.price_source = price_source or record.price_source
+            record.price_timestamp = price_timestamp or record.price_timestamp
+            record.price_age_seconds = price_age_seconds if price_age_seconds is not None else record.price_age_seconds
+            record.exit_order_id = exit_order_id or record.exit_order_id
+            record.exit_order_status = exit_order_status or record.exit_order_status
+            record.exit_confirmed_at = ist_now_naive()
+            if exit_order_response is not None:
+                record.exit_order_response_json = json.dumps(exit_order_response, default=str)
             record.updated_at = ist_now_naive()
             record.notes = notes or record.notes
             qty = record.remaining_quantity if record.remaining_quantity is not None else (record.filled_quantity or record.placed_quantity)
@@ -192,6 +356,63 @@ class TradeRepository:
                 .order_by(TradeRecord.id.desc())
                 .all()
             )
+        finally:
+            session.close()
+
+    def exit_alerts(self, limit: int = 100) -> list[TradeRecord]:
+        session = get_session()
+        try:
+            return (
+                session.query(TradeRecord)
+                .filter(TradeRecord.status.in_(["closing", "exit_failed", "reconciliation_mismatch"]))
+                .order_by(TradeRecord.updated_at.desc())
+                .limit(limit)
+                .all()
+            )
+        finally:
+            session.close()
+
+    def live_open_trades(self, limit: int = 500) -> list[TradeRecord]:
+        session = get_session()
+        try:
+            return (
+                session.query(TradeRecord)
+                .filter(TradeRecord.mode == "live")
+                .filter(TradeRecord.status != "closed")
+                .order_by(TradeRecord.id.desc())
+                .limit(limit)
+                .all()
+            )
+        finally:
+            session.close()
+
+    def find_live_by_order_id(self, order_id: str) -> list[TradeRecord]:
+        session = get_session()
+        try:
+            return (
+                session.query(TradeRecord)
+                .filter(TradeRecord.mode == "live")
+                .filter((TradeRecord.broker_order_id == order_id) | (TradeRecord.exit_order_id == order_id))
+                .order_by(TradeRecord.id.desc())
+                .all()
+            )
+        finally:
+            session.close()
+
+    def mark_reconciliation_mismatch(self, trade_id: int, *, reason: str, broker_payload: dict[str, Any] | None = None) -> TradeRecord:
+        session = get_session()
+        try:
+            record = session.get(TradeRecord, trade_id)
+            if record is None:
+                raise ValueError(f"trade {trade_id} was not found")
+            record.status = "reconciliation_mismatch"
+            record.exit_last_error = reason
+            record.broker_status_json = json.dumps(broker_payload or {"reason": reason}, default=str)
+            record.notes = reason
+            record.updated_at = ist_now_naive()
+            session.commit()
+            session.refresh(record)
+            return record
         finally:
             session.close()
 

@@ -26,22 +26,24 @@ class OptionChainService:
         put_oi = sum(contract.open_interest for contract in puts)
         call_volume = sum(contract.volume for contract in calls)
         put_volume = sum(contract.volume for contract in puts)
-        pcr_oi = put_oi / call_oi if call_oi else 0.0
-        pcr_volume = put_volume / call_volume if call_volume else 0.0
+        oi_complete = call_oi > 0 and put_oi > 0
+        volume_complete = call_volume > 0 and put_volume > 0
+        pcr_oi = put_oi / call_oi if oi_complete else None
+        pcr_volume = put_volume / call_volume if volume_complete else None
 
-        support = self._max_oi_strike([contract for contract in puts if contract.strike <= spot_price])
-        resistance = self._max_oi_strike([contract for contract in calls if contract.strike >= spot_price])
-        max_pain = self._max_pain(contracts)
+        support = self._max_oi_strike([contract for contract in puts if contract.strike <= spot_price and contract.open_interest > 0]) if oi_complete else 0.0
+        resistance = self._max_oi_strike([contract for contract in calls if contract.strike >= spot_price and contract.open_interest > 0]) if oi_complete else 0.0
+        max_pain = self._max_pain(contracts) if oi_complete else None
         bullish = trend.lower() == "bullish"
         score = 0
 
-        if 0.7 <= pcr_oi <= 1.6:
+        if pcr_oi is not None and 0.7 <= pcr_oi <= 1.6:
             score += 18
-        elif pcr_oi > 0:
+        elif pcr_oi is not None and pcr_oi > 0:
             score += 8
             reasons.append("PCR is stretched or one-sided")
         else:
-            reasons.append("PCR could not be computed from OI")
+            reasons.append("PCR/max pain unavailable because OI data is incomplete")
 
         if selected.open_interest > 0 and selected.volume > 0:
             score += 18
@@ -97,11 +99,13 @@ class OptionChainService:
             "passed": passed,
             "reasons": reasons,
             "details": {
-                "pcr_oi": round(pcr_oi, 2),
-                "pcr_volume": round(pcr_volume, 2),
+                "pcr_oi": round(pcr_oi, 2) if pcr_oi is not None else None,
+                "pcr_volume": round(pcr_volume, 2) if pcr_volume is not None else None,
                 "support_strike": support,
                 "resistance_strike": resistance,
                 "max_pain": max_pain,
+                "oi_data_complete": oi_complete,
+                "volume_data_complete": volume_complete,
                 "selected_oi": selected.open_interest,
                 "selected_volume": selected.volume,
             },

@@ -15,6 +15,7 @@ from app.services.automation_supervisor_service import AutomationSupervisorServi
 from app.services.opportunity_repository import OpportunityRepository
 from app.services.opportunity_outcome_service import OpportunityOutcomeService
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
+from app.services.rejected_opportunity_outcome_service import RejectedOpportunityOutcomeService
 from app.services.broker_sync_service import BrokerSyncService
 from app.services.backtest_service import BacktestService
 from app.services.data_ingestion_service import DataIngestionService
@@ -23,6 +24,10 @@ from app.services.database import get_session
 from app.services.greeks_service import GreeksService
 from app.services.notification_service import NotificationService
 from app.services.execution_analytics_service import ExecutionAnalyticsService
+from app.services.active_price_feed import ActiveTradePriceFeed
+from app.services.banknifty_option_prewarm_service import BankNiftyOptionPrewarmService
+from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed
+from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.opportunity_analytics_service import OpportunityAnalyticsService
 from app.services.option_history_repository import OptionHistoryRepository
 from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
@@ -96,6 +101,9 @@ option_quality_service = OptionQualityService(greeks_service)
 backtest_service = BacktestService()
 option_history_repository = OptionHistoryRepository()
 shared_kite_feed = KiteFeed() if settings.use_kite_market_data else None
+kite_websocket_price_feed = KiteWebSocketPriceFeed()
+active_trade_price_feed = ActiveTradePriceFeed(kite_websocket_price_feed)
+banknifty_option_prewarm_service = BankNiftyOptionPrewarmService(kite_websocket_price_feed)
 strategy_validation_repository = StrategyValidationRepository()
 strategy_edge_service = StrategyEdgeService(backtest_service=backtest_service, repository=strategy_validation_repository)
 day_type_service = DayTypeService()
@@ -120,11 +128,21 @@ def get_kite_provider() -> KiteProvider:
     return provider
 
 
+market_data_coordinator = MarketDataCoordinator(get_kite_provider)
+active_trade_price_feed.market_data_coordinator = market_data_coordinator
+rejected_opportunity_outcome_service = RejectedOpportunityOutcomeService(
+    rejected_opportunity_repository,
+    kite_provider_factory=get_kite_provider,
+    market_data_coordinator=market_data_coordinator,
+)
+
+
 data_ingestion_service = DataIngestionService(
     kite_provider_factory=get_kite_provider,
     market_data_service=market_data_service,
     option_history_repository=option_history_repository,
     greeks_service=greeks_service,
+    market_data_coordinator=market_data_coordinator,
 )
 option_snapshot_collector_service = OptionSnapshotCollectorService(data_ingestion_service)
 
@@ -133,7 +151,9 @@ def get_scanner_service() -> ScannerService:
     return ScannerService(
         strategy_edge_service=strategy_edge_service,
         feed=shared_kite_feed,
+        option_premium_confirmation_service=OptionPremiumConfirmationService(kite_websocket_price_feed),
         rejected_opportunity_repository=rejected_opportunity_repository,
+        banknifty_option_prewarm_service=banknifty_option_prewarm_service,
     )
 
 
@@ -143,6 +163,8 @@ def get_order_service() -> OrderService:
         paper_trading_service=paper_trading_service,
         trade_repository=trade_repository,
         risk_management_service=risk_management_service,
+        active_price_feed=active_trade_price_feed,
+        live_safety_checker=broker_sync_service.live_block_status,
     )
 
 
@@ -157,16 +179,24 @@ trade_exit_service = TradeExitService(
     trade_repository=trade_repository,
     kite_provider_factory=get_kite_provider,
     paper_trading_service=paper_trading_service,
+    active_price_feed=active_trade_price_feed,
+    notification_service=notification_service,
+    market_data_coordinator=market_data_coordinator,
 )
 opportunity_outcome_service = OpportunityOutcomeService(
     repository=opportunity_repository,
     kite_provider_factory=get_kite_provider,
     trade_exit_service=trade_exit_service,
+    rejected_outcome_service=rejected_opportunity_outcome_service,
+    market_data_coordinator=market_data_coordinator,
 )
 broker_sync_service = BrokerSyncService(
     trade_repository=trade_repository,
     kite_provider_factory=get_kite_provider,
+    notification_service=notification_service,
 )
+broker_sync_service.set_exit_confirmation_callback(trade_exit_service.confirm_live_exit_for_trade)
+kite_websocket_price_feed.order_update_handler = broker_sync_service.handle_order_postback
 automation_supervisor_service = AutomationSupervisorService(
     data_ingestion_service=data_ingestion_service,
     snapshot_collector_service=option_snapshot_collector_service,
@@ -179,8 +209,11 @@ automation_supervisor_service = AutomationSupervisorService(
 
 @app.on_event("startup")
 async def startup_automation() -> None:
+    if settings.enable_kite_websocket:
+        active_trade_price_feed.start()
     try:
         broker_sync_service.sync_open_trades(limit=100)
+        broker_sync_service.reconcile_startup_positions()
     except Exception:
         pass
     if settings.automation_enabled:
@@ -189,6 +222,7 @@ async def startup_automation() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_background_services() -> None:
+    active_trade_price_feed.stop()
     await automation_supervisor_service.stop()
     await option_snapshot_collector_service.stop()
     await auto_trader_service.stop()
@@ -222,6 +256,11 @@ def db_health() -> dict[str, object]:
             "error_type": type(exc).__name__,
             "message": str(exc),
         }
+
+
+@app.get("/market-data/cache/status", tags=["09 Market Data"], summary="Inspect shared market-data quote cache")
+def market_data_cache_status() -> dict[str, object]:
+    return market_data_coordinator.status()
 
 
 @app.get("/", tags=["01 System"], summary="Show API workflow overview")
@@ -525,6 +564,7 @@ def trade_record_to_dict(record) -> dict[str, object]:
         "symbol": record.symbol,
         "tradingsymbol": record.tradingsymbol,
         "exchange": record.exchange,
+        "instrument_token": getattr(record, "instrument_token", None),
         "action": record.action,
         "side": record.side,
         "mode": record.mode,
@@ -540,6 +580,15 @@ def trade_record_to_dict(record) -> dict[str, object]:
         "target_2": record.target_2,
         "target_3": record.target_3,
         "exit_price": record.exit_price,
+        "exit_order_id": getattr(record, "exit_order_id", None),
+        "exit_order_status": getattr(record, "exit_order_status", None),
+        "exit_attempt_count": getattr(record, "exit_attempt_count", 0),
+        "exit_last_error": getattr(record, "exit_last_error", None),
+        "exit_requested_at": format_ist(getattr(record, "exit_requested_at", None)),
+        "exit_confirmed_at": format_ist(getattr(record, "exit_confirmed_at", None)),
+        "price_source": getattr(record, "price_source", None),
+        "price_timestamp": format_ist(getattr(record, "price_timestamp", None)),
+        "price_age_seconds": getattr(record, "price_age_seconds", None),
         "gross_pnl": getattr(record, "gross_pnl", None),
         "net_pnl": getattr(record, "net_pnl", None),
         "charges": getattr(record, "charges", None),
@@ -1475,6 +1524,7 @@ def get_scanner_diagnostics(side: str = "BUY", symbols: str | None = None, limit
         "market_data": type(scanner_service.feed).__name__,
         "kite_access_token": bool(load_access_token()),
         "use_kite_market_data": settings.use_kite_market_data,
+        "websocket": active_trade_price_feed.status(),
         "side": side.upper(),
         "count": len(rows),
         "diagnostics": rows,
@@ -1516,25 +1566,39 @@ def place_order(
     try:
         signal_payload = payload.get("signal")
         if not isinstance(signal_payload, dict):
-            signal_payload = {key: value for key, value in payload.items() if key not in {"confirm_live", "opportunity_id"}}
+            signal_payload = {key: value for key, value in payload.items() if key not in {"confirm_live", "opportunity_id", "order_mode"}}
         signal = Signal(**signal_payload)  # type: ignore[arg-type]
         confirm_live = bool(payload.get("confirm_live", False))
+        order_mode = str(payload.get("order_mode") or settings.default_order_mode or "paper").lower()
         opportunity_id_value = payload.get("opportunity_id")
         opportunity_id = int(opportunity_id_value) if opportunity_id_value is not None else None
-        return get_order_service().place_signal_order(signal, confirm_live=confirm_live, opportunity_id=opportunity_id)
+        return get_order_service().place_signal_order(signal, confirm_live=confirm_live, opportunity_id=opportunity_id, order_mode=order_mode)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/risk/status", tags=["04 Orders"], summary="Check daily risk guard status")
 def get_risk_status() -> dict[str, object]:
-    return risk_management_service.evaluate_entry()
+    return {
+        **risk_management_service.evaluate_entry(),
+        "broker_reconciliation": broker_sync_service.live_block_status(),
+    }
 
 
 @app.get("/trades", tags=["04 Orders"], summary="List actual paper/live trade lifecycle records")
 def list_trades(status: str | None = None, limit: int = 100) -> dict[str, object]:
     records = trade_repository.list_trades(status=status, limit=limit)
     return {"count": len(records), "trades": [trade_record_to_dict(record) for record in records]}
+
+
+@app.get("/trades/exit-alerts", tags=["04 Orders"], summary="List live trades stuck in closing, exit_failed, or reconciliation mismatch")
+def trade_exit_alerts(limit: int = 100) -> dict[str, object]:
+    records = trade_repository.exit_alerts(limit=limit)
+    return {
+        "count": len(records),
+        "alerts": [trade_record_to_dict(record) for record in records],
+        "broker_reconciliation": broker_sync_service.live_block_status(),
+    }
 
 
 @app.post("/trades/{trade_id}/close", tags=["04 Orders"], summary="Manually close a lifecycle trade")
@@ -1567,6 +1631,29 @@ def sync_live_trades(payload: dict[str, object] | None = Body(default=None, exam
         return broker_sync_service.sync_open_trades(limit=int(payload.get("limit") or 100))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/broker/reconcile", tags=["04 Orders"], summary="Run broker/local live position reconciliation")
+def reconcile_broker_positions() -> dict[str, object]:
+    try:
+        return broker_sync_service.reconcile_startup_positions()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/broker/reconciliation/status", tags=["04 Orders"], summary="Inspect broker/local reconciliation live-trading block")
+def broker_reconciliation_status() -> dict[str, object]:
+    return broker_sync_service.live_block_status()
+
+
+@app.get("/broker/emergency-protection/status", tags=["04 Orders"], summary="Inspect broker-side emergency SL/GTT capability")
+def broker_emergency_protection_status() -> dict[str, object]:
+    return {
+        "enabled": settings.enable_broker_emergency_sl,
+        "supported": False,
+        "reason": "KiteProvider currently exposes regular market order placement only; trigger_price/GTT/OCO protective order APIs are not wrapped and validated for this flow.",
+        "fallback": "software exits via TradeExitService, active WebSocket/polling price checks, startup broker reconciliation, and exit-failure alerts",
+    }
 
 
 @app.post("/trades/evaluate-exits", tags=["04 Orders"], summary="Auto square-off open trades at target or stop")
@@ -1775,14 +1862,29 @@ def update_rejected_opportunity_outcome(
 @app.post(
     "/opportunities/evaluate-open",
     tags=["07 Outcome Monitor"],
-    summary="Evaluate open opportunities once",
-    description="Fetches current option prices and auto-marks stop/target/expired outcomes where possible.",
+    summary="Evaluate open accepted and rejected opportunities once",
+    description="Fetches current option prices and auto-marks accepted opportunity outcomes plus later outcomes for rejected setups where possible.",
 )
 def evaluate_open_opportunities(
     payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100}])
 ) -> dict[str, object]:
     payload = payload or {}
     return opportunity_outcome_service.evaluate_once(limit=int(payload.get("limit") or 100))
+
+
+@app.post(
+    "/opportunities/rejections/evaluate-open",
+    tags=["07 Outcome Monitor"],
+    summary="Evaluate rejected setups for later outcomes",
+    description="Checks rejected scanner setups against current option prices and stores later_outcome when target/stop/expiry can be inferred.",
+)
+def evaluate_rejected_opportunities(
+    payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100, "symbol": "BANKNIFTY"}])
+) -> dict[str, object]:
+    payload = payload or {}
+    symbol_value = payload.get("symbol", "BANKNIFTY")
+    symbol = str(symbol_value) if symbol_value is not None else None
+    return rejected_opportunity_outcome_service.evaluate_once(symbol=symbol, limit=int(payload.get("limit") or 100))
 
 
 @app.post(
@@ -1927,6 +2029,13 @@ def kite_health() -> dict[str, object]:
         return profile
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
+
+
+@app.get("/kite/websocket/status", tags=["02 Kite Login"], summary="Inspect active Kite WebSocket price feed")
+def kite_websocket_status() -> dict[str, object]:
+    status = active_trade_price_feed.status()
+    status["banknifty_option_prewarm"] = banknifty_option_prewarm_service.status()
+    return status
 
 
 @app.get("/kite/margins", tags=["02 Kite Login"], summary="Get Zerodha margins/funds")
