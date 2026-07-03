@@ -1,5 +1,6 @@
 import json
 from dataclasses import asdict
+from datetime import datetime
 
 from fastapi import Body, FastAPI, HTTPException
 from sqlalchemy import text
@@ -35,6 +36,7 @@ from app.services.option_quality_service import OptionQualityService
 from app.services.option_snapshot_collector_service import OptionSnapshotCollectorService
 from app.services.outcome_learning_service import OutcomeLearningService
 from app.services.professional_readiness_service import ProfessionalReadinessService
+from app.services.professional_insights_service import ProfessionalInsightsService
 from app.services.risk_management_service import RiskManagementService
 from app.services.strategy_edge_service import StrategyEdgeService
 from app.services.strategy_validation_repository import StrategyValidationRepository
@@ -112,6 +114,7 @@ time_bucket_edge_service = TimeBucketEdgeService(backtest_service=backtest_servi
 outcome_learning_service = OutcomeLearningService()
 opportunity_analytics_service = OpportunityAnalyticsService()
 execution_analytics_service = ExecutionAnalyticsService()
+professional_insights_service = ProfessionalInsightsService()
 professional_readiness_service = ProfessionalReadinessService(
     backtest_service=backtest_service,
     opportunity_analytics_service=opportunity_analytics_service,
@@ -1082,6 +1085,54 @@ def get_opportunity_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> d
 )
 def get_execution_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
     return execution_analytics_service.analyze(symbol=symbol, limit=limit)
+
+
+@app.get(
+    "/research/professional-insights",
+    tags=["10 Research"],
+    summary="Professional Bank Nifty decision-quality insights",
+    description="Combines accepted vs rejected analysis, time buckets, DTE, factor attribution, exits, data quality, and shadow/live evidence.",
+)
+def get_professional_insights(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+    return professional_insights_service.analyze(symbol=symbol, limit=limit)
+
+
+@app.get(
+    "/research/daily-review",
+    tags=["10 Research"],
+    summary="Daily Bank Nifty trading review",
+    description="Shows the day's accepted setups, rejected setups, trades, outcomes, top rejection gates, and review timeline.",
+)
+def get_daily_review(symbol: str = "BANKNIFTY", review_date: str | None = None, limit: int = 1000) -> dict[str, object]:
+    parsed_date = datetime.fromisoformat(review_date).date() if review_date else None
+    return professional_insights_service.daily_review(symbol=symbol, review_date=parsed_date, limit=limit)
+
+
+@app.get(
+    "/research/trade-journal",
+    tags=["10 Research"],
+    summary="Unified opportunity, rejection, and trade timeline",
+)
+def get_trade_journal(symbol: str = "BANKNIFTY", limit: int = 200) -> dict[str, object]:
+    return professional_insights_service.trade_journal(symbol=symbol, limit=limit)
+
+
+@app.get(
+    "/research/data-completeness",
+    tags=["10 Research"],
+    summary="Inspect stored candle and option snapshot completeness",
+)
+def get_data_completeness(symbol: str = "BANKNIFTY") -> dict[str, object]:
+    return professional_insights_service.data_completeness(symbol=symbol)
+
+
+@app.get(
+    "/research/shadow-comparison",
+    tags=["10 Research"],
+    summary="Compare shadow, paper, and live trade evidence",
+)
+def get_shadow_comparison(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+    return professional_insights_service.analyze(symbol=symbol, limit=limit)["shadow_mode_comparison"]
 
 
 @app.get(

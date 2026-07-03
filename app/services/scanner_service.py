@@ -207,6 +207,7 @@ class ScannerService:
                     "banknifty_option_prewarm": prewarm_eval,
                     "kite_calls": self._feed_call_counts(),
                 }
+                factor_scores = self._with_strategy_metadata(factor_scores, order_mode)
                 self._log_decision(
                     symbol=symbol,
                     accepted=False,
@@ -314,6 +315,7 @@ class ScannerService:
                 factor_scores=factor_scores,
             )
             factor_scores["outcome_learning"] = outcome_learning_eval
+            factor_scores = self._with_strategy_metadata(factor_scores, order_mode)
             risk_failures = self._gate_failures(
                 combined_score=combined_score,
                 contract=contract,
@@ -867,6 +869,7 @@ class ScannerService:
     ) -> None:
         try:
             action = self._action(side, trend) if str(trend).lower() in {"bullish", "bearish"} else None
+            factor_scores = self._with_strategy_metadata(factor_scores or {}, "unknown")
             self.rejected_opportunity_repository.save_rejection(
                 symbol=symbol,
                 side=side,
@@ -894,6 +897,50 @@ class ScannerService:
         from zoneinfo import ZoneInfo
 
         return datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
+
+    def _with_strategy_metadata(self, factor_scores: dict[str, object], order_mode: str) -> dict[str, object]:
+        if "strategy_metadata" in factor_scores:
+            return factor_scores
+        enriched = dict(factor_scores)
+        enriched["strategy_metadata"] = {
+            "strategy_name": "banknifty_option_buying",
+            "strategy_version": settings.strategy_version,
+            "order_mode": order_mode,
+            "generated_at": self._decision_timestamp(),
+            "hard_gate_thresholds": {
+                "min_signal_score": settings.min_signal_score,
+                "min_option_quality_score": settings.min_option_quality_score,
+                "min_risk_reward": settings.min_risk_reward,
+                "max_bid_ask_spread_pct": settings.max_bid_ask_spread_pct,
+                "min_option_volume": settings.min_option_volume,
+                "min_option_oi": settings.min_option_oi,
+                "max_live_quote_age_seconds": settings.max_live_quote_age_seconds,
+                "max_live_option_quote_age_seconds": settings.max_live_option_quote_age_seconds,
+                "max_premium_confirmation_candle_age_seconds": settings.max_premium_confirmation_candle_age_seconds,
+            },
+            "weighted_score_policy": {
+                "trend_momentum_cap": settings.max_trend_momentum_score,
+                "min_market_regime_score": settings.min_market_regime_score,
+                "min_price_action_score": settings.min_price_action_score,
+                "min_option_chain_score": settings.min_option_chain_score,
+                "min_option_premium_confirmation_score": settings.min_option_premium_confirmation_score,
+            },
+            "enabled_guards": {
+                "day_type_filter": settings.enable_day_type_filter,
+                "option_premium_confirmation": settings.enable_option_premium_confirmation,
+                "banknifty_intelligence": settings.enable_banknifty_intelligence,
+                "time_bucket_filter": settings.enable_time_bucket_filter,
+                "strategy_edge_guard": settings.enable_strategy_edge_guard,
+                "outcome_learning_guard": settings.enable_outcome_learning_guard,
+            },
+            "data_policy": {
+                "use_kite_market_data": settings.use_kite_market_data,
+                "enable_kite_websocket": settings.enable_kite_websocket,
+                "enable_websocket_premium_candle_builder": settings.enable_websocket_premium_candle_builder,
+                "enable_banknifty_option_prewarm": settings.enable_banknifty_option_prewarm,
+            },
+        }
+        return enriched
 
     def _nested_value(self, value: object, *keys: str) -> object:
         current = value
