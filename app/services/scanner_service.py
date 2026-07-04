@@ -26,6 +26,7 @@ from app.services.signal_service import SignalService
 from app.services.strategy_edge_service import StrategyEdgeService
 from app.services.time_bucket_edge_service import TimeBucketEdgeService
 from app.services.trade_setup_service import OptionContract, TradeSetupService
+from app.services.volatility_edge_service import VolatilityEdgeService
 
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class ScannerService:
         decision_engine_service: DecisionEngineService | None = None,
         banknifty_option_prewarm_service: BankNiftyOptionPrewarmService | None = None,
         entry_timing_service: EntryTimingService | None = None,
+        volatility_edge_service: VolatilityEdgeService | None = None,
     ) -> None:
         self.signal_service = signal_service or SignalService()
         self.scoring_service = scoring_service or IndicatorScoringService()
@@ -77,6 +79,7 @@ class ScannerService:
         self.decision_engine_service = decision_engine_service or DecisionEngineService()
         self.banknifty_option_prewarm_service = banknifty_option_prewarm_service
         self.entry_timing_service = entry_timing_service or EntryTimingService()
+        self.volatility_edge_service = volatility_edge_service or VolatilityEdgeService()
 
         # Market data is independent from live order placement. When Kite data is
         # requested, fail closed instead of silently returning mock opportunities.
@@ -199,6 +202,15 @@ class ScannerService:
                 risk_failures = list(quote_quality["reasons"])
                 if not freshness_eval.get("passed", False):
                     risk_failures = list(freshness_eval.get("reasons", [])) + risk_failures
+                volatility_eval = self.volatility_edge_service.evaluate(
+                    symbol=symbol,
+                    contract=contract,
+                    premium_eval=premium_eval,
+                    market_snapshots=market_snapshots,
+                    prices={},
+                    action=self._action(side, trend),
+                    side=side,
+                )
                 factor_scores = {
                     "technical": score,
                     "score_breakdown": self._empty_score_breakdown(),
@@ -207,6 +219,7 @@ class ScannerService:
                     "data_freshness": freshness_eval,
                     "data_quality": quote_quality,
                     "option_premium_confirmation": premium_eval,
+                    "volatility_edge": volatility_eval,
                     "banknifty_option_prewarm": prewarm_eval,
                     "kite_calls": self._feed_call_counts(),
                 }
@@ -280,6 +293,18 @@ class ScannerService:
                 premium_eval=premium_eval,
                 day_type_eval=day_type_eval,
             )
+            banknifty_details = banknifty_eval.get("details", {}) if isinstance(banknifty_eval.get("details"), dict) else {}
+            volatility_eval = self.volatility_edge_service.evaluate(
+                symbol=symbol,
+                contract=contract,
+                option_quality=quality_eval,
+                premium_eval=premium_eval,
+                market_snapshots=market_snapshots,
+                prices=prices,
+                action=self._action(side, trend),
+                side=side,
+                expected_move_check=banknifty_details.get("expectedMoveCheck") if isinstance(banknifty_details, dict) else None,
+            )
             entry_timing_eval = self.entry_timing_service.evaluate(
                 contract=contract,
                 prices=prices,
@@ -314,6 +339,7 @@ class ScannerService:
                 "time_bucket_edge": time_bucket_eval,
                 "strategy_edge": edge_eval,
                 "banknifty_intelligence": banknifty_eval,
+                "volatility_edge": volatility_eval,
                 "liquidity": liquidity_score,
                 "contract": self._contract_payload(contract),
                 "prices": prices,
@@ -347,6 +373,7 @@ class ScannerService:
                 edge_eval=edge_eval,
                 banknifty_eval=banknifty_eval,
                 outcome_learning_eval=outcome_learning_eval,
+                volatility_eval=volatility_eval,
                 enforce_budget=enforce_budget,
             )
             risk_failures.extend(self._entry_timing_failures(entry_timing_eval))
@@ -779,6 +806,7 @@ class ScannerService:
         edge_eval: dict[str, object],
         banknifty_eval: dict[str, object],
         outcome_learning_eval: dict[str, object],
+        volatility_eval: dict[str, object] | None = None,
         enforce_budget: bool = False,
     ) -> list[str]:
         failures = self.trade_setup_service.risk_checks(combined_score, contract, prices["entry_price"], side, enforce_budget=enforce_budget)
@@ -801,6 +829,8 @@ class ScannerService:
             failures.extend(str(reason) for reason in time_bucket_eval.get("reasons", ["time bucket edge failed"]))
         if settings.enable_strategy_edge_guard and not edge_eval.get("passed", False):
             failures.extend(str(reason) for reason in edge_eval.get("reasons", ["strategy edge guard failed"]))
+        if settings.enable_volatility_edge and settings.enable_volatility_edge_hard_gate and volatility_eval and not volatility_eval.get("passed", False):
+            failures.extend(str(reason) for reason in volatility_eval.get("reasons", ["volatility edge guard failed"]))
         if settings.enable_banknifty_intelligence and not banknifty_eval.get("passed", False):
             failures.extend(str(reason) for reason in banknifty_eval.get("hard_reasons", ["Bank Nifty intelligence no-trade filter failed"]))
         if settings.enable_outcome_learning_guard and not outcome_learning_eval.get("passed", False):
@@ -840,6 +870,7 @@ class ScannerService:
         action = self._action(side, trend) if trend else ""
         quality = factor_scores.get("option_quality", {}) if factor_scores else {}
         premium = factor_scores.get("option_premium_confirmation", {}) if factor_scores else {}
+        volatility = factor_scores.get("volatility_edge", {}) if factor_scores else {}
         liquidity = factor_scores.get("liquidity") if factor_scores else None
         payload = {
             "symbol": symbol,
@@ -871,6 +902,7 @@ class ScannerService:
                 "open_interest": contract.open_interest if contract else None,
                 "liquidity_score": liquidity,
                 "premium_confirmation": premium,
+                "volatility_edge": volatility,
             },
             "planned_exit": {
                 "entry": (prices or {}).get("entry_price"),
@@ -946,6 +978,7 @@ class ScannerService:
                 "max_bid_ask_spread_pct": settings.max_bid_ask_spread_pct,
                 "min_option_volume": settings.min_option_volume,
                 "min_option_oi": settings.min_option_oi,
+                "min_volatility_edge_score": settings.min_volatility_edge_score,
                 "max_live_quote_age_seconds": settings.max_live_quote_age_seconds,
                 "max_live_option_quote_age_seconds": settings.max_live_option_quote_age_seconds,
                 "max_premium_confirmation_candle_age_seconds": settings.max_premium_confirmation_candle_age_seconds,
@@ -963,7 +996,16 @@ class ScannerService:
                 "banknifty_intelligence": settings.enable_banknifty_intelligence,
                 "time_bucket_filter": settings.enable_time_bucket_filter,
                 "strategy_edge_guard": settings.enable_strategy_edge_guard,
+                "volatility_edge": settings.enable_volatility_edge,
+                "volatility_edge_hard_gate": settings.enable_volatility_edge_hard_gate,
                 "outcome_learning_guard": settings.enable_outcome_learning_guard,
+            },
+            "volatility_edge_policy": {
+                "iv_lookback_days": settings.vol_edge_iv_lookback_days,
+                "min_iv_samples": settings.vol_edge_min_iv_samples,
+                "max_iv_to_rv_ratio_for_buy": settings.vol_edge_max_iv_to_rv_ratio_for_buy,
+                "min_expected_move_coverage": settings.vol_edge_min_expected_move_coverage,
+                "iv_crush_warning_threshold": settings.vol_edge_iv_crush_warning_threshold,
             },
             "data_policy": {
                 "use_kite_market_data": settings.use_kite_market_data,
@@ -1067,6 +1109,9 @@ class ScannerService:
     ) -> dict[str, object]:
         timing = factor_scores.get("entry_timing", {}) if factor_scores else {}
         timing = timing if isinstance(timing, dict) else {}
+        volatility = factor_scores.get("volatility_edge", {}) if factor_scores else {}
+        volatility = volatility if isinstance(volatility, dict) else {}
+        volatility_details = volatility.get("details", {}) if isinstance(volatility.get("details"), dict) else {}
         return {
             "symbol": symbol,
             "score": score,
@@ -1096,6 +1141,16 @@ class ScannerService:
             "entry_valid_until": timing.get("entry_valid_until"),
             "entry_should_wait": timing.get("entry_should_wait"),
             "entry_should_reject_as_late": timing.get("entry_should_reject_as_late"),
+            "volatility_edge_score": volatility.get("score"),
+            "volatility_edge_classification": volatility.get("classification"),
+            "volatility_edge_for_option_buying": volatility.get("volatility_edge_for_option_buying"),
+            "iv_rank": volatility_details.get("iv_rank"),
+            "iv_percentile": volatility_details.get("iv_percentile"),
+            "iv_to_rv_ratio": volatility_details.get("iv_to_rv_ratio"),
+            "expected_move_coverage_iv": volatility_details.get("expected_move_coverage_iv"),
+            "iv_expansion_supported": volatility_details.get("iv_expansion_supported"),
+            "iv_crush_risk": volatility_details.get("iv_crush_risk"),
+            "volatility_edge_reasons": volatility.get("reasons", []),
             "factor_scores": factor_scores or {},
             "signal": signal,
         }

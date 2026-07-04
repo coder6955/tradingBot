@@ -1456,6 +1456,17 @@ def get_daily_review(symbol: str = "BANKNIFTY", review_date: str | None = None, 
 
 
 @app.get(
+    "/research/daily-banknifty-summary",
+    tags=["10 Research"],
+    summary="Minimal daily Bank Nifty evidence summary",
+    description="Small paper/live-shadow evidence summary for one Bank Nifty session. This does not replay rejected trades or change strategy.",
+)
+def get_daily_banknifty_summary(date: str | None = None) -> dict[str, object]:
+    parsed_date = datetime.fromisoformat(date).date() if date else None
+    return professional_insights_service.daily_banknifty_summary(summary_date=parsed_date)
+
+
+@app.get(
     "/research/trade-journal",
     tags=["10 Research"],
     summary="Unified opportunity, rejection, and trade timeline",

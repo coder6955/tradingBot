@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -106,11 +107,15 @@ class ScannerDataQualityTests(unittest.TestCase):
             "enable_day_type_filter": settings.enable_day_type_filter,
             "enable_outcome_learning_guard": settings.enable_outcome_learning_guard,
             "enable_strategy_edge_guard": settings.enable_strategy_edge_guard,
+            "enable_volatility_edge": settings.enable_volatility_edge,
+            "enable_volatility_edge_hard_gate": settings.enable_volatility_edge_hard_gate,
         }
         object.__setattr__(settings, "use_kite_market_data", True)
         object.__setattr__(settings, "enable_day_type_filter", False)
         object.__setattr__(settings, "enable_outcome_learning_guard", False)
         object.__setattr__(settings, "enable_strategy_edge_guard", False)
+        object.__setattr__(settings, "enable_volatility_edge", True)
+        object.__setattr__(settings, "enable_volatility_edge_hard_gate", False)
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.temp_db.close()
         init_db(f"sqlite:///{self.temp_db.name}")
@@ -228,6 +233,71 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.assertIn("entry_should_wait", result)
         self.assertIn("entry_should_reject_as_late", result)
         self.assertIn("entry_timing", result["factor_scores"])
+
+    def test_scanner_diagnostics_exposes_volatility_edge_fields(self) -> None:
+        result = self._scanner_result(
+            {
+                "instrument_token": 580001,
+                "last_price": 1087.1,
+                "depth": {"buy": [{"price": 1086.0}], "sell": [{"price": 1087.1}]},
+                "volume": 100000,
+                "oi": 100000,
+            }
+        )
+
+        self.assertIn("volatility_edge", result["factor_scores"])
+        self.assertIn("volatility_edge_score", result)
+        self.assertIn("volatility_edge_classification", result)
+        self.assertIn("volatility_edge_for_option_buying", result)
+        self.assertIn("iv_rank", result)
+        self.assertIn("iv_percentile", result)
+        self.assertIn("iv_to_rv_ratio", result)
+        self.assertIn("expected_move_coverage_iv", result)
+        self.assertIn("iv_expansion_supported", result)
+        self.assertIn("iv_crush_risk", result)
+        self.assertIn("volatility_edge_reasons", result)
+
+    def test_volatility_edge_does_not_block_when_hard_gate_disabled(self) -> None:
+        object.__setattr__(settings, "enable_volatility_edge_hard_gate", False)
+
+        result = self._scanner_result(
+            {
+                "instrument_token": 580001,
+                "last_price": 1087.1,
+                "depth": {"buy": [{"price": 1086.0}], "sell": [{"price": 1087.1}]},
+                "volume": 100000,
+                "oi": 100000,
+            }
+        )
+
+        self.assertIn("UNKNOWN_DATA_MISSING: insufficient IV history", result["factor_scores"]["volatility_edge"]["reasons"])
+        self.assertNotIn("UNKNOWN_DATA_MISSING: insufficient IV history", result["reasons"])
+
+    def test_volatility_edge_hard_gate_blocks_when_enabled(self) -> None:
+        object.__setattr__(settings, "enable_volatility_edge_hard_gate", True)
+
+        result = self._scanner_result(
+            {
+                "instrument_token": 580001,
+                "last_price": 1087.1,
+                "depth": {"buy": [{"price": 1086.0}], "sell": [{"price": 1087.1}]},
+                "volume": 100000,
+                "oi": 100000,
+            }
+        )
+
+        self.assertIn("UNKNOWN_DATA_MISSING: insufficient IV history", result["reasons"])
+
+    def test_rejected_opportunity_metadata_includes_volatility_edge(self) -> None:
+        repo = RejectedOpportunityRepository()
+        scanner = ScannerService(feed=BankNiftyQualityFeed({"instrument_token": 580001, "last_price": 0, "depth": {"buy": [{"price": 0}], "sell": [{"price": 0}]}, "volume": 0, "oi": 0}), rejected_opportunity_repository=repo)
+
+        scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")
+        rows = repo.list_rejections(symbol="BANKNIFTY", limit=1)
+        factors = json.loads(rows[0].factor_scores_json)
+
+        self.assertIn("volatility_edge", factors)
+        self.assertIn("reasons", factors["volatility_edge"])
 
     def test_previous_day_option_candles_fail_premium_confirmation_during_current_session(self) -> None:
         yesterday = datetime.now() - timedelta(days=1, hours=1)

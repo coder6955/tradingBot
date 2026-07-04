@@ -19,6 +19,23 @@ class ProfessionalInsightsService:
     scanner strategy, hard gates, score calculation, or order flow.
     """
 
+    REJECTION_REASON_CATEGORIES = {
+        "premium_candles_stale_or_missing": ("premium_candles_stale_or_missing", "premium candles stale", "previous-day option candles"),
+        "insufficient_current_session_premium_candles": ("insufficient_current_session_premium_candles",),
+        "option_premium_confirmation_score_below_threshold": (
+            "option premium confirmation score is below threshold",
+            "option_premium_confirmation_score_below_threshold",
+        ),
+        "top_banks_mixed": ("top banks are mixed", "not enough top banks", "hdfc and icici are opposite"),
+        "insufficient_room_to_level": ("insufficient room", "too little room", "nearest support/resistance leaves too little room"),
+        "expected_move_too_small": ("expected move is smaller", "expected_move_coverage_weak"),
+        "day_type_score_below_threshold": ("day type score is below", "day type filter failed"),
+        "entry_timing_price_inputs_missing": ("entry_timing_price_inputs_missing",),
+        "market_closed": ("market_closed", "market closed", "outside market hours"),
+        "data_stale": ("data is stale", "quote is stale", "quotes are stale", "tick_stale"),
+        "quote_invalid": ("selected_option_quote_invalid", "quote invalid", "quote_unavailable", "invalid quote"),
+    }
+
     def analyze(self, *, symbol: str | None = "BANKNIFTY", limit: int = 1000) -> dict[str, Any]:
         opportunities, rejections, trades = self._load(symbol=symbol, limit=limit)
         return {
@@ -38,6 +55,58 @@ class ProfessionalInsightsService:
                 "These reports are evidence dashboards only; they do not change scanner logic.",
                 "Use larger paper/live-shadow samples before promoting any finding into a hard rule.",
             ],
+        }
+
+    def daily_banknifty_summary(self, *, summary_date: date | None = None) -> dict[str, Any]:
+        day = summary_date or ist_today()
+        opportunities, rejections, trades = self._load_day(symbol="BANKNIFTY", day=day)
+        paper_trades = [trade for trade in trades if str(trade.mode or "").lower() == "paper"]
+        closed_paper = [trade for trade in paper_trades if str(trade.status or "").lower() == "closed"]
+        open_paper = [trade for trade in paper_trades if str(trade.status or "").lower() != "closed"]
+        winning_trades = [trade for trade in closed_paper if self._trade_is_win(trade)]
+        losing_trades = [trade for trade in closed_paper if self._trade_is_loss(trade)]
+        gross_values = [float(trade.gross_pnl) for trade in closed_paper if trade.gross_pnl is not None]
+        net_values = [value for trade in closed_paper if (value := self._trade_net_pnl(trade)) is not None]
+        win_values = [value for trade in winning_trades if (value := self._trade_net_pnl(trade)) is not None]
+        loss_values = [value for trade in losing_trades if (value := self._trade_net_pnl(trade)) is not None]
+        reason_counts = self._grouped_rejection_reason_counts(rejections)
+        low_sample = len(closed_paper) < 30
+        data_health_warnings = self._daily_data_health_warnings(
+            paper_trades=paper_trades,
+            opportunities=opportunities,
+            rejections=rejections,
+            reason_counts=reason_counts,
+        )
+        return {
+            "status": "ok",
+            "date": day.isoformat(),
+            "symbol": "BANKNIFTY",
+            "total_paper_trades": len(paper_trades),
+            "total_closed_paper_trades": len(closed_paper),
+            "winning_trades": len(winning_trades),
+            "losing_trades": len(losing_trades),
+            "open_trades": len(open_paper),
+            "gross_pnl": round(sum(gross_values), 2) if gross_values else None,
+            "net_pnl": round(sum(net_values), 2) if net_values else None,
+            "average_win": round(sum(win_values) / len(win_values), 2) if win_values else None,
+            "average_loss": round(abs(sum(loss_values)) / len(loss_values), 2) if loss_values else None,
+            "total_rejected_opportunities": len(rejections),
+            "rejection_reasons_count": reason_counts,
+            "top_5_rejection_reasons": [
+                {"reason": reason, "count": count}
+                for reason, count in Counter(reason_counts).most_common(5)
+                if count > 0
+            ],
+            "total_scanner_no_trade_count": len(rejections),
+            "total_signal_count": len(opportunities),
+            "data_health_warnings": data_health_warnings,
+            "low_sample_warning": low_sample,
+            "recommendation": {
+                "safe_to_change_strategy": False,
+                "safe_to_enable_live": False,
+                "reason": "Need more paper/live-shadow samples before changing strategy.",
+                "next_action": "Collect more sessions.",
+            },
         }
 
     def daily_review(self, *, symbol: str | None = "BANKNIFTY", review_date: date | None = None, limit: int = 1000) -> dict[str, Any]:
@@ -134,6 +203,41 @@ class ProfessionalInsightsService:
                 rejection_query = rejection_query.filter(RejectedOpportunityRecord.symbol == symbol_value)
                 trade_query = trade_query.filter(TradeRecord.symbol == symbol_value)
             return opportunity_query.limit(limit).all(), rejection_query.limit(limit).all(), trade_query.limit(limit).all()
+        finally:
+            session.close()
+
+    def _load_day(
+        self, *, symbol: str, day: date
+    ) -> tuple[list[OpportunityRecord], list[RejectedOpportunityRecord], list[TradeRecord]]:
+        start = datetime.combine(day, datetime.min.time())
+        end = datetime.combine(day, datetime.max.time())
+        session = get_session()
+        try:
+            opportunities = (
+                session.query(OpportunityRecord)
+                .filter(OpportunityRecord.symbol == symbol.upper())
+                .filter(OpportunityRecord.created_at >= start)
+                .filter(OpportunityRecord.created_at <= end)
+                .order_by(OpportunityRecord.id.desc())
+                .all()
+            )
+            rejections = (
+                session.query(RejectedOpportunityRecord)
+                .filter(RejectedOpportunityRecord.symbol == symbol.upper())
+                .filter(RejectedOpportunityRecord.created_at >= start)
+                .filter(RejectedOpportunityRecord.created_at <= end)
+                .order_by(RejectedOpportunityRecord.id.desc())
+                .all()
+            )
+            trades = (
+                session.query(TradeRecord)
+                .filter(TradeRecord.symbol == symbol.upper())
+                .filter(TradeRecord.created_at >= start)
+                .filter(TradeRecord.created_at <= end)
+                .order_by(TradeRecord.id.desc())
+                .all()
+            )
+            return opportunities, rejections, trades
         finally:
             session.close()
 
@@ -351,6 +455,58 @@ class ProfessionalInsightsService:
             "max_drawdown": round(max_drawdown(values), 2),
             "total_pnl": round(sum(values), 2),
         }
+
+    def _grouped_rejection_reason_counts(self, rows: list[RejectedOpportunityRecord]) -> dict[str, int]:
+        counts = {category: 0 for category in self.REJECTION_REASON_CATEGORIES}
+        for row in rows:
+            for reason in self._json_list(row.reasons_json):
+                category = self._rejection_reason_category(reason)
+                if category:
+                    counts[category] += 1
+        return counts
+
+    def _rejection_reason_category(self, reason: str) -> str | None:
+        normalized = str(reason or "").strip().lower().replace("-", "_")
+        for category, markers in self.REJECTION_REASON_CATEGORIES.items():
+            if any(marker in normalized for marker in markers):
+                return category
+        return None
+
+    def _daily_data_health_warnings(
+        self,
+        *,
+        paper_trades: list[TradeRecord],
+        opportunities: list[OpportunityRecord],
+        rejections: list[RejectedOpportunityRecord],
+        reason_counts: dict[str, int],
+    ) -> list[str]:
+        warnings: list[str] = []
+        if not paper_trades and not opportunities and not rejections:
+            warnings.append("No Bank Nifty paper/live-shadow evidence was stored for this date.")
+        if reason_counts.get("premium_candles_stale_or_missing", 0) or reason_counts.get("insufficient_current_session_premium_candles", 0):
+            warnings.append("Premium confirmation candles were stale or missing.")
+        if reason_counts.get("quote_invalid", 0):
+            warnings.append("Invalid or unavailable option quotes were seen.")
+        if reason_counts.get("data_stale", 0):
+            warnings.append("Stale market data was seen.")
+        return warnings
+
+    def _trade_net_pnl(self, trade: TradeRecord) -> float | None:
+        if trade.net_pnl is not None:
+            return float(trade.net_pnl)
+        if trade.pnl is not None:
+            return float(trade.pnl)
+        return None
+
+    def _trade_is_win(self, trade: TradeRecord) -> bool:
+        pnl = self._trade_net_pnl(trade)
+        outcome = str(trade.outcome or "").lower()
+        return outcome in WIN_OUTCOMES or (pnl is not None and pnl > 0)
+
+    def _trade_is_loss(self, trade: TradeRecord) -> bool:
+        pnl = self._trade_net_pnl(trade)
+        outcome = str(trade.outcome or "").lower()
+        return outcome in LOSS_OUTCOMES or (pnl is not None and pnl < 0)
 
     def _factor_labels(self, factors: dict[str, Any], *, accepted: bool, row: Any) -> list[str]:
         labels = [f"decision:{'accepted' if accepted else 'rejected'}", f"score:{score_bucket(getattr(row, 'score', 0))}"]

@@ -121,6 +121,64 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
         self.assertEqual(review["sample"]["trades"], 1)
         self.assertGreaterEqual(len(journal["timeline"]), 2)
 
+    def test_daily_banknifty_summary_groups_rejections_and_warns_on_low_sample(self) -> None:
+        trade_repo = TradeRepository()
+        rejected_repo = RejectedOpportunityRepository()
+        winner = trade_repo.create_trade(
+            self._signal("BUY_CE", "BANKNIFTY26JUL58000CE", 100, 80, 140),
+            mode="paper",
+            status="filled",
+            requested_quantity=15,
+            placed_quantity=15,
+        )
+        loser = trade_repo.create_trade(
+            self._signal("BUY_PE", "BANKNIFTY26JUL57000PE", 100, 80, 140),
+            mode="paper",
+            status="filled",
+            requested_quantity=15,
+            placed_quantity=15,
+        )
+        trade_repo.create_trade(
+            self._signal("BUY_CE", "BANKNIFTY26JUL58100CE", 100, 80, 140),
+            mode="paper",
+            status="filled",
+            requested_quantity=15,
+            placed_quantity=15,
+        )
+        trade_repo.close_trade(winner.id, outcome="target_1", exit_price=140)
+        trade_repo.close_trade(loser.id, outcome="stop_loss", exit_price=80)
+        rejected_repo.save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=72,
+            reasons=[
+                "premium_candles_stale_or_missing",
+                "top banks are mixed against Bank Nifty direction",
+                "selected_option_quote_invalid",
+            ],
+        )
+
+        result = ProfessionalInsightsService().daily_banknifty_summary(summary_date=datetime.now().date())
+
+        self.assertEqual(result["total_paper_trades"], 3)
+        self.assertEqual(result["total_closed_paper_trades"], 2)
+        self.assertEqual(result["winning_trades"], 1)
+        self.assertEqual(result["losing_trades"], 1)
+        self.assertEqual(result["open_trades"], 1)
+        self.assertIsNotNone(result["gross_pnl"])
+        self.assertIsNotNone(result["net_pnl"])
+        self.assertGreater(result["average_win"], 0)
+        self.assertGreater(result["average_loss"], 0)
+        self.assertEqual(result["total_rejected_opportunities"], 1)
+        self.assertEqual(result["rejection_reasons_count"]["premium_candles_stale_or_missing"], 1)
+        self.assertEqual(result["rejection_reasons_count"]["top_banks_mixed"], 1)
+        self.assertEqual(result["rejection_reasons_count"]["quote_invalid"], 1)
+        self.assertTrue(result["low_sample_warning"])
+        self.assertFalse(result["recommendation"]["safe_to_change_strategy"])
+        self.assertFalse(result["recommendation"]["safe_to_enable_live"])
+        self.assertIn("Premium confirmation candles were stale or missing.", result["data_health_warnings"])
+
     def test_professional_data_completeness_reports_stored_market_data(self) -> None:
         session = get_session()
         try:

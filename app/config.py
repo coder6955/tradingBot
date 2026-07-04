@@ -82,6 +82,14 @@ class Settings:
     min_option_buy_iv: float = float(os.getenv("MIN_OPTION_BUY_IV", "0.05"))
     max_option_buy_iv: float = float(os.getenv("MAX_OPTION_BUY_IV", "1.20"))
     min_option_quality_score: int = int(os.getenv("MIN_OPTION_QUALITY_SCORE", "60"))
+    enable_volatility_edge: bool = os.getenv("ENABLE_VOLATILITY_EDGE", "true").lower() == "true"
+    enable_volatility_edge_hard_gate: bool = os.getenv("ENABLE_VOLATILITY_EDGE_HARD_GATE", "false").lower() == "true"
+    min_volatility_edge_score: int = int(os.getenv("MIN_VOLATILITY_EDGE_SCORE", "55"))
+    vol_edge_iv_lookback_days: int = int(os.getenv("VOL_EDGE_IV_LOOKBACK_DAYS", "20"))
+    vol_edge_min_iv_samples: int = int(os.getenv("VOL_EDGE_MIN_IV_SAMPLES", "30"))
+    vol_edge_max_iv_to_rv_ratio_for_buy: float = float(os.getenv("VOL_EDGE_MAX_IV_TO_RV_RATIO_FOR_BUY", "1.5"))
+    vol_edge_min_expected_move_coverage: float = float(os.getenv("VOL_EDGE_MIN_EXPECTED_MOVE_COVERAGE", "0.8"))
+    vol_edge_iv_crush_warning_threshold: float = float(os.getenv("VOL_EDGE_IV_CRUSH_WARNING_THRESHOLD", "80"))
     backtest_horizon_candles: int = int(os.getenv("BACKTEST_HORIZON_CANDLES", "12"))
     backtest_option_stop_loss_pct: float = float(os.getenv("BACKTEST_OPTION_STOP_LOSS_PCT", "22.0"))
     backtest_option_target_pct: float = float(os.getenv("BACKTEST_OPTION_TARGET_PCT", "35.0"))

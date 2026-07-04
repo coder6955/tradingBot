@@ -8,10 +8,12 @@ from urllib.parse import urlsplit
 from unittest.mock import patch
 
 import app.api as api
+from app.models import Signal
 from app.services.active_price_feed import ActiveTradePriceFeed
 from app.services.database import init_db
 from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
+from app.services.trade_repository import TradeRepository
 
 
 class FakeScanner:
@@ -229,6 +231,45 @@ class ApiIntegrationTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["sample"]["total_rejected"], 1)
 
+    def test_daily_banknifty_summary_endpoint(self) -> None:
+        trade_repo = TradeRepository()
+        trade = trade_repo.create_trade(
+            self._signal("BUY_CE", "BANKNIFTY26JUL58000CE"),
+            mode="paper",
+            status="filled",
+            requested_quantity=15,
+            placed_quantity=15,
+        )
+        trade_repo.close_trade(trade.id, outcome="target_1", exit_price=140)
+        RejectedOpportunityRepository().save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_PE",
+            score=76,
+            reasons=["insufficient_current_session_premium_candles", "expected move is smaller than option premium target requirement"],
+        )
+
+        response = self.client.get("/research/daily-banknifty-summary")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["symbol"], "BANKNIFTY")
+        self.assertEqual(payload["total_paper_trades"], 1)
+        self.assertEqual(payload["total_closed_paper_trades"], 1)
+        self.assertTrue(payload["low_sample_warning"])
+        self.assertFalse(payload["recommendation"]["safe_to_enable_live"])
+        self.assertEqual(payload["rejection_reasons_count"]["insufficient_current_session_premium_candles"], 1)
+        self.assertEqual(payload["rejection_reasons_count"]["expected_move_too_small"], 1)
+
+    def test_daily_summary_does_not_change_scanner_endpoint(self) -> None:
+        self.client.get("/research/daily-banknifty-summary")
+        with patch.object(api, "get_scanner_service", return_value=FakeScanner()):
+            response = self.client.get("/scanner/diagnostics?side=BUY&symbols=BANKNIFTY&order_mode=paper&limit=1")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["diagnostics"][0]["reasons"], ["test rejection"])
+
     def test_trades_endpoint(self) -> None:
         response = self.client.get("/trades?limit=5")
 
@@ -295,6 +336,27 @@ class ApiIntegrationTests(unittest.TestCase):
 
         self.assertIsNone(tick)
         self.assertIn(active.last_reason, {"websocket_disabled", "websocket_disconnected"})
+
+    def _signal(self, action: str, tradingsymbol: str) -> Signal:
+        return Signal(
+            symbol="BANKNIFTY",
+            action=action,
+            side="BUY",
+            tradingsymbol=tradingsymbol,
+            exchange="NFO",
+            strike=58000,
+            expiry="2026-07-26",
+            entry_price=100,
+            stop_loss=80,
+            target_1=140,
+            quantity=15,
+            lot_size=15,
+            probability=0.78,
+            risk_reward=1.5,
+            score=86,
+            setup_type="directional_option_buy",
+            factor_scores={"score_breakdown": {"score": 86}},
+        )
 
 
 if __name__ == "__main__":
