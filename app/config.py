@@ -19,7 +19,10 @@ DEFAULT_AUTOMATION_SYMBOLS = "BANKNIFTY"
 class Settings:
     app_name: str = "AI Option Trader"
     app_environment: str = os.getenv("APP_ENV", "development")
+    strategy_name: str = os.getenv("STRATEGY_NAME", "banknifty_option_buying")
     strategy_version: str = os.getenv("STRATEGY_VERSION", "banknifty_option_buying_v1")
+    strategy_version_note: str = os.getenv("STRATEGY_VERSION_NOTE", "Initial Bank Nifty option-buying strategy version")
+    strategy_change_reason: str = os.getenv("STRATEGY_CHANGE_REASON", "Initial version or manual strategy version registration")
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
     python_version: str = "3.12"
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./app.db")

@@ -40,6 +40,7 @@ from app.services.professional_insights_service import ProfessionalInsightsServi
 from app.services.risk_management_service import RiskManagementService
 from app.services.strategy_edge_service import StrategyEdgeService
 from app.services.strategy_validation_repository import StrategyValidationRepository
+from app.services.strategy_version_registry import StrategyVersionRegistry
 from app.services.time_bucket_edge_service import TimeBucketEdgeService
 from app.services.trade_exit_service import TradeExitService
 from app.services.trade_repository import TradeRepository
@@ -107,6 +108,7 @@ kite_websocket_price_feed = KiteWebSocketPriceFeed()
 active_trade_price_feed = ActiveTradePriceFeed(kite_websocket_price_feed)
 banknifty_option_prewarm_service = BankNiftyOptionPrewarmService(kite_websocket_price_feed)
 strategy_validation_repository = StrategyValidationRepository()
+strategy_version_registry = StrategyVersionRegistry()
 strategy_edge_service = StrategyEdgeService(backtest_service=backtest_service, repository=strategy_validation_repository)
 day_type_service = DayTypeService()
 option_premium_confirmation_service = OptionPremiumConfirmationService()
@@ -213,6 +215,10 @@ automation_supervisor_service = AutomationSupervisorService(
 
 @app.on_event("startup")
 async def startup_automation() -> None:
+    try:
+        strategy_version_registry.ensure_current_version()
+    except Exception:
+        pass
     if settings.enable_kite_websocket:
         active_trade_price_feed.start()
     try:
@@ -267,6 +273,52 @@ def market_data_cache_status() -> dict[str, object]:
     return market_data_coordinator.status()
 
 
+@app.get("/strategy/versions/current", tags=["10 Research"], summary="Inspect the active strategy version registry entry")
+def current_strategy_version() -> dict[str, object]:
+    return strategy_version_registry.current_version()
+
+
+@app.get("/strategy/versions", tags=["10 Research"], summary="List strategy version registry entries")
+def list_strategy_versions(limit: int = 50) -> dict[str, object]:
+    return strategy_version_registry.list_versions(limit=limit)
+
+
+@app.get("/strategy/versions/{version}", tags=["10 Research"], summary="Inspect one strategy version registry entry")
+def get_strategy_version(version: str) -> dict[str, object]:
+    result = strategy_version_registry.get_version(version)
+    if result.get("status") == "not_found":
+        raise HTTPException(status_code=404, detail=f"strategy version not found: {version}")
+    return result
+
+
+@app.post("/strategy/versions/register", tags=["10 Research"], summary="Register or refresh the current strategy version with human notes")
+def register_strategy_version(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
+    payload = payload or {}
+    base = strategy_version_registry.current_payload(
+        human_note=str(payload.get("human_note")) if payload.get("human_note") else None,
+        reason_for_change=str(payload.get("reason_for_change")) if payload.get("reason_for_change") else None,
+    )
+    for key in (
+        "strategy_name",
+        "version",
+        "status",
+        "human_note",
+        "reason_for_change",
+        "entry_logic_summary",
+        "exit_logic_summary",
+        "stoploss_logic_summary",
+        "target_logic_summary",
+    ):
+        if payload.get(key):
+            base[key] = payload[key]
+    if isinstance(payload.get("config_snapshot"), dict):
+        base["config_snapshot"] = payload["config_snapshot"]
+    if isinstance(payload.get("settings_purpose"), dict):
+        base["settings_purpose"] = payload["settings_purpose"]
+    base["_force_text_update"] = True
+    return strategy_version_registry.register(base)
+
+
 @app.get("/", tags=["01 System"], summary="Show API workflow overview")
 def root() -> dict[str, object]:
     return {
@@ -281,6 +333,7 @@ def root() -> dict[str, object]:
             "GET /kite/margins",
             "POST /automation/start",
             "GET /automation/status",
+            "GET /strategy/versions/current",
             "POST /data/ingest/candles",
             "POST /data/ingest/option-candles",
             "POST /data/ingest/option-snapshots",

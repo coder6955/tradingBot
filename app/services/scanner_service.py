@@ -935,7 +935,7 @@ class ScannerService:
             return factor_scores
         enriched = dict(factor_scores)
         enriched["strategy_metadata"] = {
-            "strategy_name": "banknifty_option_buying",
+            "strategy_name": settings.strategy_name,
             "strategy_version": settings.strategy_version,
             "order_mode": order_mode,
             "generated_at": self._decision_timestamp(),

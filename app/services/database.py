@@ -200,6 +200,32 @@ class StrategyValidationRecord(Base):
     result_json = Column(Text, nullable=False)
 
 
+class StrategyVersionRecord(Base):
+    __tablename__ = "strategy_versions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    updated_at = Column(DateTime, nullable=False, default=ist_now_naive)
+    last_seen_at = Column(DateTime, nullable=True, index=True)
+    strategy_name = Column(String(100), nullable=False, index=True)
+    version = Column(String(100), nullable=False, unique=True, index=True)
+    status = Column(String(30), nullable=False, default="active", index=True)
+    started_at = Column(DateTime, nullable=True, index=True)
+    retired_at = Column(DateTime, nullable=True)
+    human_note = Column(Text, nullable=True)
+    reason_for_change = Column(Text, nullable=True)
+    entry_logic_summary = Column(Text, nullable=True)
+    exit_logic_summary = Column(Text, nullable=True)
+    stoploss_logic_summary = Column(Text, nullable=True)
+    target_logic_summary = Column(Text, nullable=True)
+    config_snapshot_json = Column(Text, nullable=False)
+    latest_config_snapshot_json = Column(Text, nullable=True)
+    settings_purpose_json = Column(Text, nullable=True)
+    config_hash = Column(String(64), nullable=False, index=True)
+    latest_config_hash = Column(String(64), nullable=True, index=True)
+    config_drift_detected = Column(Integer, nullable=False, default=0, index=True)
+
+
 def init_db(database_url: Optional[str] = None) -> None:
     global engine, SessionLocal
     url = database_url or settings.database_url
@@ -210,6 +236,7 @@ def init_db(database_url: Optional[str] = None) -> None:
     _ensure_opportunity_columns()
     _ensure_trade_columns()
     _ensure_strategy_validation_columns()
+    _ensure_strategy_version_columns()
 
 
 def _ensure_opportunity_columns() -> None:
@@ -280,6 +307,36 @@ def _ensure_strategy_validation_columns() -> None:
                 connection.execute(text(f"ALTER TABLE strategy_validations ADD COLUMN {column} {column_type}"))
 
 
+def _ensure_strategy_version_columns() -> None:
+    if engine is None:
+        return
+    inspector = inspect(engine)
+    if "strategy_versions" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("strategy_versions")}
+    required = {
+        "updated_at": "DATETIME",
+        "last_seen_at": "DATETIME",
+        "status": "VARCHAR(30)",
+        "started_at": "DATETIME",
+        "retired_at": "DATETIME",
+        "human_note": "TEXT",
+        "reason_for_change": "TEXT",
+        "entry_logic_summary": "TEXT",
+        "exit_logic_summary": "TEXT",
+        "stoploss_logic_summary": "TEXT",
+        "target_logic_summary": "TEXT",
+        "latest_config_snapshot_json": "TEXT",
+        "settings_purpose_json": "TEXT",
+        "latest_config_hash": "VARCHAR(64)",
+        "config_drift_detected": "INTEGER DEFAULT 0",
+    }
+    with engine.begin() as connection:
+        for column, column_type in required.items():
+            if column not in existing:
+                connection.execute(text(f"ALTER TABLE strategy_versions ADD COLUMN {column} {column_type}"))
+
+
 def get_session():
     if SessionLocal is None:
         init_db()
@@ -287,4 +344,5 @@ def get_session():
         _ensure_opportunity_columns()
         _ensure_trade_columns()
         _ensure_strategy_validation_columns()
+        _ensure_strategy_version_columns()
     return SessionLocal()

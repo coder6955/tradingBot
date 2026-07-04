@@ -248,6 +248,31 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("websocket_enabled", response.json())
 
+    def test_strategy_version_registry_endpoints(self) -> None:
+        current = self.client.get("/strategy/versions/current")
+
+        self.assertEqual(current.status_code, 200)
+        current_payload = current.json()
+        self.assertEqual(current_payload["status"], "ok")
+        self.assertIn("config_snapshot", current_payload["version"])
+        self.assertIn("settings_purpose", current_payload["version"])
+
+        registered = self.client.post(
+            "/strategy/versions/register",
+            json={
+                "human_note": "API test note",
+                "reason_for_change": "API test reason",
+            },
+        )
+
+        self.assertEqual(registered.status_code, 200)
+        self.assertEqual(registered.json()["status"], "ok")
+        self.assertEqual(registered.json()["version"]["human_note"], "API test note")
+
+        listed = self.client.get("/strategy/versions?limit=5")
+        self.assertEqual(listed.status_code, 200)
+        self.assertGreaterEqual(listed.json()["count"], 1)
+
     def test_stale_live_websocket_blocks_active_price_use(self) -> None:
         original_enabled = api.settings.enable_kite_websocket
         original_blocks = api.settings.websocket_live_stale_blocks
