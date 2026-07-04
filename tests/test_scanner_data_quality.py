@@ -100,6 +100,57 @@ class FakeWebSocketPremiumFeed:
         }
 
 
+class FakeArmedEntryTimingService:
+    def evaluate(self, **kwargs):
+        return {
+            "enabled": True,
+            "state": "ARMED_FOR_ENTRY",
+            "entry_timing_state": "ARMED_FOR_ENTRY",
+            "passed": False,
+            "reasons": ["waiting_for_entry_trigger", "premium_trigger_not_broken_yet"],
+            "entry_timing_reason": "waiting_for_entry_trigger; premium_trigger_not_broken_yet",
+            "entry_trigger_price": 1090.0,
+            "current_premium": 1087.1,
+            "premium_distance_to_trigger_pct": 0.266,
+            "premium_move_from_base_pct": 2.0,
+            "chase_risk": "normal",
+            "remaining_risk_reward": 1.5,
+            "target1_room_pct": 12.0,
+            "entry_valid_until": datetime.now().isoformat(sep=" "),
+            "entry_should_wait": True,
+            "entry_should_reject_as_late": False,
+            "spread_pct": 0.1,
+        }
+
+
+class FakeArmedEntryTracker:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def register_from_scan(self, **kwargs):
+        self.calls.append(kwargs)
+        contract = kwargs["contract"]
+        return {
+            "registered": True,
+            "setup_id": "armed-test-1",
+            "latest_state": "ARMED_FOR_ENTRY",
+            "latest_reason": "waiting_for_entry_trigger",
+            "selected_option": {
+                "tradingsymbol": contract.tradingsymbol,
+                "instrument_token": contract.instrument_token,
+                "option_type": contract.option_type,
+                "strike": contract.strike,
+                "expiry": contract.expiry,
+            },
+            "entry_trigger_price": kwargs["entry_timing"]["entry_trigger_price"],
+            "current_premium": kwargs["entry_timing"]["current_premium"],
+            "valid_until": kwargs["entry_timing"]["entry_valid_until"],
+            "websocket_tracking_enabled": True,
+            "paper_event_entry_enabled": True,
+            "live_event_entry_blocked": False,
+        }
+
+
 class ScannerDataQualityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.originals = {
@@ -109,6 +160,7 @@ class ScannerDataQualityTests(unittest.TestCase):
             "enable_strategy_edge_guard": settings.enable_strategy_edge_guard,
             "enable_volatility_edge": settings.enable_volatility_edge,
             "enable_volatility_edge_hard_gate": settings.enable_volatility_edge_hard_gate,
+            "enable_kite_websocket": settings.enable_kite_websocket,
         }
         object.__setattr__(settings, "use_kite_market_data", True)
         object.__setattr__(settings, "enable_day_type_filter", False)
@@ -116,6 +168,7 @@ class ScannerDataQualityTests(unittest.TestCase):
         object.__setattr__(settings, "enable_strategy_edge_guard", False)
         object.__setattr__(settings, "enable_volatility_edge", True)
         object.__setattr__(settings, "enable_volatility_edge_hard_gate", False)
+        object.__setattr__(settings, "enable_kite_websocket", False)
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.temp_db.close()
         init_db(f"sqlite:///{self.temp_db.name}")
@@ -298,6 +351,58 @@ class ScannerDataQualityTests(unittest.TestCase):
 
         self.assertIn("volatility_edge", factors)
         self.assertIn("reasons", factors["volatility_edge"])
+
+    def test_scanner_registers_armed_setup_when_entry_timing_is_armed(self) -> None:
+        originals = {
+            "enable_option_premium_confirmation": settings.enable_option_premium_confirmation,
+            "enable_banknifty_intelligence": settings.enable_banknifty_intelligence,
+            "enable_kite_websocket": settings.enable_kite_websocket,
+            "min_signal_score": settings.min_signal_score,
+            "min_market_regime_score": settings.min_market_regime_score,
+            "min_price_action_score": settings.min_price_action_score,
+            "min_option_chain_score": settings.min_option_chain_score,
+            "min_option_quality_score": settings.min_option_quality_score,
+            "min_risk_reward": settings.min_risk_reward,
+            "min_directional_room_pct": settings.min_directional_room_pct,
+        }
+        tracker = FakeArmedEntryTracker()
+        try:
+            object.__setattr__(settings, "enable_option_premium_confirmation", False)
+            object.__setattr__(settings, "enable_banknifty_intelligence", False)
+            object.__setattr__(settings, "enable_kite_websocket", True)
+            object.__setattr__(settings, "min_signal_score", 0)
+            object.__setattr__(settings, "min_market_regime_score", 1)
+            object.__setattr__(settings, "min_price_action_score", 1)
+            object.__setattr__(settings, "min_option_chain_score", 1)
+            object.__setattr__(settings, "min_option_quality_score", 1)
+            object.__setattr__(settings, "min_risk_reward", 0.0)
+            object.__setattr__(settings, "min_directional_room_pct", 0.0)
+            scanner = ScannerService(
+                feed=BankNiftyQualityFeed(
+                    {
+                        "instrument_token": 580001,
+                        "last_price": 1087.1,
+                        "depth": {"buy": [{"price": 1086.0}], "sell": [{"price": 1087.1}]},
+                        "volume": 100000,
+                        "oi": 100000,
+                    }
+                ),
+                rejected_opportunity_repository=RejectedOpportunityRepository(),
+                entry_timing_service=FakeArmedEntryTimingService(),
+                armed_entry_tracker=tracker,
+            )
+
+            result = scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")[0]
+        finally:
+            for key, value in originals.items():
+                object.__setattr__(settings, key, value)
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["entry_timing_state"], "ARMED_FOR_ENTRY")
+        self.assertEqual(result["armed_setup_id"], "armed-test-1", result["factor_scores"].get("armed_entry"))
+        self.assertTrue(result["websocket_tracking_enabled"])
+        self.assertEqual(len(tracker.calls), 1)
+        self.assertEqual(tracker.calls[0]["contract"].instrument_token, 580001)
 
     def test_previous_day_option_candles_fail_premium_confirmation_during_current_session(self) -> None:
         yesterday = datetime.now() - timedelta(days=1, hours=1)

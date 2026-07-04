@@ -43,15 +43,16 @@ class OrderService:
         confirm_live: bool = False,
         opportunity_id: int | None = None,
         order_mode: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        execution_quality_override: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         self._validate_signal(signal)
-        quality = self._execution_quality(signal)
-        if settings.enforce_execution_quality and not quality["passed"]:
-            raise ValueError("execution quality blocked order: " + "; ".join(str(reason) for reason in quality["reasons"]))
-
         transaction_type = "BUY" if signal.side.upper() == "BUY" else "SELL"
         mode = (order_mode or settings.default_order_mode or "paper").lower()
         live_requested = mode == "live" and confirm_live
+        quality = execution_quality_override if execution_quality_override and not live_requested else self._execution_quality(signal)
+        if settings.enforce_execution_quality and not quality["passed"]:
+            raise ValueError("execution quality blocked order: " + "; ".join(str(reason) for reason in quality["reasons"]))
         if not live_requested:
             trade = self.paper_trading_service.execute_trade(
                 symbol=signal.tradingsymbol or signal.symbol,
@@ -59,6 +60,7 @@ class OrderService:
                 quantity=signal.quantity,
                 stop_loss=float(signal.stop_loss or 0.0),
                 action=signal.action,
+                metadata=metadata,
             )
             record = self.trade_repository.create_trade(
                 signal,
@@ -68,6 +70,7 @@ class OrderService:
                 placed_quantity=signal.quantity,
                 order_response=trade,
                 opportunity_id=opportunity_id,
+                notes=self._metadata_note(metadata),
             )
             self._subscribe_active_trade_tokens(signal)
             return {"status": "paper", "trade": trade, "trade_id": record.id, "execution_quality": quality}
@@ -244,6 +247,15 @@ class OrderService:
                 if token:
                     self._banknifty_underlying_token = token
                     return token
+        return None
+
+    def _metadata_note(self, metadata: dict[str, Any] | None) -> str | None:
+        if not metadata:
+            return None
+        source = metadata.get("entry_source")
+        setup_id = metadata.get("armed_setup_id")
+        if source or setup_id:
+            return f"entry_source={source or 'unknown'} armed_setup_id={setup_id or '-'}"
         return None
 
     def _int(self, value: Any) -> int | None:

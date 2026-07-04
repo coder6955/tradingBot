@@ -3,12 +3,13 @@ from __future__ import annotations
 import logging
 import json
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 from threading import RLock
 from typing import Any, Callable
 
 from app.config import settings
 from app.providers.token_store import load_access_token
+from app.services.database import Candle, get_session
 from app.services.time_utils import ist_now_naive
 
 try:
@@ -58,12 +59,16 @@ class KiteWebSocketPriceFeed:
         access_token: str | None = None,
         ticker_factory: Callable[[str, str], Any] | None = None,
         order_update_handler: Callable[[dict[str, Any]], Any] | None = None,
+        tick_handler: Callable[[WebSocketTick], Any] | None = None,
+        gap_handler: Callable[[dict[str, Any]], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.api_key = api_key or settings.kite_api_key
         self.access_token = access_token or load_access_token() or settings.kite_access_token
         self.ticker_factory = ticker_factory
         self.order_update_handler = order_update_handler
+        self.tick_handler = tick_handler
+        self.gap_handler = gap_handler
         self.clock = clock or ist_now_naive
         self._ticker: Any | None = None
         self._ticks: dict[int, WebSocketTick] = {}
@@ -90,8 +95,21 @@ class KiteWebSocketPriceFeed:
         self._tick_modes: dict[int, str] = {}
         self._premium_candles: dict[int, dict[datetime, WebSocketPremiumCandle]] = {}
         self._ticks_seen: dict[int, int] = {}
+        self._rehydrated_tokens: set[int] = set()
+        self._persisted_candle_writes = 0
+        self._rehydrated_candle_count = 0
+        self._last_candle_cleanup_date: date | None = None
+        self._last_candle_cleanup_at: datetime | None = None
+        self._last_candle_cleanup_deleted = 0
+        self._total_candle_cleanup_deleted = 0
+        self._gap_events: list[dict[str, Any]] = []
+        self._active_gap_started_at: datetime | None = None
+        self._gap_backfill_attempt_count = 0
+        self._gap_backfill_success_count = 0
+        self._gap_backfill_failure_count = 0
 
     def start(self) -> dict[str, Any]:
+        self.cleanup_old_persisted_candles()
         if not settings.enable_kite_websocket:
             self.websocket_status = "DISABLED"
             return {"started": False, "reason": "websocket_disabled"}
@@ -154,6 +172,8 @@ class KiteWebSocketPriceFeed:
         clean_tokens = {int(token) for token in tokens if self._safe_int(token) is not None and int(token) > 0}
         with self._lock:
             self._desired_tokens.update(clean_tokens)
+        self.cleanup_old_persisted_candles()
+        self._rehydrate_premium_candles(clean_tokens)
         if not clean_tokens:
             return {"subscribed": [], "reason": "token_missing"}
         if not self.running and settings.enable_kite_websocket:
@@ -248,6 +268,19 @@ class KiteWebSocketPriceFeed:
                     str(token): self._premium_candle_status_locked(token, now)
                     for token in sorted(set(self._premium_candles) | set(self._ticks) | set(active_trade_tokens or set()))
                 },
+                "candle_persistence": {
+                    "enabled": settings.enable_websocket_candle_persistence,
+                    "storage_prefix": settings.websocket_candle_storage_prefix,
+                    "persisted_writes": self._persisted_candle_writes,
+                    "rehydrated_tokens": sorted(self._rehydrated_tokens),
+                    "rehydrated_candle_count": self._rehydrated_candle_count,
+                    "daily_cleanup_enabled": settings.enable_websocket_candle_daily_cleanup,
+                    "last_cleanup_date": self._last_candle_cleanup_date.isoformat() if self._last_candle_cleanup_date else None,
+                    "last_cleanup_at": self._last_candle_cleanup_at.isoformat(sep=" ") if self._last_candle_cleanup_at else None,
+                    "last_cleanup_deleted": self._last_candle_cleanup_deleted,
+                    "total_cleanup_deleted": self._total_candle_cleanup_deleted,
+                },
+                "data_gap": self._gap_status_locked(now),
                 "order_update_count": self.order_update_count,
                 "text_message_count": self.text_message_count,
                 "last_disconnect_at": self.last_disconnect_at.isoformat(sep=" ") if self.last_disconnect_at else None,
@@ -283,16 +316,27 @@ class KiteWebSocketPriceFeed:
             self._subscribe_connected(desired)
 
     def _on_ticks(self, ws: Any, ticks: list[dict[str, Any]]) -> None:
+        parsed_ticks: list[WebSocketTick] = []
+        gap_events: list[dict[str, Any]] = []
         with self._lock:
             for payload in ticks or []:
                 tick = self._parse_tick(payload)
                 if tick:
+                    previous = self._ticks.get(tick.instrument_token)
+                    gap_event = self._detect_gap_locked(tick, previous)
+                    if gap_event:
+                        gap_events.append(gap_event)
                     self._ticks[tick.instrument_token] = tick
                     self._ticks_seen[tick.instrument_token] = self._ticks_seen.get(tick.instrument_token, 0) + 1
                     self._update_premium_candle(tick)
                     self.last_tick_at = self._now()
+                    parsed_ticks.append(tick)
                 else:
                     self.ignored_tick_count += 1
+        for event in gap_events:
+            self._dispatch_gap(event)
+        for tick in parsed_ticks:
+            self._dispatch_tick(tick)
 
     def _on_close(self, ws: Any, code: int | None, reason: str | None) -> None:
         self.connected = False
@@ -307,6 +351,7 @@ class KiteWebSocketPriceFeed:
             return
         self.websocket_status = "DISCONNECTED"
         self.last_error = reason or f"closed:{code}"
+        self._start_global_gap("websocket_disconnected")
         logger.warning("Kite WebSocket disconnected: code=%s reason=%s", code, reason)
         if settings.websocket_reconnect_enabled:
             reconnect = getattr(ws, "reconnect", None)
@@ -335,6 +380,7 @@ class KiteWebSocketPriceFeed:
         self.last_reconnect_at = self._now()
         self.reconnect_skipped_reason = None
         self.websocket_status = "RECONNECTING"
+        self._finish_global_gap("websocket_reconnect")
         logger.info("Kite WebSocket reconnect attempt: %s", attempts_count)
         with self._lock:
             desired = set(self._desired_tokens)
@@ -378,6 +424,22 @@ class KiteWebSocketPriceFeed:
             self.order_update_handler(dict(payload))
         except Exception:
             logger.exception("Kite WebSocket order update handler failed")
+
+    def _dispatch_tick(self, tick: WebSocketTick) -> None:
+        if self.tick_handler is None:
+            return
+        try:
+            self.tick_handler(tick)
+        except Exception:
+            logger.exception("Kite WebSocket tick handler failed")
+
+    def _dispatch_gap(self, event: dict[str, Any]) -> None:
+        if self.gap_handler is None:
+            return
+        try:
+            self.gap_handler(dict(event))
+        except Exception:
+            logger.exception("Kite WebSocket gap handler failed")
 
     def _parse_text_message(self, payload: Any) -> dict[str, Any] | None:
         if isinstance(payload, bytes):
@@ -502,7 +564,287 @@ class KiteWebSocketPriceFeed:
             candle.close_price = tick.price
             candle.volume = max(float(candle.volume or 0.0), float(tick.volume or 0.0))
             candle.tick_count += 1
+        self._persist_premium_candle(candle)
         self._trim_premium_candles(token)
+
+    def _storage_symbol(self, token: int) -> str:
+        return f"{settings.websocket_candle_storage_prefix}:{int(token)}".upper()
+
+    def _persist_premium_candle(self, candle: WebSocketPremiumCandle) -> None:
+        if not settings.enable_websocket_candle_persistence:
+            return
+        session = get_session()
+        try:
+            symbol = self._storage_symbol(candle.instrument_token)
+            row = (
+                session.query(Candle)
+                .filter(Candle.symbol == symbol)
+                .filter(Candle.timeframe == candle.timeframe)
+                .filter(Candle.timestamp == candle.timestamp.replace(tzinfo=None))
+                .first()
+            )
+            if row is None:
+                row = Candle(
+                    symbol=symbol,
+                    timeframe=candle.timeframe,
+                    timestamp=candle.timestamp.replace(tzinfo=None),
+                    open_price=float(candle.open_price),
+                    high_price=float(candle.high_price),
+                    low_price=float(candle.low_price),
+                    close_price=float(candle.close_price),
+                    volume=float(candle.volume or 0.0),
+                )
+                session.add(row)
+            else:
+                row.open_price = float(candle.open_price)
+                row.high_price = float(candle.high_price)
+                row.low_price = float(candle.low_price)
+                row.close_price = float(candle.close_price)
+                row.volume = float(candle.volume or 0.0)
+            session.commit()
+            self._persisted_candle_writes += 1
+        except Exception as exc:
+            logger.warning("WebSocket premium candle persistence failed token=%s error=%s", candle.instrument_token, exc)
+        finally:
+            session.close()
+
+    def cleanup_old_persisted_candles(self, *, force: bool = False) -> dict[str, Any]:
+        now = self._now()
+        cleanup_day = now.date()
+        if not settings.enable_websocket_candle_persistence:
+            return {"cleanup_enabled": False, "deleted": 0, "reason": "websocket_candle_persistence_disabled"}
+        if not settings.enable_websocket_candle_daily_cleanup:
+            return {"cleanup_enabled": False, "deleted": 0, "reason": "websocket_candle_daily_cleanup_disabled"}
+        prefix = str(settings.websocket_candle_storage_prefix or "").strip().upper()
+        if not prefix:
+            return {"cleanup_enabled": False, "deleted": 0, "reason": "websocket_candle_storage_prefix_missing"}
+        with self._lock:
+            if not force and self._last_candle_cleanup_date == cleanup_day:
+                return {
+                    "cleanup_enabled": True,
+                    "deleted": 0,
+                    "skipped": True,
+                    "reason": "already_cleaned_today",
+                    "cleanup_date": cleanup_day.isoformat(),
+                }
+        storage_prefix = f"{prefix}:"
+        escaped_prefix = (
+            storage_prefix
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        cutoff = datetime.combine(cleanup_day, time.min)
+        session = get_session()
+        deleted = 0
+        try:
+            deleted = (
+                session.query(Candle)
+                .filter(Candle.symbol.like(f"{escaped_prefix}%", escape="\\"))
+                .filter(Candle.timeframe == settings.websocket_premium_candle_timeframe)
+                .filter(Candle.timestamp < cutoff)
+                .delete(synchronize_session=False)
+            )
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            logger.warning("WebSocket old candle cleanup failed error=%s", exc)
+            return {"cleanup_enabled": True, "deleted": 0, "reason": "cleanup_failed", "message": str(exc)}
+        finally:
+            session.close()
+        with self._lock:
+            for bucket in self._premium_candles.values():
+                for timestamp in list(bucket.keys()):
+                    if timestamp.replace(tzinfo=None).date() < cleanup_day:
+                        bucket.pop(timestamp, None)
+            self._last_candle_cleanup_date = cleanup_day
+            self._last_candle_cleanup_at = now
+            self._last_candle_cleanup_deleted = int(deleted or 0)
+            self._total_candle_cleanup_deleted += int(deleted or 0)
+        logger.info(
+            "WebSocket old candle cleanup completed date=%s deleted=%s prefix=%s timeframe=%s",
+            cleanup_day.isoformat(),
+            int(deleted or 0),
+            storage_prefix,
+            settings.websocket_premium_candle_timeframe,
+        )
+        return {
+            "cleanup_enabled": True,
+            "deleted": int(deleted or 0),
+            "cleanup_date": cleanup_day.isoformat(),
+            "cutoff": cutoff.isoformat(sep=" "),
+            "storage_prefix": storage_prefix,
+            "timeframe": settings.websocket_premium_candle_timeframe,
+        }
+
+    def _rehydrate_premium_candles(self, tokens: set[int]) -> None:
+        if not settings.enable_websocket_candle_persistence or not settings.enable_websocket_premium_candle_builder:
+            return
+        pending = {int(token) for token in tokens if int(token) not in self._rehydrated_tokens}
+        if not pending:
+            return
+        session = get_session()
+        try:
+            since = self._now().replace(second=0, microsecond=0) - timedelta(minutes=max(5, settings.websocket_premium_candle_retention_minutes))
+            for token in pending:
+                rows = (
+                    session.query(Candle)
+                    .filter(Candle.symbol == self._storage_symbol(token))
+                    .filter(Candle.timeframe == settings.websocket_premium_candle_timeframe)
+                    .filter(Candle.timestamp >= since)
+                    .order_by(Candle.timestamp.asc())
+                    .all()
+                )
+                bucket = self._premium_candles.setdefault(token, {})
+                for row in rows:
+                    timestamp = row.timestamp.replace(tzinfo=None)
+                    if timestamp not in bucket:
+                        bucket[timestamp] = WebSocketPremiumCandle(
+                            instrument_token=token,
+                            timeframe=row.timeframe,
+                            timestamp=timestamp,
+                            open_price=float(row.open_price),
+                            high_price=float(row.high_price),
+                            low_price=float(row.low_price),
+                            close_price=float(row.close_price),
+                            volume=float(row.volume or 0.0),
+                            tick_count=0,
+                            source="websocket_builder_rehydrated",
+                        )
+                        self._rehydrated_candle_count += 1
+                self._trim_premium_candles(token)
+                self._rehydrated_tokens.add(token)
+        except Exception as exc:
+            logger.warning("WebSocket premium candle rehydrate failed tokens=%s error=%s", sorted(pending), exc)
+        finally:
+            session.close()
+
+    def _detect_gap_locked(self, tick: WebSocketTick, previous: WebSocketTick | None) -> dict[str, Any] | None:
+        if not settings.enable_market_data_gap_detection or self.market_session() != "REGULAR_MARKET":
+            return None
+        max_gap = max(settings.websocket_price_stale_seconds + 1, settings.max_websocket_gap_seconds)
+        if previous is None:
+            return None
+        previous_time = (previous.receive_timestamp or previous.timestamp).replace(tzinfo=None)
+        current_time = (tick.receive_timestamp or tick.timestamp).replace(tzinfo=None)
+        gap_seconds = max(0.0, (current_time - previous_time).total_seconds())
+        if gap_seconds <= max_gap:
+            return None
+        event = {
+            "type": "tick_gap",
+            "instrument_token": int(tick.instrument_token),
+            "gap_start": previous_time.isoformat(sep=" "),
+            "gap_end": current_time.isoformat(sep=" "),
+            "gap_duration_seconds": round(gap_seconds, 3),
+            "reason": "tick_gap_detected",
+            "backfill_status": self._backfill_gap(int(tick.instrument_token), previous_time, current_time),
+        }
+        self._record_gap_locked(event)
+        return event
+
+    def _start_global_gap(self, reason: str) -> None:
+        if not settings.enable_market_data_gap_detection or self.market_session() != "REGULAR_MARKET":
+            return
+        with self._lock:
+            self._active_gap_started_at = self._active_gap_started_at or self._now()
+            event = {
+                "type": "websocket_gap_started",
+                "instrument_token": None,
+                "gap_start": self._active_gap_started_at.isoformat(sep=" "),
+                "gap_end": None,
+                "gap_duration_seconds": None,
+                "reason": reason,
+                "backfill_status": "pending",
+            }
+            self._record_gap_locked(event)
+        self._dispatch_gap(event)
+
+    def _finish_global_gap(self, reason: str) -> None:
+        if not settings.enable_market_data_gap_detection:
+            return
+        with self._lock:
+            if self._active_gap_started_at is None:
+                return
+            end = self._now()
+            gap_seconds = max(0.0, (end - self._active_gap_started_at).total_seconds())
+            event = {
+                "type": "websocket_gap_finished",
+                "instrument_token": None,
+                "gap_start": self._active_gap_started_at.isoformat(sep=" "),
+                "gap_end": end.isoformat(sep=" "),
+                "gap_duration_seconds": round(gap_seconds, 3),
+                "reason": reason,
+                "backfill_status": "not_applicable_global_gap",
+            }
+            self._active_gap_started_at = None
+            self._record_gap_locked(event)
+        self._dispatch_gap(event)
+
+    def _record_gap_locked(self, event: dict[str, Any]) -> None:
+        self._gap_events.append(dict(event))
+        self._gap_events = self._gap_events[-50:]
+
+    def _backfill_gap(self, token: int, start: datetime, end: datetime) -> str:
+        if not settings.enable_websocket_gap_backfill:
+            return "disabled"
+        self._gap_backfill_attempt_count += 1
+        try:
+            from app.providers.kite_provider import KiteProvider
+
+            provider = KiteProvider()
+            fetched = provider.historical_data(int(token), start, end, settings.websocket_premium_candle_timeframe)
+            inserted = 0
+            for item in fetched or []:
+                timestamp = self._safe_datetime(item.get("date") or item.get("timestamp"))
+                close = self._safe_float(item.get("close"))
+                if timestamp is None or close is None or close <= 0:
+                    continue
+                candle = WebSocketPremiumCandle(
+                    instrument_token=int(token),
+                    timeframe=settings.websocket_premium_candle_timeframe,
+                    timestamp=timestamp.replace(second=0, microsecond=0, tzinfo=None),
+                    open_price=float(item.get("open") or close),
+                    high_price=float(item.get("high") or close),
+                    low_price=float(item.get("low") or close),
+                    close_price=close,
+                    volume=float(item.get("volume") or 0.0),
+                    tick_count=0,
+                    source="kite_historical_backfill",
+                )
+                self._premium_candles.setdefault(int(token), {})[candle.timestamp] = candle
+                self._persist_premium_candle(candle)
+                inserted += 1
+            if inserted:
+                self._gap_backfill_success_count += 1
+                return "success"
+            self._gap_backfill_failure_count += 1
+            return "partial_or_empty"
+        except Exception as exc:
+            self._gap_backfill_failure_count += 1
+            logger.warning("WebSocket gap backfill failed token=%s error=%s", token, exc)
+            return "failed"
+
+    def _gap_status_locked(self, now: datetime) -> dict[str, Any]:
+        active_seconds = (
+            round(max(0.0, (now - self._active_gap_started_at).total_seconds()), 3)
+            if self._active_gap_started_at is not None
+            else None
+        )
+        return {
+            "enabled": settings.enable_market_data_gap_detection,
+            "data_gap_detected": bool(self._gap_events),
+            "active_gap": self._active_gap_started_at is not None,
+            "active_gap_started_at": self._active_gap_started_at.isoformat(sep=" ") if self._active_gap_started_at else None,
+            "active_gap_duration_seconds": active_seconds,
+            "max_gap_seconds": settings.max_websocket_gap_seconds,
+            "gap_count": len(self._gap_events),
+            "latest_gap": self._gap_events[-1] if self._gap_events else None,
+            "recent_gaps": list(self._gap_events[-10:]),
+            "backfill_enabled": settings.enable_websocket_gap_backfill,
+            "backfill_attempt_count": self._gap_backfill_attempt_count,
+            "backfill_success_count": self._gap_backfill_success_count,
+            "backfill_failure_count": self._gap_backfill_failure_count,
+        }
 
     def _trim_premium_candles(self, token: int) -> None:
         retention = max(5, settings.websocket_premium_candle_retention_minutes)

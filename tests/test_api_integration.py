@@ -19,7 +19,7 @@ from app.services.trade_repository import TradeRepository
 class FakeScanner:
     feed = None
 
-    def scan_with_diagnostics(self, symbols=None, side="BUY", order_mode="paper"):
+    def scan_with_diagnostics(self, symbols=None, side="BUY", order_mode="paper", rejection_source="scanner"):
         return [
             {
                 "symbol": "BANKNIFTY",
@@ -167,6 +167,25 @@ class ApiIntegrationTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["count"], 1)
         self.assertIn("websocket", payload)
+
+    def test_scanner_armed_entries_endpoint(self) -> None:
+        response = self.client.get("/scanner/armed-entries")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("active", payload)
+        self.assertIn("entered_paper", payload)
+        self.assertIn("too_late", payload)
+
+    def test_websocket_status_exposes_armed_entry_metrics(self) -> None:
+        response = self.client.get("/kite/websocket/status")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("armed_entry_count", payload)
+        self.assertIn("armed_entry_tokens", payload)
+        self.assertIn("event_entry_enabled", payload)
 
     def test_paper_order_placement_endpoint(self) -> None:
         payload = {
@@ -317,9 +336,11 @@ class ApiIntegrationTests(unittest.TestCase):
     def test_stale_live_websocket_blocks_active_price_use(self) -> None:
         original_enabled = api.settings.enable_kite_websocket
         original_blocks = api.settings.websocket_live_stale_blocks
+        original_gap_fallback = api.settings.websocket_live_gap_polling_fallback
         try:
             object.__setattr__(api.settings, "enable_kite_websocket", True)
             object.__setattr__(api.settings, "websocket_live_stale_blocks", True)
+            object.__setattr__(api.settings, "websocket_live_gap_polling_fallback", False)
             ws = KiteWebSocketPriceFeed(api_key="k", access_token="t")
             active = ActiveTradePriceFeed(ws)
 
@@ -333,6 +354,7 @@ class ApiIntegrationTests(unittest.TestCase):
         finally:
             object.__setattr__(api.settings, "enable_kite_websocket", original_enabled)
             object.__setattr__(api.settings, "websocket_live_stale_blocks", original_blocks)
+            object.__setattr__(api.settings, "websocket_live_gap_polling_fallback", original_gap_fallback)
 
         self.assertIsNone(tick)
         self.assertIn(active.last_reason, {"websocket_disabled", "websocket_disconnected"})

@@ -180,6 +180,14 @@ class Settings:
     enable_websocket_premium_candle_builder: bool = os.getenv("ENABLE_WEBSOCKET_PREMIUM_CANDLE_BUILDER", "true").lower() == "true"
     websocket_premium_candle_timeframe: str = os.getenv("WEBSOCKET_PREMIUM_CANDLE_TIMEFRAME", "1minute")
     websocket_premium_candle_retention_minutes: int = int(os.getenv("WEBSOCKET_PREMIUM_CANDLE_RETENTION_MINUTES", "60"))
+    enable_websocket_candle_persistence: bool = os.getenv("ENABLE_WEBSOCKET_CANDLE_PERSISTENCE", "true").lower() == "true"
+    websocket_candle_storage_prefix: str = os.getenv("WEBSOCKET_CANDLE_STORAGE_PREFIX", "WS_TOKEN")
+    enable_websocket_candle_daily_cleanup: bool = os.getenv("ENABLE_WEBSOCKET_CANDLE_DAILY_CLEANUP", "true").lower() == "true"
+    enable_market_data_gap_detection: bool = os.getenv("ENABLE_MARKET_DATA_GAP_DETECTION", "true").lower() == "true"
+    max_websocket_gap_seconds: int = int(os.getenv("MAX_WEBSOCKET_GAP_SECONDS", "10"))
+    enable_websocket_gap_backfill: bool = os.getenv("ENABLE_WEBSOCKET_GAP_BACKFILL", "false").lower() == "true"
+    websocket_live_gap_polling_fallback: bool = os.getenv("WEBSOCKET_LIVE_GAP_POLLING_FALLBACK", "true").lower() == "true"
+    cancel_armed_entries_on_data_gap: bool = os.getenv("CANCEL_ARMED_ENTRIES_ON_DATA_GAP", "true").lower() == "true"
     enable_banknifty_option_prewarm: bool = os.getenv("ENABLE_BANKNIFTY_OPTION_PREWARM", "true").lower() == "true"
     banknifty_prewarm_strike_depth: int = int(os.getenv("BANKNIFTY_PREWARM_STRIKE_DEPTH", "1"))
     banknifty_prewarm_refresh_seconds: int = int(os.getenv("BANKNIFTY_PREWARM_REFRESH_SECONDS", "60"))
@@ -194,6 +202,9 @@ class Settings:
     entry_trigger_lookback_candles: int = int(os.getenv("ENTRY_TRIGGER_LOOKBACK_CANDLES", "3"))
     min_entry_expected_move_coverage: float = float(os.getenv("MIN_ENTRY_EXPECTED_MOVE_COVERAGE", "0.90"))
     min_entry_room_to_level_pct: float = float(os.getenv("MIN_ENTRY_ROOM_TO_LEVEL_PCT", "0.25"))
+    enable_event_driven_paper_entry: bool = os.getenv("ENABLE_EVENT_DRIVEN_PAPER_ENTRY", "true").lower() == "true"
+    enable_event_driven_live_entry: bool = os.getenv("ENABLE_EVENT_DRIVEN_LIVE_ENTRY", "false").lower() == "true"
+    armed_entry_valid_seconds: int = int(os.getenv("ARMED_ENTRY_VALID_SECONDS", "60"))
     live_exit_max_retry_count: int = int(os.getenv("LIVE_EXIT_MAX_RETRY_COUNT", "2"))
     live_reconciliation_blocks_automation: bool = os.getenv("LIVE_RECONCILIATION_BLOCKS_AUTOMATION", "true").lower() == "true"
     enable_underlying_invalidation_exit: bool = os.getenv("ENABLE_UNDERLYING_INVALIDATION_EXIT", "true").lower() == "true"

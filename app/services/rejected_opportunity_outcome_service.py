@@ -29,11 +29,12 @@ class RejectedOpportunityOutcomeService:
         self.market_data_coordinator = market_data_coordinator
         self.last_result: dict[str, Any] | None = None
 
-    def evaluate_once(self, *, symbol: str | None = "BANKNIFTY", limit: int = 100) -> dict[str, Any]:
+    def evaluate_once(self, *, symbol: str | None = "BANKNIFTY", limit: int = 100, learning_only: bool = True) -> dict[str, Any]:
         provider = self.kite_provider_factory()
-        rows = self.repository.list_pending_later_outcomes(symbol=symbol, limit=limit)
+        rows = self.repository.list_pending_later_outcomes(symbol=symbol, limit=limit, learning_only=learning_only)
         results = [self._evaluate_record(provider, row) for row in rows]
         self.last_result = {
+            "learning_only": learning_only,
             "evaluated": len(results),
             "updated": len([item for item in results if item.get("updated")]),
             "results": results,

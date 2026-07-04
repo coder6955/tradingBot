@@ -26,6 +26,7 @@ from app.services.greeks_service import GreeksService
 from app.services.notification_service import NotificationService
 from app.services.execution_analytics_service import ExecutionAnalyticsService
 from app.services.active_price_feed import ActiveTradePriceFeed
+from app.services.armed_entry_tracker_service import ArmedEntryTrackerService
 from app.services.banknifty_option_prewarm_service import BankNiftyOptionPrewarmService
 from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed
 from app.services.market_data_coordinator import MarketDataCoordinator
@@ -123,6 +124,7 @@ professional_readiness_service = ProfessionalReadinessService(
     execution_analytics_service=execution_analytics_service,
     option_history_repository=option_history_repository,
 )
+armed_entry_tracker_service: ArmedEntryTrackerService | None = None
 
 
 def get_kite_provider() -> KiteProvider:
@@ -159,6 +161,7 @@ def get_scanner_service() -> ScannerService:
         option_premium_confirmation_service=OptionPremiumConfirmationService(kite_websocket_price_feed),
         rejected_opportunity_repository=rejected_opportunity_repository,
         banknifty_option_prewarm_service=banknifty_option_prewarm_service,
+        armed_entry_tracker=armed_entry_tracker_service,
     )
 
 
@@ -172,6 +175,17 @@ def get_order_service() -> OrderService:
         live_safety_checker=broker_sync_service.live_block_status,
         market_data_coordinator=market_data_coordinator,
     )
+
+
+armed_entry_tracker_service = ArmedEntryTrackerService(
+    order_service_factory=get_order_service,
+    websocket_price_feed=kite_websocket_price_feed,
+    rejected_opportunity_repository=rejected_opportunity_repository,
+    risk_management_service=risk_management_service,
+    market_session_provider=kite_websocket_price_feed.market_session,
+)
+kite_websocket_price_feed.tick_handler = armed_entry_tracker_service.on_tick
+kite_websocket_price_feed.gap_handler = armed_entry_tracker_service.cancel_for_data_gap
 
 
 auto_trader_service = AutoTraderService(
@@ -217,6 +231,10 @@ automation_supervisor_service = AutomationSupervisorService(
 async def startup_automation() -> None:
     try:
         strategy_version_registry.ensure_current_version()
+    except Exception:
+        pass
+    try:
+        kite_websocket_price_feed.cleanup_old_persisted_candles()
     except Exception:
         pass
     if settings.enable_kite_websocket:
@@ -1876,6 +1894,7 @@ def get_signals(side: str = "BUY", limit: int = 10) -> list[dict[str, object]]:
     scanner_service = get_scanner_service()
     recommendations = scanner_service.scan_symbols(
         side=side.upper(),
+        rejection_source="manual_scan",
     )
     for signal in recommendations:
         signal_repository.save_signal(
@@ -1898,7 +1917,12 @@ def get_signals(side: str = "BUY", limit: int = 10) -> list[dict[str, object]]:
 def get_opportunities(side: str = "BUY", symbols: str | None = None, limit: int = 10, order_mode: str = "paper") -> dict[str, object]:
     scanner_service = get_scanner_service()
     symbol_list = [item.strip().upper() for item in symbols.split(",")] if symbols else None
-    recommendations = scanner_service.scan_symbols(symbols=symbol_list, side=side.upper(), order_mode=order_mode.lower())
+    recommendations = scanner_service.scan_symbols(
+        symbols=symbol_list,
+        side=side.upper(),
+        order_mode=order_mode.lower(),
+        rejection_source="manual_scan",
+    )
     saved_ids = [opportunity_repository.save_opportunity(signal).id for signal in recommendations[:limit]]
     return {
         "mode": order_mode.lower(),
@@ -1921,7 +1945,12 @@ def get_opportunities(side: str = "BUY", symbols: str | None = None, limit: int 
 def get_scanner_diagnostics(side: str = "BUY", symbols: str | None = None, limit: int = 25, order_mode: str = "paper") -> dict[str, object]:
     scanner_service = get_scanner_service()
     symbol_list = [item.strip().upper() for item in symbols.split(",")] if symbols else None
-    diagnostics = scanner_service.scan_with_diagnostics(symbols=symbol_list, side=side.upper(), order_mode=order_mode.lower())
+    diagnostics = scanner_service.scan_with_diagnostics(
+        symbols=symbol_list,
+        side=side.upper(),
+        order_mode=order_mode.lower(),
+        rejection_source="manual_diagnostic",
+    )
     rows: list[dict[str, object]] = []
     for item in diagnostics[:limit]:
         row = dict(item)
@@ -1938,6 +1967,18 @@ def get_scanner_diagnostics(side: str = "BUY", symbols: str | None = None, limit
         "count": len(rows),
         "diagnostics": rows,
     }
+
+
+@app.get(
+    "/scanner/armed-entries",
+    tags=["03 Scanner"],
+    summary="Inspect event-driven armed paper entries",
+    description="Shows Bank Nifty option setups waiting for WebSocket trigger, plus entered/expired/too-late states.",
+)
+def get_scanner_armed_entries() -> dict[str, object]:
+    if armed_entry_tracker_service is None:
+        return {"status": "unavailable", "reason": "armed_entry_tracker_unavailable"}
+    return armed_entry_tracker_service.list_entries()
 
 
 @app.post(
@@ -2263,8 +2304,12 @@ def get_opportunity_failure_analysis() -> dict[str, object]:
     summary="Analyze rejected scanner setups",
     description="Shows hard-gate rejection reasons and any later manually/evaluated outcome for rejected setups.",
 )
-def get_rejected_opportunities(symbol: str | None = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
-    return rejected_opportunity_repository.analyze(symbol=symbol, limit=limit)
+def get_rejected_opportunities(
+    symbol: str | None = "BANKNIFTY",
+    limit: int = 1000,
+    learning_eligible: bool | None = None,
+) -> dict[str, object]:
+    return rejected_opportunity_repository.analyze(symbol=symbol, limit=limit, learning_eligible=learning_eligible)
 
 
 @app.post(
@@ -2317,7 +2362,11 @@ def evaluate_rejected_opportunities(
     payload = payload or {}
     symbol_value = payload.get("symbol", "BANKNIFTY")
     symbol = str(symbol_value) if symbol_value is not None else None
-    return rejected_opportunity_outcome_service.evaluate_once(symbol=symbol, limit=int(payload.get("limit") or 100))
+    return rejected_opportunity_outcome_service.evaluate_once(
+        symbol=symbol,
+        limit=int(payload.get("limit") or 100),
+        learning_only=bool(payload.get("learning_only", True)),
+    )
 
 
 @app.post(
@@ -2468,6 +2517,9 @@ def kite_health() -> dict[str, object]:
 def kite_websocket_status() -> dict[str, object]:
     status = active_trade_price_feed.status()
     status["banknifty_option_prewarm"] = banknifty_option_prewarm_service.status()
+    if armed_entry_tracker_service is not None:
+        status.update(armed_entry_tracker_service.status())
+        status["armed_entry"] = armed_entry_tracker_service.list_entries()
     return status
 
 

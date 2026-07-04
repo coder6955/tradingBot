@@ -6,6 +6,7 @@ from typing import List
 from app.models import Signal
 from app.config import settings
 from app.services.indicator_scoring_service import IndicatorScoringService
+from app.services.armed_entry_tracker_service import ArmedEntryTrackerService
 from app.services.banknifty_intelligence_service import BankNiftyIntelligenceService
 from app.services.banknifty_option_prewarm_service import BankNiftyOptionPrewarmService
 from app.services.day_type_service import DayTypeService
@@ -60,6 +61,7 @@ class ScannerService:
         banknifty_option_prewarm_service: BankNiftyOptionPrewarmService | None = None,
         entry_timing_service: EntryTimingService | None = None,
         volatility_edge_service: VolatilityEdgeService | None = None,
+        armed_entry_tracker: ArmedEntryTrackerService | None = None,
     ) -> None:
         self.signal_service = signal_service or SignalService()
         self.scoring_service = scoring_service or IndicatorScoringService()
@@ -80,6 +82,7 @@ class ScannerService:
         self.banknifty_option_prewarm_service = banknifty_option_prewarm_service
         self.entry_timing_service = entry_timing_service or EntryTimingService()
         self.volatility_edge_service = volatility_edge_service or VolatilityEdgeService()
+        self.armed_entry_tracker = armed_entry_tracker
 
         # Market data is independent from live order placement. When Kite data is
         # requested, fail closed instead of silently returning mock opportunities.
@@ -101,10 +104,20 @@ class ScannerService:
         market_contexts: dict[str, str] | None = None,
         side: str = "BUY",
         order_mode: str = "paper",
+        rejection_source: str = "scanner",
     ) -> List[Signal]:
         return [
             item["signal"]
-            for item in self.scan_with_diagnostics(symbols, scores, confidences, trends, market_contexts, side, order_mode=order_mode)
+            for item in self.scan_with_diagnostics(
+                symbols,
+                scores,
+                confidences,
+                trends,
+                market_contexts,
+                side,
+                order_mode=order_mode,
+                rejection_source=rejection_source,
+            )
             if item.get("signal")
         ]
 
@@ -117,6 +130,7 @@ class ScannerService:
         market_contexts: dict[str, str] | None = None,
         side: str = "BUY",
         order_mode: str = "paper",
+        rejection_source: str = "scanner",
     ) -> List[dict[str, object]]:
         diagnostics: List[dict[str, object]] = []
         scores = scores or {}
@@ -142,7 +156,16 @@ class ScannerService:
                     side=side,
                     trend="unknown",
                 )
-                self._save_rejection(symbol=symbol, side=side, trend="unknown", score=0, reasons=reasons, breakdown=self._empty_score_breakdown(), snapshot=snapshot)
+                self._save_rejection(
+                    symbol=symbol,
+                    side=side,
+                    trend="unknown",
+                    score=0,
+                    reasons=reasons,
+                    breakdown=self._empty_score_breakdown(),
+                    snapshot=snapshot,
+                    rejection_source=rejection_source,
+                )
                 diagnostics.append(
                     self._diagnostic(
                         symbol,
@@ -180,7 +203,16 @@ class ScannerService:
                 else:
                     reasons.append("no matching option contract found")
                 self._log_decision(symbol=symbol, accepted=False, score=score, reasons=reasons, breakdown=self._empty_score_breakdown(), snapshot=snapshot, side=side, trend=trend)
-                self._save_rejection(symbol=symbol, side=side, trend=trend, score=score, reasons=reasons, breakdown=self._empty_score_breakdown(), snapshot=snapshot)
+                self._save_rejection(
+                    symbol=symbol,
+                    side=side,
+                    trend=trend,
+                    score=score,
+                    reasons=reasons,
+                    breakdown=self._empty_score_breakdown(),
+                    snapshot=snapshot,
+                    rejection_source=rejection_source,
+                )
                 diagnostics.append(self._diagnostic(symbol, snapshot, score, trend, market_context, side, None, reasons))
                 continue
 
@@ -246,6 +278,7 @@ class ScannerService:
                     snapshot=snapshot,
                     contract=contract,
                     factor_scores=factor_scores,
+                    rejection_source=rejection_source,
                 )
                 diagnostics.append(self._diagnostic(symbol, snapshot, score, trend, market_context, side, None, risk_failures, factor_scores))
                 continue
@@ -358,7 +391,15 @@ class ScannerService:
             )
             factor_scores["outcome_learning"] = outcome_learning_eval
             factor_scores = self._with_strategy_metadata(factor_scores, order_mode)
-            risk_failures = self._gate_failures(
+            confidence = confidences.get(symbol, combined_score / 100.0)
+            probability = min(0.92, (combined_score / 100.0) * 0.72 + (liquidity_score / 100.0) * 0.12 + (int(chain_eval["score"]) / 100.0) * 0.08)
+            quantity = self.trade_setup_service.position_size(
+                entry_price=prices["entry_price"],
+                stop_loss=prices["stop_loss"],
+                lot_size=contract.lot_size,
+                side=side,
+            )
+            gate_failures = self._gate_failures(
                 combined_score=combined_score,
                 contract=contract,
                 prices=prices,
@@ -376,9 +417,28 @@ class ScannerService:
                 volatility_eval=volatility_eval,
                 enforce_budget=enforce_budget,
             )
-            risk_failures.extend(self._entry_timing_failures(entry_timing_eval))
             if not freshness_eval.get("passed", False):
-                risk_failures = list(freshness_eval.get("reasons", [])) + risk_failures
+                gate_failures = list(freshness_eval.get("reasons", [])) + gate_failures
+            armed_entry_eval = self._maybe_register_armed_entry(
+                symbol=symbol,
+                side=side,
+                trend=trend,
+                contract=contract,
+                prices=prices,
+                entry_timing_eval=entry_timing_eval,
+                score=combined_score,
+                probability=probability,
+                confidence=confidence,
+                quantity=quantity,
+                factor_scores=factor_scores,
+                order_mode=order_mode,
+                gate_failures=gate_failures,
+            )
+            if armed_entry_eval:
+                factor_scores = dict(factor_scores)
+                factor_scores["armed_entry"] = armed_entry_eval
+            risk_failures = list(gate_failures)
+            risk_failures.extend(self._entry_timing_failures(entry_timing_eval))
             if risk_failures:
                 self._log_decision(
                     symbol=symbol,
@@ -402,6 +462,7 @@ class ScannerService:
                     snapshot=snapshot,
                     contract=contract,
                     factor_scores=factor_scores,
+                    rejection_source=rejection_source,
                 )
                 diagnostics.append(
                     self._diagnostic(
@@ -418,14 +479,6 @@ class ScannerService:
                 )
                 continue
 
-            confidence = confidences.get(symbol, combined_score / 100.0)
-            probability = min(0.92, (combined_score / 100.0) * 0.72 + (liquidity_score / 100.0) * 0.12 + (int(chain_eval["score"]) / 100.0) * 0.08)
-            quantity = self.trade_setup_service.position_size(
-                entry_price=prices["entry_price"],
-                stop_loss=prices["stop_loss"],
-                lot_size=contract.lot_size,
-                side=side,
-            )
             if combined_score >= settings.min_signal_score:
                 signal = self.signal_service.generate_signal(
                     symbol=symbol,
@@ -496,6 +549,7 @@ class ScannerService:
                     snapshot=snapshot,
                     contract=contract,
                     factor_scores=factor_scores,
+                    rejection_source=rejection_source,
                 )
                 diagnostics.append(
                     self._diagnostic(
@@ -852,6 +906,52 @@ class ScannerService:
             return reasons or ["entry_timing_no_trade"]
         return []
 
+    def _maybe_register_armed_entry(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        trend: str,
+        contract: OptionContract,
+        prices: dict[str, float],
+        entry_timing_eval: dict[str, object],
+        score: int,
+        probability: float,
+        confidence: float,
+        quantity: int,
+        factor_scores: dict[str, object],
+        order_mode: str,
+        gate_failures: list[str],
+    ) -> dict[str, object] | None:
+        state = str(entry_timing_eval.get("entry_timing_state") or entry_timing_eval.get("state") or "")
+        if state != EntryTimingService.ARMED_FOR_ENTRY:
+            return None
+        if self.armed_entry_tracker is None:
+            return {"registered": False, "reason": "armed_entry_tracker_unavailable"}
+        if gate_failures:
+            return {"registered": False, "reason": "hard_gate_failed_before_arming", "gate_failures": list(gate_failures)}
+        if score < settings.min_signal_score:
+            return {"registered": False, "reason": "final weighted score is below threshold"}
+        if not contract.instrument_token:
+            return {"registered": False, "reason": "selected_option_token_missing"}
+        if not settings.enable_kite_websocket:
+            return {"registered": False, "reason": "websocket_disabled_for_event_entry"}
+        return self.armed_entry_tracker.register_from_scan(
+            symbol=symbol,
+            action=self._action(side, trend),
+            side=side,
+            contract=contract,
+            prices=prices,
+            entry_timing=entry_timing_eval,
+            score=score,
+            probability=probability,
+            confidence=confidence,
+            quantity=quantity,
+            factor_scores=dict(factor_scores),
+            order_mode=order_mode,
+            reasons=[str(reason) for reason in entry_timing_eval.get("reasons", [])],
+        )
+
     def _log_decision(
         self,
         *,
@@ -930,6 +1030,7 @@ class ScannerService:
         snapshot: dict[str, object] | None = None,
         contract: OptionContract | None = None,
         factor_scores: dict[str, object] | None = None,
+        rejection_source: str = "scanner",
     ) -> None:
         try:
             action = self._action(side, trend) if str(trend).lower() in {"bullish", "bearish"} else None
@@ -944,6 +1045,7 @@ class ScannerService:
                 contract=contract,
                 factor_scores=factor_scores,
                 score_breakdown=breakdown,
+                rejection_source=rejection_source,
             )
         except Exception as exc:
             logger.warning("failed_to_save_rejected_opportunity symbol=%s error=%s", symbol, exc)
@@ -999,6 +1101,15 @@ class ScannerService:
                 "volatility_edge": settings.enable_volatility_edge,
                 "volatility_edge_hard_gate": settings.enable_volatility_edge_hard_gate,
                 "outcome_learning_guard": settings.enable_outcome_learning_guard,
+                "event_driven_paper_entry": settings.enable_event_driven_paper_entry,
+                "event_driven_live_entry": settings.enable_event_driven_live_entry,
+            },
+            "event_entry_policy": {
+                "armed_entry_valid_seconds": settings.armed_entry_valid_seconds,
+                "max_entry_chase_pct": settings.max_entry_chase_pct,
+                "max_premium_move_from_base_pct": settings.max_premium_move_from_base_pct,
+                "min_remaining_risk_reward": settings.min_remaining_risk_reward,
+                "min_target1_room_pct": settings.min_target1_room_pct,
             },
             "volatility_edge_policy": {
                 "iv_lookback_days": settings.vol_edge_iv_lookback_days,
@@ -1112,6 +1223,8 @@ class ScannerService:
         volatility = factor_scores.get("volatility_edge", {}) if factor_scores else {}
         volatility = volatility if isinstance(volatility, dict) else {}
         volatility_details = volatility.get("details", {}) if isinstance(volatility.get("details"), dict) else {}
+        armed = factor_scores.get("armed_entry", {}) if factor_scores else {}
+        armed = armed if isinstance(armed, dict) else {}
         return {
             "symbol": symbol,
             "score": score,
@@ -1141,6 +1254,13 @@ class ScannerService:
             "entry_valid_until": timing.get("entry_valid_until"),
             "entry_should_wait": timing.get("entry_should_wait"),
             "entry_should_reject_as_late": timing.get("entry_should_reject_as_late"),
+            "armed_setup_id": armed.get("setup_id"),
+            "selected_option": armed.get("selected_option"),
+            "valid_until": armed.get("valid_until") or timing.get("entry_valid_until"),
+            "websocket_tracking_enabled": armed.get("websocket_tracking_enabled", False),
+            "paper_event_entry_enabled": armed.get("paper_event_entry_enabled", settings.enable_event_driven_paper_entry),
+            "live_event_entry_blocked": armed.get("live_event_entry_blocked", False),
+            "reason": armed.get("latest_reason") or armed.get("reason") or timing.get("entry_timing_reason"),
             "volatility_edge_score": volatility.get("score"),
             "volatility_edge_classification": volatility.get("classification"),
             "volatility_edge_for_option_buying": volatility.get("volatility_edge_for_option_buying"),

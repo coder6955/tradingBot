@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from app.config import settings
 from app.models import Signal
 from app.services.active_price_feed import ActiveTradePriceFeed, PriceTick
-from app.services.database import init_db
+from app.services.database import Candle, get_session, init_db
 from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed, WebSocketTick
 from app.services.paper_trading_service import PaperTradingService
 from app.services.trade_exit_service import TradeExitService
@@ -147,9 +147,21 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
             "live_auto_squareoff": settings.live_auto_squareoff,
             "option_time_stop_minutes": settings.option_time_stop_minutes,
             "exit_open_trades_before_close_minutes": settings.exit_open_trades_before_close_minutes,
+            "enable_websocket_candle_persistence": settings.enable_websocket_candle_persistence,
+            "enable_websocket_candle_daily_cleanup": settings.enable_websocket_candle_daily_cleanup,
+            "enable_market_data_gap_detection": settings.enable_market_data_gap_detection,
+            "max_websocket_gap_seconds": settings.max_websocket_gap_seconds,
+            "websocket_live_gap_polling_fallback": settings.websocket_live_gap_polling_fallback,
+            "cancel_armed_entries_on_data_gap": settings.cancel_armed_entries_on_data_gap,
         }
         object.__setattr__(settings, "enable_kite_websocket", True)
         object.__setattr__(settings, "websocket_live_stale_blocks", True)
+        object.__setattr__(settings, "enable_websocket_candle_persistence", True)
+        object.__setattr__(settings, "enable_websocket_candle_daily_cleanup", True)
+        object.__setattr__(settings, "enable_market_data_gap_detection", True)
+        object.__setattr__(settings, "max_websocket_gap_seconds", 10)
+        object.__setattr__(settings, "websocket_live_gap_polling_fallback", True)
+        object.__setattr__(settings, "cancel_armed_entries_on_data_gap", True)
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.temp_db.close()
         init_db(f"sqlite:///{self.temp_db.name}")
@@ -173,6 +185,16 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertIsNotNone(tick)
         self.assertEqual(tick.price, 88.5)
         self.assertEqual(feed.get_latest_price(123), 88.5)
+
+    def test_websocket_feed_dispatches_tick_handler(self) -> None:
+        seen = []
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, tick_handler=seen.append)
+
+        feed._on_ticks(None, [{"instrument_token": 123, "last_price": 88.5, "volume_traded": 900}])
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].instrument_token, 123)
+        self.assertEqual(seen[0].price, 88.5)
 
     def test_websocket_ticks_create_and_update_one_minute_candles(self) -> None:
         feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker)
@@ -214,6 +236,155 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertEqual(status["current_session_candle_count"], 2)
         self.assertEqual(status["last_completed_candle"]["close"], 100)
         self.assertEqual(status["current_building_candle"]["close"], 104)
+
+    def test_websocket_premium_candles_persist_and_rehydrate_from_db(self) -> None:
+        base = regular_market_now().replace(second=10, microsecond=0)
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=lambda: base)
+
+        feed._on_ticks(None, [{"instrument_token": 123, "last_price": 100, "exchange_timestamp": base}])
+        feed._on_ticks(None, [{"instrument_token": 123, "last_price": 104, "exchange_timestamp": base + timedelta(seconds=20)}])
+
+        session = get_session()
+        try:
+            stored = session.query(Candle).filter(Candle.symbol == "WS_TOKEN:123").all()
+            self.assertEqual(len(stored), 1)
+            self.assertEqual(stored[0].close_price, 104)
+        finally:
+            session.close()
+
+        rehydrated = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=lambda: base + timedelta(minutes=1))
+        rehydrated.subscribe({123})
+        candles = rehydrated.get_current_session_premium_candles(123)
+        status = rehydrated.status()
+
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0].close_price, 104)
+        self.assertEqual(candles[0].source, "websocket_builder_rehydrated")
+        self.assertEqual(status["candle_persistence"]["rehydrated_candle_count"], 1)
+
+    def test_old_websocket_one_minute_candles_are_cleaned_without_touching_history(self) -> None:
+        now = regular_market_now().replace(second=0, microsecond=0)
+        yesterday = now - timedelta(days=1)
+        current_day = now - timedelta(minutes=5)
+        session = get_session()
+        try:
+            session.add_all(
+                [
+                    Candle(
+                        symbol="WS_TOKEN:123",
+                        timeframe="1minute",
+                        timestamp=yesterday,
+                        open_price=100,
+                        high_price=101,
+                        low_price=99,
+                        close_price=100,
+                        volume=10,
+                    ),
+                    Candle(
+                        symbol="WS_TOKEN:123",
+                        timeframe="1minute",
+                        timestamp=current_day,
+                        open_price=102,
+                        high_price=103,
+                        low_price=101,
+                        close_price=102,
+                        volume=10,
+                    ),
+                    Candle(
+                        symbol="WS_TOKEN:123",
+                        timeframe="5minute",
+                        timestamp=yesterday,
+                        open_price=104,
+                        high_price=105,
+                        low_price=103,
+                        close_price=104,
+                        volume=10,
+                    ),
+                    Candle(
+                        symbol="BANKNIFTY26JUL58000CE",
+                        timeframe="1minute",
+                        timestamp=yesterday,
+                        open_price=106,
+                        high_price=107,
+                        low_price=105,
+                        close_price=106,
+                        volume=10,
+                    ),
+                ]
+            )
+            session.commit()
+        finally:
+            session.close()
+
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=lambda: now)
+        result = feed.cleanup_old_persisted_candles(force=True)
+
+        session = get_session()
+        try:
+            remaining = {
+                (row.symbol, row.timeframe, row.timestamp)
+                for row in session.query(Candle).order_by(Candle.symbol.asc(), Candle.timeframe.asc()).all()
+            }
+        finally:
+            session.close()
+
+        self.assertEqual(result["deleted"], 1)
+        self.assertNotIn(("WS_TOKEN:123", "1minute", yesterday), remaining)
+        self.assertIn(("WS_TOKEN:123", "1minute", current_day), remaining)
+        self.assertIn(("WS_TOKEN:123", "5minute", yesterday), remaining)
+        self.assertIn(("BANKNIFTY26JUL58000CE", "1minute", yesterday), remaining)
+
+    def test_start_cleans_old_websocket_candles_even_when_market_is_closed(self) -> None:
+        now = weekend_now().replace(second=0, microsecond=0)
+        yesterday = now - timedelta(days=1)
+        session = get_session()
+        try:
+            session.add(
+                Candle(
+                    symbol="WS_TOKEN:456",
+                    timeframe="1minute",
+                    timestamp=yesterday,
+                    open_price=100,
+                    high_price=101,
+                    low_price=99,
+                    close_price=100,
+                    volume=10,
+                )
+            )
+            session.commit()
+        finally:
+            session.close()
+
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=lambda: now)
+        start_result = feed.start()
+        status = feed.status()
+
+        session = get_session()
+        try:
+            count = session.query(Candle).filter(Candle.symbol == "WS_TOKEN:456").count()
+        finally:
+            session.close()
+
+        self.assertFalse(start_result["started"])
+        self.assertEqual(start_result["reason"], "market_closed")
+        self.assertEqual(count, 0)
+        self.assertEqual(status["candle_persistence"]["last_cleanup_deleted"], 1)
+
+    def test_websocket_gap_detection_dispatches_event(self) -> None:
+        seen: list[dict[str, object]] = []
+        base = regular_market_now().replace(second=0, microsecond=0)
+        now = {"value": base}
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=lambda: now["value"], gap_handler=seen.append)
+
+        feed._on_ticks(None, [{"instrument_token": 123, "last_price": 100, "exchange_timestamp": base}])
+        now["value"] = base + timedelta(seconds=30)
+        feed._on_ticks(None, [{"instrument_token": 123, "last_price": 105, "exchange_timestamp": base + timedelta(seconds=30)}])
+
+        status = feed.status()
+        self.assertTrue(status["data_gap"]["data_gap_detected"])
+        self.assertEqual(status["data_gap"]["latest_gap"]["reason"], "tick_gap_detected")
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["instrument_token"], 123)
 
     def test_stale_tick_detection(self) -> None:
         feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker)
@@ -315,7 +486,24 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertEqual(tick.source, "kite_polling")
         self.assertTrue(active.fallback_active)
 
+    def test_live_mode_uses_marked_polling_fallback_during_websocket_gap(self) -> None:
+        ws = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker)
+        active = ActiveTradePriceFeed(ws)
+
+        tick = active.latest_price(
+            provider=FakeProvider(),
+            exchange="NFO",
+            tradingsymbol="BANKNIFTY26JUL58000CE",
+            instrument_token=123,
+            mode="live",
+        )
+
+        self.assertIsNotNone(tick)
+        self.assertEqual(tick.source, "kite_polling_after_websocket_gap")
+        self.assertTrue(active.fallback_active)
+
     def test_live_mode_blocks_on_stale_websocket_data(self) -> None:
+        object.__setattr__(settings, "websocket_live_gap_polling_fallback", False)
         ws = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker)
         active = ActiveTradePriceFeed(ws)
 

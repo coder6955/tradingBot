@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 from app.models import Signal
 from app.services.market_data_coordinator import MarketDataCoordinator
@@ -51,6 +52,15 @@ class CountingQuoteProvider(FailingKiteProvider):
 class PassingRiskService:
     def evaluate_signal(self, symbol):  # type: ignore[no-untyped-def]
         return {"passed": True, "reasons": []}
+
+
+class CapturingTradeRepository:
+    def __init__(self) -> None:
+        self.created = None
+
+    def create_trade(self, signal, **kwargs):  # type: ignore[no-untyped-def]
+        self.created = {"signal": signal, **kwargs}
+        return SimpleNamespace(id=501)
 
 
 class OrderServiceTests(unittest.TestCase):
@@ -136,6 +146,43 @@ class OrderServiceTests(unittest.TestCase):
 
         self.assertEqual(provider.quote_count, 1)
         self.assertGreaterEqual(coordinator.status()["quote_cache_hits"], 1)
+
+    def test_event_driven_metadata_is_saved_on_paper_trade(self) -> None:
+        repo = CapturingTradeRepository()
+        service = OrderService(
+            kite_provider=FailingKiteProvider(),  # type: ignore[arg-type]
+            paper_trading_service=PaperTradingService(),
+            trade_repository=repo,  # type: ignore[arg-type]
+        )
+        signal = Signal(
+            symbol="BANKNIFTY",
+            action="BUY_CE",
+            side="BUY",
+            exchange="NFO",
+            tradingsymbol="BANKNIFTY26JUL58000CE",
+            entry_price=105,
+            stop_loss=90,
+            quantity=15,
+            score=86,
+        )
+        metadata = {
+            "entry_source": "event_driven_websocket",
+            "armed_setup_id": "armed-test",
+            "trigger_price": 105,
+            "executable_entry_price": 105,
+        }
+
+        result = service.place_signal_order(
+            signal,
+            confirm_live=False,
+            order_mode="paper",
+            metadata=metadata,
+            execution_quality_override={"passed": True, "reasons": [], "details": {"source": "event_driven_websocket"}},
+        )
+
+        self.assertEqual(result["trade"]["metadata"]["entry_source"], "event_driven_websocket")
+        self.assertEqual(repo.created["order_response"]["metadata"]["armed_setup_id"], "armed-test")
+        self.assertIn("entry_source=event_driven_websocket", repo.created["notes"])
 
 
 if __name__ == "__main__":

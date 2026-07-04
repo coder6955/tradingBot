@@ -26,5 +26,8 @@
 
 - Always include tests for trading-logic changes, or explain clearly why tests cannot be added.
 - When tests cannot run locally, report the exact command attempted and the failure reason.
+- Do not leave manual test/demo trades open in the real app database. If a test creates a trade through the running app, close it through the app flow before finishing.
+- Prefer isolated temporary databases and mocked broker providers for tests. Never create fake live broker rows such as `broker_order_id=test-order` in the real MySQL database.
+- Before reporting manual API/order testing as complete, verify `/trades`, `/trades/exit-alerts`, and `/broker/reconciliation/status` do not show stale test rows or live reconciliation mismatches.
 
 @RTK.md

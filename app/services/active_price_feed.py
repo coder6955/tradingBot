@@ -26,7 +26,15 @@ class PriceTick:
 
 
 class ActivePriceFeed(Protocol):
-    def latest_price(self, *, exchange: str, tradingsymbol: str, instrument_token: int | None = None, mode: str = "paper") -> PriceTick | None:
+    def latest_price(
+        self,
+        *,
+        exchange: str,
+        tradingsymbol: str,
+        instrument_token: int | None = None,
+        mode: str = "paper",
+        source_override: str | None = None,
+    ) -> PriceTick | None:
         ...
 
 
@@ -37,7 +45,15 @@ class KitePollingPriceFeed:
         self.provider = provider
         self.market_data_coordinator = market_data_coordinator
 
-    def latest_price(self, *, exchange: str, tradingsymbol: str, instrument_token: int | None = None, mode: str = "paper") -> PriceTick | None:
+    def latest_price(
+        self,
+        *,
+        exchange: str,
+        tradingsymbol: str,
+        instrument_token: int | None = None,
+        mode: str = "paper",
+        source_override: str | None = None,
+    ) -> PriceTick | None:
         instrument = f"{exchange or settings.option_exchange}:{tradingsymbol}"
         try:
             if self.market_data_coordinator is not None:
@@ -60,7 +76,7 @@ class KitePollingPriceFeed:
                         instrument=instrument,
                         price=float(value),
                         timestamp=ist_now_naive(),
-                        source="kite_polling",
+                        source=source_override or "kite_polling",
                         instrument_token=instrument_token,
                         volume=self._float(data.get("volume") or data.get("volume_traded")),
                         bid=self._float(buy_depth[0].get("price")) if buy_depth else None,
@@ -140,6 +156,19 @@ class ActiveTradePriceFeed:
                 self.last_tick = self._to_price_tick(exchange=exchange, tradingsymbol=tradingsymbol, tick=ws_tick)
                 return self.last_tick
             if str(mode).lower() == "live" and settings.websocket_live_stale_blocks:
+                if settings.websocket_live_gap_polling_fallback and self.last_reason in {"websocket_disconnected", "tick_stale", "token_missing"}:
+                    tick = KitePollingPriceFeed(provider, self.market_data_coordinator).latest_price(
+                        exchange=exchange,
+                        tradingsymbol=tradingsymbol,
+                        instrument_token=instrument_token,
+                        mode=mode,
+                        source_override="kite_polling_after_websocket_gap",
+                    )
+                    if tick is not None:
+                        self.fallback_active = True
+                        self.fallback_count += 1
+                        self.last_tick = tick
+                        return tick
                 self.last_tick = None
                 return None
 

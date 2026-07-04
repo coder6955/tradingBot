@@ -122,6 +122,7 @@ class AutoTraderService:
             symbols=symbols,
             side=str(self.config.get("side", "BUY")),
             order_mode=str(self.config.get("order_mode") or "paper"),
+            rejection_source="automation_scan",
         )
         limited = opportunities[: int(self.config.get("limit", 5))]
         self.latest_opportunities = [asdict(signal) for signal in limited]

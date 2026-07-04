@@ -80,7 +80,7 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             side="BUY",
             action="BUY_PE",
             score=78,
-            reasons=["premium_candles_stale_or_missing"],
+            reasons=["entry_too_late"],
             contract=SimpleNamespace(
                 tradingsymbol="BANKNIFTY26JUL57900PE",
                 exchange="NFO",
@@ -94,6 +94,7 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
                 "strategy_metadata": {"strategy_version": "test_strategy"},
             },
             score_breakdown={"score": 78},
+            market_session="REGULAR_MARKET",
         )
         rejected_repo.mark_later_outcome(rejection.id, outcome="would_have_hit_target", exit_price=130)
 
@@ -101,7 +102,7 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
 
         self.assertEqual(result["accepted_vs_rejected"]["accepted"]["wins"], 1)
         self.assertEqual(result["accepted_vs_rejected"]["rejected"]["missed_winners"], 1)
-        self.assertIn("rejection_gate:premium_candles_stale_or_missing", result["factor_attribution"])
+        self.assertIn("rejection_gate:entry_too_late", result["factor_attribution"])
         self.assertIn("test_strategy", result["strategy_versions"]["versions"])
 
     def test_professional_insights_daily_review_and_journal(self) -> None:

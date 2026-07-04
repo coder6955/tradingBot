@@ -5,7 +5,7 @@ from app.services.auto_trader_service import AutoTraderService
 
 
 class FakeScanner:
-    def scan_symbols(self, symbols=None, side="BUY", order_mode="paper"):  # type: ignore[no-untyped-def]
+    def scan_symbols(self, symbols=None, side="BUY", order_mode="paper", rejection_source="scanner"):  # type: ignore[no-untyped-def]
         return [
             Signal(
                 symbol="NIFTY",

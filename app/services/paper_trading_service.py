@@ -15,7 +15,15 @@ class PaperTradingService:
         self.pnl = 0.0
         self.pnl_service = RealisticPnlService()
 
-    def execute_trade(self, symbol: str, entry_price: float, quantity: int, stop_loss: float, action: str) -> Dict[str, object]:
+    def execute_trade(
+        self,
+        symbol: str,
+        entry_price: float,
+        quantity: int,
+        stop_loss: float,
+        action: str,
+        metadata: Dict[str, object] | None = None,
+    ) -> Dict[str, object]:
         trade = {
             "symbol": symbol,
             "entry_price": entry_price,
@@ -23,6 +31,8 @@ class PaperTradingService:
             "stop_loss": stop_loss,
             "action": action,
         }
+        if metadata:
+            trade["metadata"] = metadata
         self.positions.append(trade)
         self.equity = float(entry_price)
         return trade

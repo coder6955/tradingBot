@@ -93,9 +93,10 @@ class MarketDataCoordinatorTests(unittest.TestCase):
             side="BUY",
             action="BUY_CE",
             score=82,
-            reasons=["premium_candles_stale_or_missing"],
+            reasons=["final weighted score is below threshold"],
             contract=contract,
             factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            market_session="REGULAR_MARKET",
         )
         rejected_service = RejectedOpportunityOutcomeService(
             rejected_repo,

@@ -98,9 +98,10 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             side="BUY",
             action="BUY_CE",
             score=82,
-            reasons=["premium_candles_stale_or_missing"],
+            reasons=["final weighted score is below threshold"],
             contract=contract,
             factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120, "target_2": 130, "target_3": 140}},
+            market_session="REGULAR_MARKET",
         )
         rejected_service = RejectedOpportunityOutcomeService(rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=121))  # type: ignore[arg-type]
         service = OpportunityOutcomeService(repo, kite_provider_factory=lambda: FakeKiteProvider(), rejected_outcome_service=rejected_service)  # type: ignore[arg-type]
@@ -112,6 +113,46 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
         self.assertEqual(analysis["sample"]["with_later_outcome"], 1)
         self.assertEqual(analysis["examples"][0]["id"], rejected.id)
         self.assertEqual(analysis["examples"][0]["later_outcome"], "would_have_hit_target_1")
+
+    def test_rejected_later_outcomes_skip_non_learning_rows_by_default(self) -> None:
+        rejected_repo = RejectedOpportunityRepository()
+        contract = OptionContract(
+            tradingsymbol="BANKNIFTY26JUL58000CE",
+            exchange="NFO",
+            instrument_token=580001,
+            name="BANKNIFTY",
+            expiry=date.today().isoformat(),
+            strike=58000,
+            option_type="CE",
+            lot_size=15,
+            last_price=100,
+            open_interest=50000,
+            volume=10000,
+            bid=99,
+            ask=101,
+        )
+        rejected_repo.save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=82,
+            reasons=["selected_option_quote_invalid"],
+            contract=contract,
+            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            rejection_source="manual_diagnostic",
+            market_session="REGULAR_MARKET",
+        )
+        service = RejectedOpportunityOutcomeService(rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=121))  # type: ignore[arg-type]
+
+        default_result = service.evaluate_once()
+        explicit_result = service.evaluate_once(learning_only=False)
+        analysis = rejected_repo.analyze(symbol="BANKNIFTY")
+
+        self.assertEqual(default_result["evaluated"], 0)
+        self.assertEqual(explicit_result["updated"], 1)
+        self.assertEqual(analysis["sample"]["learning_eligible"], 0)
+        self.assertEqual(analysis["sample"]["learning_excluded"], 1)
+        self.assertEqual(analysis["learning_exclusion_reasons"]["manual_diagnostic"], 1)
 
 
 if __name__ == "__main__":

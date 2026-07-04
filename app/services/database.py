@@ -119,6 +119,11 @@ class RejectedOpportunityRecord(Base):
     option_type = Column(String(5), nullable=True, index=True)
     score = Column(Integer, nullable=False, default=0, index=True)
     primary_gate = Column(String(100), nullable=True, index=True)
+    rejection_source = Column(String(50), nullable=True, index=True)
+    rejection_context = Column(String(50), nullable=True, index=True)
+    market_session = Column(String(30), nullable=True, index=True)
+    learning_eligible = Column(Integer, nullable=False, default=0, index=True)
+    learning_exclusion_reason = Column(String(150), nullable=True)
     reasons_json = Column(Text, nullable=False)
     market_state_json = Column(Text, nullable=True)
     option_quality_json = Column(Text, nullable=True)
@@ -235,6 +240,7 @@ def init_db(database_url: Optional[str] = None) -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_opportunity_columns()
     _ensure_trade_columns()
+    _ensure_rejected_opportunity_columns()
     _ensure_strategy_validation_columns()
     _ensure_strategy_version_columns()
 
@@ -290,6 +296,26 @@ def _ensure_trade_columns() -> None:
                 connection.execute(text(f"ALTER TABLE trades ADD COLUMN {column} {column_type}"))
 
 
+def _ensure_rejected_opportunity_columns() -> None:
+    if engine is None:
+        return
+    inspector = inspect(engine)
+    if "rejected_opportunities" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("rejected_opportunities")}
+    required = {
+        "rejection_source": "VARCHAR(50)",
+        "rejection_context": "VARCHAR(50)",
+        "market_session": "VARCHAR(30)",
+        "learning_eligible": "INTEGER DEFAULT 0",
+        "learning_exclusion_reason": "VARCHAR(150)",
+    }
+    with engine.begin() as connection:
+        for column, column_type in required.items():
+            if column not in existing:
+                connection.execute(text(f"ALTER TABLE rejected_opportunities ADD COLUMN {column} {column_type}"))
+
+
 def _ensure_strategy_validation_columns() -> None:
     if engine is None:
         return
@@ -343,6 +369,7 @@ def get_session():
     else:
         _ensure_opportunity_columns()
         _ensure_trade_columns()
+        _ensure_rejected_opportunity_columns()
         _ensure_strategy_validation_columns()
         _ensure_strategy_version_columns()
     return SessionLocal()

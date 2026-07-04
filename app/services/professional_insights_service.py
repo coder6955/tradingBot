@@ -38,21 +38,24 @@ class ProfessionalInsightsService:
 
     def analyze(self, *, symbol: str | None = "BANKNIFTY", limit: int = 1000) -> dict[str, Any]:
         opportunities, rejections, trades = self._load(symbol=symbol, limit=limit)
+        eligible_rejections = self._learning_eligible_rejections(rejections)
         return {
             "status": "ok",
             "symbol": symbol.upper() if symbol else "ALL",
             "limit": limit,
-            "accepted_vs_rejected": self._accepted_vs_rejected(opportunities, rejections),
-            "time_bucket_edge": self._time_bucket_edge(opportunities, rejections, trades),
-            "expiry_dte_segmentation": self._dte_segmentation(opportunities, rejections, trades),
-            "factor_attribution": self._factor_attribution(opportunities, rejections),
+            "rejection_learning_filter": self._rejection_learning_filter_summary(rejections),
+            "accepted_vs_rejected": self._accepted_vs_rejected(opportunities, eligible_rejections),
+            "time_bucket_edge": self._time_bucket_edge(opportunities, eligible_rejections, trades),
+            "expiry_dte_segmentation": self._dte_segmentation(opportunities, eligible_rejections, trades),
+            "factor_attribution": self._factor_attribution(opportunities, eligible_rejections),
             "live_execution_quality": self._live_execution_quality(trades),
             "exit_policy_analytics": self._exit_policy_analytics(trades, opportunities),
-            "no_trade_regime_detection": self._no_trade_regime_detection(rejections),
-            "strategy_versions": self._strategy_versions(opportunities, rejections),
+            "no_trade_regime_detection": self._no_trade_regime_detection(eligible_rejections),
+            "strategy_versions": self._strategy_versions(opportunities, eligible_rejections),
             "shadow_mode_comparison": self._shadow_mode_comparison(trades),
             "notes": [
                 "These reports are evidence dashboards only; they do not change scanner logic.",
+                "Rejected-opportunity learning metrics exclude manual diagnostics, market-closed rows, stale data, invalid quotes, and other non-learning rows.",
                 "Use larger paper/live-shadow samples before promoting any finding into a hard rule.",
             ],
         }
@@ -60,6 +63,7 @@ class ProfessionalInsightsService:
     def daily_banknifty_summary(self, *, summary_date: date | None = None) -> dict[str, Any]:
         day = summary_date or ist_today()
         opportunities, rejections, trades = self._load_day(symbol="BANKNIFTY", day=day)
+        eligible_rejections = self._learning_eligible_rejections(rejections)
         paper_trades = [trade for trade in trades if str(trade.mode or "").lower() == "paper"]
         closed_paper = [trade for trade in paper_trades if str(trade.status or "").lower() == "closed"]
         open_paper = [trade for trade in paper_trades if str(trade.status or "").lower() != "closed"]
@@ -70,6 +74,7 @@ class ProfessionalInsightsService:
         win_values = [value for trade in winning_trades if (value := self._trade_net_pnl(trade)) is not None]
         loss_values = [value for trade in losing_trades if (value := self._trade_net_pnl(trade)) is not None]
         reason_counts = self._grouped_rejection_reason_counts(rejections)
+        eligible_reason_counts = self._grouped_rejection_reason_counts(eligible_rejections)
         low_sample = len(closed_paper) < 30
         data_health_warnings = self._daily_data_health_warnings(
             paper_trades=paper_trades,
@@ -91,7 +96,13 @@ class ProfessionalInsightsService:
             "average_win": round(sum(win_values) / len(win_values), 2) if win_values else None,
             "average_loss": round(abs(sum(loss_values)) / len(loss_values), 2) if loss_values else None,
             "total_rejected_opportunities": len(rejections),
+            "learning_eligible_rejections": len(eligible_rejections),
+            "learning_excluded_rejections": len(rejections) - len(eligible_rejections),
+            "learning_exclusion_reasons": dict(
+                Counter(str(row.learning_exclusion_reason or "unknown") for row in rejections if not bool(row.learning_eligible)).most_common(10)
+            ),
             "rejection_reasons_count": reason_counts,
+            "learning_eligible_rejection_reasons_count": eligible_reason_counts,
             "top_5_rejection_reasons": [
                 {"reason": reason, "count": count}
                 for reason, count in Counter(reason_counts).most_common(5)
@@ -114,6 +125,7 @@ class ProfessionalInsightsService:
         opportunities, rejections, trades = self._load(symbol=symbol, limit=limit)
         opportunities = [row for row in opportunities if self._same_day(row.created_at, day)]
         rejections = [row for row in rejections if self._same_day(row.created_at, day)]
+        eligible_rejections = self._learning_eligible_rejections(rejections)
         trades = [row for row in trades if self._same_day(row.created_at, day)]
         return {
             "status": "ok",
@@ -122,13 +134,18 @@ class ProfessionalInsightsService:
             "sample": {
                 "accepted_opportunities": len(opportunities),
                 "rejected_setups": len(rejections),
+                "learning_eligible_rejections": len(eligible_rejections),
+                "learning_excluded_rejections": len(rejections) - len(eligible_rejections),
                 "trades": len(trades),
                 "closed_trades": len([trade for trade in trades if trade.status == "closed"]),
             },
             "accepted_performance": self._opportunity_summary(opportunities),
             "trade_performance": self._trade_summary(trades),
-            "top_rejection_gates": dict(Counter(str(row.primary_gate or "unknown") for row in rejections).most_common(20)),
-            "top_rejection_reasons": dict(self._reason_counter(rejections).most_common(25)),
+            "top_rejection_gates": dict(Counter(str(row.primary_gate or "unknown") for row in eligible_rejections).most_common(20)),
+            "top_rejection_reasons": dict(self._reason_counter(eligible_rejections).most_common(25)),
+            "learning_exclusion_reasons": dict(
+                Counter(str(row.learning_exclusion_reason or "unknown") for row in rejections if not bool(row.learning_eligible)).most_common(15)
+            ),
             "exit_outcomes": dict(Counter(str(row.outcome or "open") for row in trades).most_common()),
             "timeline": self._timeline(opportunities, rejections, trades, limit=100),
         }
@@ -240,6 +257,22 @@ class ProfessionalInsightsService:
             return opportunities, rejections, trades
         finally:
             session.close()
+
+    def _learning_eligible_rejections(self, rows: list[RejectedOpportunityRecord]) -> list[RejectedOpportunityRecord]:
+        return [row for row in rows if bool(getattr(row, "learning_eligible", 0))]
+
+    def _rejection_learning_filter_summary(self, rows: list[RejectedOpportunityRecord]) -> dict[str, Any]:
+        eligible = self._learning_eligible_rejections(rows)
+        excluded = [row for row in rows if not bool(getattr(row, "learning_eligible", 0))]
+        return {
+            "total_rejections": len(rows),
+            "learning_eligible": len(eligible),
+            "learning_excluded": len(excluded),
+            "contexts": dict(Counter(str(row.rejection_context or "unknown") for row in rows).most_common()),
+            "sources": dict(Counter(str(row.rejection_source or "unknown") for row in rows).most_common()),
+            "market_sessions": dict(Counter(str(row.market_session or "unknown") for row in rows).most_common()),
+            "exclusion_reasons": dict(Counter(str(row.learning_exclusion_reason or "unknown") for row in excluded).most_common(20)),
+        }
 
     def _accepted_vs_rejected(
         self, opportunities: list[OpportunityRecord], rejections: list[RejectedOpportunityRecord]
