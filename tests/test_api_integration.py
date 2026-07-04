@@ -128,6 +128,35 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(db.status_code, 200)
         self.assertEqual(db.json()["status"], "ok")
 
+    def test_dashboard_renders_trader_cockpit_sections(self) -> None:
+        response = self.client.get("/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.body.decode("utf-8")
+        self.assertIn("Bank Nifty Option Command Center", html)
+        self.assertIn("System Health", html)
+        self.assertIn("Active Trade / Exit Watch", html)
+        self.assertIn("Latest Watch", html)
+        self.assertIn("System Thought Feed", html)
+
+    def test_dashboard_decision_feed_shows_rejected_setup(self) -> None:
+        RejectedOpportunityRepository().save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=78,
+            reasons=["waiting_for_entry_trigger", "premium_trigger_not_broken_yet"],
+        )
+
+        response = self.client.get("/dashboard/decision-feed?limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertGreaterEqual(payload["count"], 1)
+        self.assertEqual(payload["events"][0]["type"], "rejected_opportunity")
+        self.assertIn("waiting_for_entry_trigger", payload["events"][0]["message"])
+
     def test_scanner_diagnostics_endpoint(self) -> None:
         with patch.object(api, "get_scanner_service", return_value=FakeScanner()):
             response = self.client.get("/scanner/diagnostics?side=BUY&symbols=BANKNIFTY&order_mode=paper&limit=1")

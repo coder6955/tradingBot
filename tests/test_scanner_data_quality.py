@@ -194,6 +194,41 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.assertEqual(result["factor_scores"]["option_premium_confirmation"]["details"]["last_close"], 1087.1)
         self.assertNotEqual(result["factor_scores"]["prices"].get("entry_price"), 0.05)
 
+    def test_scanner_diagnostics_exposes_entry_timing_fields(self) -> None:
+        originals = {
+            "max_premium_move_from_base_pct": settings.max_premium_move_from_base_pct,
+            "min_target1_room_pct": settings.min_target1_room_pct,
+        }
+        try:
+            object.__setattr__(settings, "max_premium_move_from_base_pct", 100.0)
+            object.__setattr__(settings, "min_target1_room_pct", 1.0)
+            result = self._scanner_result(
+                {
+                    "instrument_token": 580001,
+                    "last_price": 1087.1,
+                    "depth": {"buy": [{"price": 1086.0}], "sell": [{"price": 1087.1}]},
+                    "volume": 100000,
+                    "oi": 100000,
+                }
+            )
+        finally:
+            for key, value in originals.items():
+                object.__setattr__(settings, key, value)
+
+        self.assertIn("entry_timing_state", result)
+        self.assertIn("entry_trigger_price", result)
+        self.assertIn("current_premium", result)
+        self.assertIn("premium_distance_to_trigger_pct", result)
+        self.assertIn("premium_move_from_base_pct", result)
+        self.assertIn("chase_risk", result)
+        self.assertIn("remaining_risk_reward", result)
+        self.assertIn("target1_room_pct", result)
+        self.assertIn("entry_timing_reason", result)
+        self.assertIn("entry_valid_until", result)
+        self.assertIn("entry_should_wait", result)
+        self.assertIn("entry_should_reject_as_late", result)
+        self.assertIn("entry_timing", result["factor_scores"])
+
     def test_previous_day_option_candles_fail_premium_confirmation_during_current_session(self) -> None:
         yesterday = datetime.now() - timedelta(days=1, hours=1)
         self._replace_premium_candles(

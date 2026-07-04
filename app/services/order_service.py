@@ -10,6 +10,7 @@ from app.services.paper_trading_service import PaperTradingService
 from app.services.risk_management_service import RiskManagementService
 from app.services.trade_repository import TradeRepository
 from app.services.trade_setup_service import TradeSetupService
+from app.services.market_data_coordinator import MarketDataCoordinator
 
 
 class OrderService:
@@ -24,6 +25,7 @@ class OrderService:
         risk_management_service: RiskManagementService | None = None,
         active_price_feed: ActiveTradePriceFeed | None = None,
         live_safety_checker: Callable[[], dict[str, Any]] | None = None,
+        market_data_coordinator: MarketDataCoordinator | None = None,
     ) -> None:
         self.kite_provider = kite_provider or KiteProvider()
         self.paper_trading_service = paper_trading_service or PaperTradingService()
@@ -32,6 +34,7 @@ class OrderService:
         self.risk_management_service = risk_management_service or RiskManagementService(self.trade_repository)
         self.active_price_feed = active_price_feed
         self.live_safety_checker = live_safety_checker
+        self.market_data_coordinator = market_data_coordinator
         self._banknifty_underlying_token: int | None = None
 
     def place_signal_order(
@@ -160,7 +163,10 @@ class OrderService:
             return {"passed": True, "reasons": [], "skipped": "execution quality guard disabled"}
         instrument = f"{signal.exchange}:{signal.tradingsymbol}"
         try:
-            quote = self.kite_provider.quote([instrument])
+            if self.market_data_coordinator is not None:
+                quote = self.market_data_coordinator.quote([instrument], provider=self.kite_provider)
+            else:
+                quote = self.kite_provider.quote([instrument])
         except Exception as exc:
             return {"passed": False, "reasons": [f"quote unavailable before execution: {exc}"]}
         payload = quote.get(instrument) or quote.get(str(signal.tradingsymbol)) or {}
@@ -224,7 +230,10 @@ class OrderService:
         if self._banknifty_underlying_token:
             return self._banknifty_underlying_token
         try:
-            instruments = self.kite_provider.instruments("NSE")
+            if self.market_data_coordinator is not None:
+                instruments = self.market_data_coordinator.instruments("NSE", provider=self.kite_provider)
+            else:
+                instruments = self.kite_provider.instruments("NSE")
         except Exception:
             return None
         for item in instruments or []:

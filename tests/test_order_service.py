@@ -1,6 +1,7 @@
 import unittest
 
 from app.models import Signal
+from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.order_service import OrderService
 from app.services.paper_trading_service import PaperTradingService
 
@@ -36,6 +37,15 @@ class LiveKiteProvider:
     def place_order(self, **kwargs):  # type: ignore[no-untyped-def]
         self.order = kwargs
         return {"order_id": "test-order"}
+
+
+class CountingQuoteProvider(FailingKiteProvider):
+    def __init__(self) -> None:
+        self.quote_count = 0
+
+    def quote(self, instruments):  # type: ignore[no-untyped-def]
+        self.quote_count += 1
+        return super().quote(instruments)
 
 
 class PassingRiskService:
@@ -100,6 +110,32 @@ class OrderServiceTests(unittest.TestCase):
         self.assertEqual(result["requested_quantity"], 500)
         self.assertEqual(result["placed_quantity"], 100)
         self.assertEqual(provider.order["quantity"], 100)
+
+    def test_execution_quality_uses_market_data_coordinator_cache(self) -> None:
+        provider = CountingQuoteProvider()
+        coordinator = MarketDataCoordinator(lambda: provider, quote_ttl_seconds=5)
+        service = OrderService(
+            kite_provider=provider,  # type: ignore[arg-type]
+            paper_trading_service=PaperTradingService(),
+            market_data_coordinator=coordinator,
+        )
+        signal = Signal(
+            symbol="BANKNIFTY",
+            action="BUY_CE",
+            side="BUY",
+            exchange="NFO",
+            tradingsymbol="BANKNIFTY26JUL58000CE",
+            entry_price=100,
+            stop_loss=80,
+            quantity=15,
+            score=85,
+        )
+
+        service.place_signal_order(signal, confirm_live=False)
+        service.place_signal_order(signal, confirm_live=False)
+
+        self.assertEqual(provider.quote_count, 1)
+        self.assertGreaterEqual(coordinator.status()["quote_cache_hits"], 1)
 
 
 if __name__ == "__main__":

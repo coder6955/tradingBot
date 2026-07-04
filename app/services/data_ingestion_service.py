@@ -52,7 +52,7 @@ class DataIngestionService:
     ) -> dict[str, Any]:
         provider = self.kite_provider_factory()
         default_from_dt, to_dt = self._date_range(from_date=from_date, to_date=to_date, days=days)
-        nse_instruments = provider.instruments(settings.default_exchange)
+        nse_instruments = self._instruments(provider, settings.default_exchange)
         results: list[dict[str, Any]] = []
 
         for symbol in symbols:
@@ -107,8 +107,8 @@ class DataIngestionService:
         max_contracts_per_symbol: int = 120,
     ) -> dict[str, Any]:
         provider = self.kite_provider_factory()
-        option_instruments = provider.instruments(settings.option_exchange)
-        nse_instruments = provider.instruments(settings.default_exchange)
+        option_instruments = self._instruments(provider, settings.option_exchange)
+        nse_instruments = self._instruments(provider, settings.default_exchange)
         now = ist_now_naive()
         all_rows: list[dict[str, Any]] = []
         results: list[dict[str, Any]] = []
@@ -164,8 +164,8 @@ class DataIngestionService:
     ) -> dict[str, Any]:
         provider = self.kite_provider_factory()
         from_dt, to_dt = self._date_range(from_date=from_date, to_date=to_date, days=days)
-        option_instruments = provider.instruments(settings.option_exchange)
-        nse_instruments = provider.instruments(settings.default_exchange)
+        option_instruments = self._instruments(provider, settings.option_exchange)
+        nse_instruments = self._instruments(provider, settings.default_exchange)
         results: list[dict[str, Any]] = []
 
         for symbol in symbols:
@@ -353,6 +353,11 @@ class DataIngestionService:
         if self.market_data_coordinator is not None:
             return self.market_data_coordinator.quote(instruments, provider=provider)
         return provider.quote(instruments)
+
+    def _instruments(self, provider: KiteProvider, exchange: str) -> list[dict[str, Any]]:
+        if self.market_data_coordinator is not None:
+            return self.market_data_coordinator.instruments(exchange, provider=provider)
+        return provider.instruments(exchange)
 
     def _option_snapshot_row(
         self,

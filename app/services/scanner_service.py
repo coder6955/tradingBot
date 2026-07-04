@@ -11,6 +11,7 @@ from app.services.banknifty_option_prewarm_service import BankNiftyOptionPrewarm
 from app.services.day_type_service import DayTypeService
 from app.services.data_freshness_service import DataFreshnessService
 from app.services.decision_engine_service import DecisionEngineService
+from app.services.entry_timing_service import EntryTimingService
 from app.services.mock_market_feed import MockMarketFeed
 from app.providers.kite_feed import KiteFeed
 from app.providers.token_store import load_access_token
@@ -56,6 +57,7 @@ class ScannerService:
         rejected_opportunity_repository: RejectedOpportunityRepository | None = None,
         decision_engine_service: DecisionEngineService | None = None,
         banknifty_option_prewarm_service: BankNiftyOptionPrewarmService | None = None,
+        entry_timing_service: EntryTimingService | None = None,
     ) -> None:
         self.signal_service = signal_service or SignalService()
         self.scoring_service = scoring_service or IndicatorScoringService()
@@ -74,6 +76,7 @@ class ScannerService:
         self.rejected_opportunity_repository = rejected_opportunity_repository or RejectedOpportunityRepository()
         self.decision_engine_service = decision_engine_service or DecisionEngineService()
         self.banknifty_option_prewarm_service = banknifty_option_prewarm_service
+        self.entry_timing_service = entry_timing_service or EntryTimingService()
 
         # Market data is independent from live order placement. When Kite data is
         # requested, fail closed instead of silently returning mock opportunities.
@@ -277,6 +280,18 @@ class ScannerService:
                 premium_eval=premium_eval,
                 day_type_eval=day_type_eval,
             )
+            entry_timing_eval = self.entry_timing_service.evaluate(
+                contract=contract,
+                prices=prices,
+                premium_eval=premium_eval,
+                data_quality=quote_quality,
+                freshness=freshness_eval,
+                option_quality=quality_eval,
+                banknifty_eval=banknifty_eval,
+                price_action=price_eval,
+                liquidity_score=liquidity_score,
+                trend=trend,
+            )
             score_breakdown = self._score_breakdown(
                 technical_score=score,
                 market_score=int(market_eval["score"]),
@@ -304,6 +319,7 @@ class ScannerService:
                 "prices": prices,
                 "data_freshness": freshness_eval,
                 "data_quality": quote_quality,
+                "entry_timing": entry_timing_eval,
                 "banknifty_option_prewarm": prewarm_eval,
                 "kite_calls": self._feed_call_counts(),
             }
@@ -333,6 +349,7 @@ class ScannerService:
                 outcome_learning_eval=outcome_learning_eval,
                 enforce_budget=enforce_budget,
             )
+            risk_failures.extend(self._entry_timing_failures(entry_timing_eval))
             if not freshness_eval.get("passed", False):
                 risk_failures = list(freshness_eval.get("reasons", [])) + risk_failures
             if risk_failures:
@@ -790,6 +807,21 @@ class ScannerService:
             failures.extend(str(reason) for reason in outcome_learning_eval.get("reasons", ["outcome learning guard failed"]))
         return list(dict.fromkeys(failures))
 
+    def _entry_timing_failures(self, entry_timing_eval: dict[str, object]) -> list[str]:
+        state = str(entry_timing_eval.get("state") or entry_timing_eval.get("entry_timing_state") or "")
+        reasons = [str(reason) for reason in entry_timing_eval.get("reasons", []) if str(reason)]
+        if state == EntryTimingService.ENTER_NOW:
+            return []
+        if state == EntryTimingService.TOO_LATE:
+            return reasons or ["entry_too_late"]
+        if state == EntryTimingService.ARMED_FOR_ENTRY:
+            return ["waiting_for_entry_trigger", "premium_trigger_not_broken_yet"]
+        if state == EntryTimingService.WATCHING_SETUP:
+            return ["waiting_for_entry_trigger"]
+        if state == EntryTimingService.NO_TRADE:
+            return reasons or ["entry_timing_no_trade"]
+        return []
+
     def _log_decision(
         self,
         *,
@@ -1033,6 +1065,8 @@ class ScannerService:
         reasons: list[str],
         factor_scores: dict[str, object] | None = None,
     ) -> dict[str, object]:
+        timing = factor_scores.get("entry_timing", {}) if factor_scores else {}
+        timing = timing if isinstance(timing, dict) else {}
         return {
             "symbol": symbol,
             "score": score,
@@ -1049,6 +1083,19 @@ class ScannerService:
             "ema_21": snapshot.get("ema_21"),
             "passed": signal is not None,
             "reasons": reasons,
+            "setup_state": timing.get("entry_timing_state"),
+            "entry_timing_state": timing.get("entry_timing_state"),
+            "entry_trigger_price": timing.get("entry_trigger_price"),
+            "current_premium": timing.get("current_premium"),
+            "premium_distance_to_trigger_pct": timing.get("premium_distance_to_trigger_pct"),
+            "premium_move_from_base_pct": timing.get("premium_move_from_base_pct"),
+            "chase_risk": timing.get("chase_risk"),
+            "remaining_risk_reward": timing.get("remaining_risk_reward"),
+            "target1_room_pct": timing.get("target1_room_pct"),
+            "entry_timing_reason": timing.get("entry_timing_reason"),
+            "entry_valid_until": timing.get("entry_valid_until"),
+            "entry_should_wait": timing.get("entry_should_wait"),
+            "entry_should_reject_as_late": timing.get("entry_should_reject_as_late"),
             "factor_scores": factor_scores or {},
             "signal": signal,
         }

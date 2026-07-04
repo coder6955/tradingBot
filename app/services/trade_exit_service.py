@@ -642,7 +642,7 @@ class TradeExitService:
                 mode=str(trade.mode or "paper"),
             )
             return tick
-        return KitePollingPriceFeed(provider).latest_price(exchange=exchange, tradingsymbol=tradingsymbol, instrument_token=token, mode=str(trade.mode or "paper"))
+        return KitePollingPriceFeed(provider, self.market_data_coordinator).latest_price(exchange=exchange, tradingsymbol=tradingsymbol, instrument_token=token, mode=str(trade.mode or "paper"))
 
     def _current_option_price(self, provider: KiteProvider, trade: Any) -> float | None:
         tick = self._current_option_tick(provider, trade)
@@ -686,7 +686,10 @@ class TradeExitService:
         if self._banknifty_underlying_token:
             return self._banknifty_underlying_token
         try:
-            instruments = provider.instruments("NSE")
+            if self.market_data_coordinator is not None:
+                instruments = self.market_data_coordinator.instruments("NSE", provider=provider)
+            else:
+                instruments = provider.instruments("NSE")
         except Exception:
             return None
         for item in instruments or []:
@@ -703,7 +706,10 @@ class TradeExitService:
         cached = self._instrument_validation_cache.get(token)
         if cached is None:
             try:
-                instruments = provider.instruments(str(trade.exchange or settings.option_exchange))
+                if self.market_data_coordinator is not None:
+                    instruments = self.market_data_coordinator.instruments(str(trade.exchange or settings.option_exchange), provider=provider)
+                else:
+                    instruments = provider.instruments(str(trade.exchange or settings.option_exchange))
             except Exception as exc:
                 return {"valid": False, "token": token, "tradingsymbol": str(trade.tradingsymbol), "reason": "instrument_validation_unavailable", "message": str(exc)}
             for item in instruments or []:

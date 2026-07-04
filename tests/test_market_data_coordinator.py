@@ -17,10 +17,17 @@ class CountingProvider:
     def __init__(self, price: float = 121.0) -> None:
         self.price = price
         self.quote_count = 0
+        self.instrument_count = 0
 
     def quote(self, instruments):
         self.quote_count += 1
         return {instrument: {"last_price": self.price} for instrument in instruments}
+
+    def instruments(self, exchange=None):
+        self.instrument_count += 1
+        if exchange == "NSE":
+            return [{"tradingsymbol": "NIFTY BANK", "name": "NIFTY BANK", "instrument_token": 260105}]
+        return [{"tradingsymbol": "BANKNIFTY26JUL58000CE", "exchange": exchange or "NFO", "instrument_token": 123}]
 
 
 class MarketDataCoordinatorTests(unittest.TestCase):
@@ -47,6 +54,18 @@ class MarketDataCoordinatorTests(unittest.TestCase):
         self.assertEqual(first["NFO:BANKNIFTY26JUL58000CE"]["last_price"], 121.0)
         self.assertEqual(second["NFO:BANKNIFTY26JUL58000CE"]["last_price"], 121.0)
         self.assertEqual(coordinator.status()["quote_cache_hits"], 1)
+
+    def test_instrument_cache_reuses_provider_call_inside_ttl(self) -> None:
+        provider = CountingProvider()
+        coordinator = MarketDataCoordinator(lambda: provider, quote_ttl_seconds=5)
+
+        first = coordinator.instruments("NSE", provider=provider)
+        second = coordinator.instruments("NSE", provider=provider)
+
+        self.assertEqual(provider.instrument_count, 1)
+        self.assertEqual(first[0]["tradingsymbol"], "NIFTY BANK")
+        self.assertEqual(second[0]["instrument_token"], 260105)
+        self.assertEqual(coordinator.status()["instrument_cache_hits"], 1)
 
     def test_accepted_and_rejected_outcome_evaluation_share_quote_cache(self) -> None:
         provider = CountingProvider(price=121.0)

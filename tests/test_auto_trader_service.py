@@ -55,6 +55,50 @@ class AutoTraderServiceTests(unittest.TestCase):
         self.assertEqual(order_service.calls, 2)
         self.assertEqual(len(service.latest_opportunities), 1)
 
+    def test_paper_mode_can_react_to_enter_now_signal(self) -> None:
+        order_service = FakeOrderService()
+        service = AutoTraderService(
+            scanner_factory=lambda: FakeScanner(),  # type: ignore[arg-type]
+            order_service_factory=lambda: order_service,  # type: ignore[arg-type]
+        )
+        service.config = {
+            "side": "BUY",
+            "symbols": ["BANKNIFTY"],
+            "interval_seconds": 1,
+            "limit": 1,
+            "place_orders": True,
+            "confirm_live": False,
+            "order_mode": "paper",
+        }
+
+        result = service.scan_once()
+
+        self.assertEqual(len(result["placed"]), 1)
+        self.assertEqual(result["placed"][0]["result"]["status"], "paper")
+        self.assertFalse(result["placed"][0]["result"]["confirm_live"])
+
+    def test_live_mode_keeps_existing_confirm_live_guard(self) -> None:
+        order_service = FakeOrderService()
+        service = AutoTraderService(
+            scanner_factory=lambda: FakeScanner(),  # type: ignore[arg-type]
+            order_service_factory=lambda: order_service,  # type: ignore[arg-type]
+        )
+        service.config = {
+            "side": "BUY",
+            "symbols": ["BANKNIFTY"],
+            "interval_seconds": 1,
+            "limit": 1,
+            "place_orders": True,
+            "confirm_live": False,
+            "order_mode": "live",
+        }
+
+        result = service.scan_once()
+
+        self.assertEqual(len(result["placed"]), 1)
+        self.assertEqual(result["placed"][0]["result"]["status"], "live")
+        self.assertFalse(result["placed"][0]["result"]["confirm_live"])
+
 
 if __name__ == "__main__":
     unittest.main()

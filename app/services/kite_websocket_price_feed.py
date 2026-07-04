@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
 from threading import RLock
 from typing import Any, Callable
 
@@ -58,11 +58,13 @@ class KiteWebSocketPriceFeed:
         access_token: str | None = None,
         ticker_factory: Callable[[str, str], Any] | None = None,
         order_update_handler: Callable[[dict[str, Any]], Any] | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.api_key = api_key or settings.kite_api_key
         self.access_token = access_token or load_access_token() or settings.kite_access_token
         self.ticker_factory = ticker_factory
         self.order_update_handler = order_update_handler
+        self.clock = clock or ist_now_naive
         self._ticker: Any | None = None
         self._ticks: dict[int, WebSocketTick] = {}
         self._subscribed_tokens: set[int] = set()
@@ -83,22 +85,36 @@ class KiteWebSocketPriceFeed:
         self.last_reconnect_at: datetime | None = None
         self.last_tick_at: datetime | None = None
         self.last_order_update: dict[str, Any] | None = None
+        self.websocket_status = "DISCONNECTED"
+        self.reconnect_skipped_reason: str | None = None
         self._tick_modes: dict[int, str] = {}
         self._premium_candles: dict[int, dict[datetime, WebSocketPremiumCandle]] = {}
         self._ticks_seen: dict[int, int] = {}
 
     def start(self) -> dict[str, Any]:
         if not settings.enable_kite_websocket:
+            self.websocket_status = "DISABLED"
             return {"started": False, "reason": "websocket_disabled"}
+        session = self.market_session()
+        if session != "REGULAR_MARKET":
+            self.running = False
+            self.connected = False
+            self.websocket_status = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
+            self.reconnect_skipped_reason = "market_closed"
+            self.last_error = None
+            logger.info("Kite WebSocket not started outside market hours: %s", session)
+            return {"started": False, "reason": "market_closed", "market_session": session}
         if self.running:
             return {"started": True, "already_running": True}
         if not self.api_key or not self.access_token:
             self.last_error = "missing_kite_api_key_or_access_token"
+            self.websocket_status = "ERROR"
             logger.warning("Kite WebSocket not started: %s", self.last_error)
             return {"started": False, "reason": self.last_error}
         factory = self.ticker_factory or KiteTicker
         if factory is None:
             self.last_error = "kite_ticker_unavailable"
+            self.websocket_status = "ERROR"
             logger.warning("Kite WebSocket not started: kiteconnect.KiteTicker unavailable")
             return {"started": False, "reason": self.last_error}
 
@@ -113,6 +129,7 @@ class KiteWebSocketPriceFeed:
             self.running = False
             self.connected = False
             self.last_error = str(exc)
+            self.websocket_status = "ERROR"
             logger.exception("Kite WebSocket connect failed")
             return {"started": False, "reason": self.last_error}
         logger.info("Kite WebSocket start requested")
@@ -121,6 +138,7 @@ class KiteWebSocketPriceFeed:
     def stop(self) -> dict[str, Any]:
         self.running = False
         self.connected = False
+        self.websocket_status = "STOPPED"
         ticker = self._ticker
         if ticker is not None:
             try:
@@ -138,6 +156,16 @@ class KiteWebSocketPriceFeed:
             self._desired_tokens.update(clean_tokens)
         if not clean_tokens:
             return {"subscribed": [], "reason": "token_missing"}
+        if not self.running and settings.enable_kite_websocket:
+            start_result = self.start()
+            if not start_result.get("started") and start_result.get("reason") == "market_closed":
+                logger.info("Kite WebSocket subscription queued outside market hours: %s", sorted(clean_tokens))
+                return {
+                    "subscribed": [],
+                    "queued": sorted(clean_tokens),
+                    "reason": "market_closed",
+                    "market_session": start_result.get("market_session"),
+                }
         if not self.connected or self._ticker is None:
             logger.info("Kite WebSocket queued subscription while disconnected: %s", sorted(clean_tokens))
             return {"subscribed": [], "queued": sorted(clean_tokens), "reason": "websocket_disconnected"}
@@ -174,7 +202,13 @@ class KiteWebSocketPriceFeed:
         return self._age_seconds(tick.timestamp) <= max_age
 
     def status(self, *, active_trade_tokens: set[int] | None = None, fallback_active: bool = False) -> dict[str, Any]:
-        now = ist_now_naive()
+        now = self._now()
+        session = self.market_session(now)
+        status_label = self.websocket_status
+        if not settings.enable_kite_websocket:
+            status_label = "DISABLED"
+        elif session != "REGULAR_MARKET" and not self.connected:
+            status_label = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
         with self._lock:
             latest_tick_age = {
                 str(token): round(max(0.0, (now - tick.timestamp.replace(tzinfo=None)).total_seconds()), 3)
@@ -183,6 +217,8 @@ class KiteWebSocketPriceFeed:
             candle_counts = {str(token): len(self._current_session_candles_locked(token)) for token in set(self._premium_candles) | set(self._ticks)}
             return {
                 "websocket_enabled": settings.enable_kite_websocket,
+                "websocket_status": status_label,
+                "market_session": session,
                 "websocket_connected": self.connected,
                 "running": self.running,
                 "subscribed_tokens": sorted(self._subscribed_tokens),
@@ -218,6 +254,7 @@ class KiteWebSocketPriceFeed:
                 "last_reconnect_at": self.last_reconnect_at.isoformat(sep=" ") if self.last_reconnect_at else None,
                 "last_order_update": self.last_order_update,
                 "last_error": self.last_error,
+                "reconnect_skipped_reason": self.reconnect_skipped_reason,
                 "subscription_errors": dict(self._subscription_errors),
             }
 
@@ -235,8 +272,10 @@ class KiteWebSocketPriceFeed:
 
     def _on_connect(self, ws: Any, response: Any) -> None:
         self.connected = True
-        self.connected_at = ist_now_naive()
+        self.connected_at = self._now()
         self.last_error = None
+        self.reconnect_skipped_reason = None
+        self.websocket_status = "CONNECTED"
         logger.info("Kite WebSocket connected")
         with self._lock:
             desired = set(self._desired_tokens)
@@ -251,14 +290,22 @@ class KiteWebSocketPriceFeed:
                     self._ticks[tick.instrument_token] = tick
                     self._ticks_seen[tick.instrument_token] = self._ticks_seen.get(tick.instrument_token, 0) + 1
                     self._update_premium_candle(tick)
-                    self.last_tick_at = ist_now_naive()
+                    self.last_tick_at = self._now()
                 else:
                     self.ignored_tick_count += 1
 
     def _on_close(self, ws: Any, code: int | None, reason: str | None) -> None:
         self.connected = False
         self.disconnect_count += 1
-        self.last_disconnect_at = ist_now_naive()
+        self.last_disconnect_at = self._now()
+        session = self.market_session()
+        if session != "REGULAR_MARKET":
+            self.websocket_status = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
+            self.reconnect_skipped_reason = "market_closed"
+            self.last_error = None
+            logger.info("Kite WebSocket closed outside market hours; reconnect skipped: code=%s reason=%s", code, reason)
+            return
+        self.websocket_status = "DISCONNECTED"
         self.last_error = reason or f"closed:{code}"
         logger.warning("Kite WebSocket disconnected: code=%s reason=%s", code, reason)
         if settings.websocket_reconnect_enabled:
@@ -272,11 +319,22 @@ class KiteWebSocketPriceFeed:
 
     def _on_error(self, ws: Any, code: int | None, reason: str | None) -> None:
         self.last_error = reason or f"error:{code}"
+        self.websocket_status = "ERROR"
         logger.warning("Kite WebSocket error: code=%s reason=%s", code, reason)
 
     def _on_reconnect(self, ws: Any, attempts_count: int | None) -> None:
+        session = self.market_session()
+        if session != "REGULAR_MARKET":
+            self.connected = False
+            self.websocket_status = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
+            self.reconnect_skipped_reason = "market_closed"
+            self.last_error = None
+            logger.info("Kite WebSocket reconnect skipped outside market hours: %s", session)
+            return
         self.reconnect_count += 1
-        self.last_reconnect_at = ist_now_naive()
+        self.last_reconnect_at = self._now()
+        self.reconnect_skipped_reason = None
+        self.websocket_status = "RECONNECTING"
         logger.info("Kite WebSocket reconnect attempt: %s", attempts_count)
         with self._lock:
             desired = set(self._desired_tokens)
@@ -285,7 +343,15 @@ class KiteWebSocketPriceFeed:
 
     def _on_noreconnect(self, ws: Any) -> None:
         self.connected = False
+        session = self.market_session()
+        if session != "REGULAR_MARKET":
+            self.websocket_status = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
+            self.reconnect_skipped_reason = "market_closed"
+            self.last_error = None
+            logger.info("Kite WebSocket reconnect exhausted callback ignored outside market hours: %s", session)
+            return
         self.last_error = "websocket_reconnect_exhausted"
+        self.websocket_status = "RECONNECT_EXHAUSTED"
         logger.error("Kite WebSocket reconnect exhausted")
 
     def _on_order_update(self, ws: Any, data: dict[str, Any]) -> None:
@@ -376,11 +442,11 @@ class KiteWebSocketPriceFeed:
         return WebSocketTick(
             instrument_token=token,
             price=price,
-            timestamp=(timestamp or ist_now_naive()).replace(tzinfo=None),
+            timestamp=(timestamp or self._now()).replace(tzinfo=None),
             volume=self._safe_float(payload.get("volume") or payload.get("volume_traded")),
             bid=bid,
             ask=ask,
-            receive_timestamp=ist_now_naive(),
+            receive_timestamp=self._now(),
             timestamp_source=timestamp_source,
             packet_type=packet_type,
             raw=dict(payload),
@@ -449,7 +515,7 @@ class KiteWebSocketPriceFeed:
                 bucket.pop(key, None)
 
     def _current_session_candles_locked(self, token: int) -> list[WebSocketPremiumCandle]:
-        today = ist_now_naive().date()
+        today = self._now().date()
         rows = list(self._premium_candles.get(int(token), {}).values())
         return [candle for candle in rows if candle.timestamp.replace(tzinfo=None).date() == today]
 
@@ -485,7 +551,7 @@ class KiteWebSocketPriceFeed:
         }
 
     def _age_seconds(self, timestamp: datetime) -> float:
-        return max(0.0, (ist_now_naive() - timestamp.replace(tzinfo=None)).total_seconds())
+        return max(0.0, (self._now() - timestamp.replace(tzinfo=None)).total_seconds())
 
     def _safe_int(self, value: Any) -> int | None:
         try:
@@ -511,4 +577,21 @@ class KiteWebSocketPriceFeed:
     def _connected_duration_seconds(self) -> float | None:
         if not self.connected or self.connected_at is None:
             return None
-        return round(max(0.0, (ist_now_naive() - self.connected_at).total_seconds()), 3)
+        return round(max(0.0, (self._now() - self.connected_at).total_seconds()), 3)
+
+    def market_session(self, now: datetime | None = None) -> str:
+        now = (now or self._now()).replace(tzinfo=None)
+        if now.weekday() >= 5:
+            return "WEEKEND"
+        start = self._parse_time(settings.market_open_time)
+        end = self._parse_time(settings.market_close_time)
+        if start <= now.time() <= end:
+            return "REGULAR_MARKET"
+        return "PRE_MARKET" if now.time() < start else "AFTER_MARKET"
+
+    def _now(self) -> datetime:
+        return self.clock().replace(tzinfo=None)
+
+    def _parse_time(self, value: str) -> time:
+        hour, minute = value.split(":", 1)
+        return time(int(hour), int(minute))

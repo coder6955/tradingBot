@@ -175,6 +175,14 @@ class Settings:
     min_websocket_premium_candles: int = int(os.getenv("MIN_WEBSOCKET_PREMIUM_CANDLES", "3"))
     max_websocket_premium_candle_age_seconds: int = int(os.getenv("MAX_WEBSOCKET_PREMIUM_CANDLE_AGE_SECONDS", "180"))
     max_stored_premium_candle_age_seconds: int = int(os.getenv("MAX_STORED_PREMIUM_CANDLE_AGE_SECONDS", "300"))
+    max_entry_chase_pct: float = float(os.getenv("MAX_ENTRY_CHASE_PCT", "1.0"))
+    max_premium_move_from_base_pct: float = float(os.getenv("MAX_PREMIUM_MOVE_FROM_BASE_PCT", "4.0"))
+    min_remaining_risk_reward: float = float(os.getenv("MIN_REMAINING_RISK_REWARD", "1.3"))
+    min_target1_room_pct: float = float(os.getenv("MIN_TARGET1_ROOM_PCT", "8.0"))
+    entry_armed_distance_to_trigger_pct: float = float(os.getenv("ENTRY_ARMED_DISTANCE_TO_TRIGGER_PCT", "0.75"))
+    entry_trigger_lookback_candles: int = int(os.getenv("ENTRY_TRIGGER_LOOKBACK_CANDLES", "3"))
+    min_entry_expected_move_coverage: float = float(os.getenv("MIN_ENTRY_EXPECTED_MOVE_COVERAGE", "0.90"))
+    min_entry_room_to_level_pct: float = float(os.getenv("MIN_ENTRY_ROOM_TO_LEVEL_PCT", "0.25"))
     live_exit_max_retry_count: int = int(os.getenv("LIVE_EXIT_MAX_RETRY_COUNT", "2"))
     live_reconciliation_blocks_automation: bool = os.getenv("LIVE_RECONCILIATION_BLOCKS_AUTOMATION", "true").lower() == "true"
     enable_underlying_invalidation_exit: bool = os.getenv("ENABLE_UNDERLYING_INVALIDATION_EXIT", "true").lower() == "true"

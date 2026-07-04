@@ -168,6 +168,7 @@ def get_order_service() -> OrderService:
         risk_management_service=risk_management_service,
         active_price_feed=active_trade_price_feed,
         live_safety_checker=broker_sync_service.live_block_status,
+        market_data_coordinator=market_data_coordinator,
     )
 
 
@@ -310,48 +311,79 @@ def command_center_dashboard() -> HTMLResponse:
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>AI Option Trader Command Center</title>
   <style>
-    :root { color-scheme: light; font-family: Inter, Segoe UI, Arial, sans-serif; }
-    body { margin: 0; background: #f6f7f9; color: #101828; }
-    header { padding: 18px 24px; background: #ffffff; border-bottom: 1px solid #d0d5dd; display: flex; justify-content: space-between; gap: 16px; align-items: center; }
-    h1 { font-size: 22px; margin: 0; }
-    h2 { font-size: 16px; margin: 0 0 12px; }
-    main { padding: 18px 24px 32px; display: grid; gap: 16px; }
-    .control-grid { display: grid; grid-template-columns: minmax(320px, 420px) minmax(520px, 1fr); gap: 16px; align-items: start; }
-    .data-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(360px, 0.65fr); gap: 16px; align-items: start; }
-    .panel { background: #ffffff; border: 1px solid #d0d5dd; border-radius: 8px; padding: 14px; min-width: 0; overflow: hidden; }
+    :root { color-scheme: light; font-family: Inter, Segoe UI, Arial, sans-serif; --line:#d0d5dd; --muted:#667085; --ink:#101828; --good:#047857; --bad:#b42318; --warn:#b54708; --blue:#175cd3; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f4f6f8; color: var(--ink); }
+    header { padding: 16px 24px; background: #ffffff; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 16px; align-items: center; position: sticky; top: 0; z-index: 5; }
+    h1 { font-size: 22px; margin: 0; letter-spacing: 0; }
+    h2 { font-size: 15px; margin: 0 0 12px; letter-spacing: 0; }
+    main { padding: 16px 24px 32px; display: grid; gap: 14px; }
+    .topbar { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(280px, .55fr); gap: 14px; align-items: stretch; }
+    .control-grid { display: grid; grid-template-columns: minmax(340px, 420px) minmax(0, 1fr); gap: 14px; align-items: start; }
+    .data-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+    .panel { background: #ffffff; border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-width: 0; overflow: hidden; }
     .full { grid-column: 1 / -1; }
-    .status { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
-    .pill { border: 1px solid #d0d5dd; border-radius: 8px; padding: 10px; background: #f9fafb; min-height: 54px; }
-    .pill.ok { border-color: #0f766e; background: #ccfbf1; color: #0f766e; }
-    .pill.bad { border-color: #b42318; background: #fee4e2; color: #b42318; }
-    .pill strong { display: block; font-size: 13px; } .pill span { display: block; font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+    .ready { min-height: 156px; border-left: 6px solid var(--warn); display: grid; gap: 12px; }
+    .ready.ok { border-left-color: var(--good); }
+    .ready.bad { border-left-color: var(--bad); }
+    .ready-title { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+    .ready-title strong { font-size: 24px; line-height: 1.1; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .chip { border: 1px solid #e4e7ec; border-radius: 999px; padding: 5px 9px; font-size: 12px; color: #344054; background: #f9fafb; max-width: 100%; overflow-wrap: anywhere; }
+    .chip.ok { border-color: #a7f3d0; background: #ecfdf3; color: var(--good); }
+    .chip.bad { border-color: #fecaca; background: #fff1f3; color: var(--bad); }
+    .chip.warn { border-color: #fedf89; background: #fffaeb; color: var(--warn); }
+    .summary-line { color: #344054; font-size: 14px; overflow-wrap: anywhere; }
+    .watch { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+    .watch-item { border: 1px solid #eaecf0; border-radius: 8px; padding: 10px; min-height: 72px; background: #fcfcfd; }
+    .watch-item span { color: var(--muted); font-size: 12px; display: block; }
+    .watch-item strong { display: block; margin-top: 5px; font-size: 16px; overflow-wrap: anywhere; }
+    .status { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 8px; }
+    .pill { border: 1px solid #e4e7ec; border-radius: 8px; padding: 9px; background: #fcfcfd; min-height: 58px; }
+    .pill.ok { border-color: #a7f3d0; background: #ecfdf3; color: var(--good); }
+    .pill.bad { border-color: #fecaca; background: #fff1f3; color: var(--bad); }
+    .pill.warn { border-color: #fedf89; background: #fffaeb; color: var(--warn); }
+    .pill strong { display: block; font-size: 12px; } .pill span { display: block; font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; color: #475467; }
     label { display: block; font-size: 12px; color: #475467; margin: 10px 0 4px; }
-    input, select { width: 100%; box-sizing: border-box; border: 1px solid #d0d5dd; border-radius: 6px; padding: 8px; font: inherit; background: #fff; }
+    input, select { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: inherit; background: #fff; min-height: 38px; }
     .row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
-    button, .linkbtn { border: 1px solid #175cd3; background: #175cd3; color: white; padding: 9px 10px; border-radius: 6px; cursor: pointer; font-weight: 600; text-decoration: none; text-align: center; display: inline-block; }
-    button.secondary, .linkbtn.secondary { background: #fff; color: #344054; border-color: #d0d5dd; }
-    button.danger { background: #b42318; border-color: #b42318; }
+    button, .linkbtn { border: 1px solid var(--blue); background: var(--blue); color: white; padding: 9px 10px; border-radius: 6px; cursor: pointer; font-weight: 600; text-decoration: none; text-align: center; display: inline-block; min-height: 38px; }
+    button.secondary, .linkbtn.secondary { background: #fff; color: #344054; border-color: var(--line); }
+    button.danger { background: var(--bad); border-color: var(--bad); }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
     .actions button { flex: 1 1 130px; }
-    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-    .metric { border: 1px solid #eaecf0; border-radius: 8px; padding: 10px; background: #fcfcfd; }
+    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+    .metric { border: 1px solid #eaecf0; border-radius: 8px; padding: 10px; background: #fcfcfd; min-height: 70px; }
     .metric span { display: block; color: #667085; font-size: 12px; } .metric strong { font-size: 18px; display: block; margin-top: 4px; overflow-wrap: anywhere; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { border-bottom: 1px solid #eaecf0; padding: 8px; text-align: left; vertical-align: top; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+    th, td { border-bottom: 1px solid #eaecf0; padding: 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
     th { color: #475467; background: #f9fafb; font-weight: 600; position: sticky; top: 0; }
     .tablewrap { min-height: 160px; max-height: 360px; overflow: auto; border: 1px solid #eaecf0; border-radius: 8px; }
     pre { max-height: 300px; overflow: auto; background: #101828; color: #f9fafb; border-radius: 8px; padding: 10px; font-size: 12px; }
     .links { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; }
-    .muted { color: #667085; font-size: 12px; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .raw-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+    .empty { color: var(--muted); padding: 14px; }
+    .feed { display: grid; gap: 8px; max-height: 430px; overflow: auto; padding-right: 4px; }
+    .feed-item { border: 1px solid #eaecf0; border-radius: 8px; padding: 10px; background: #fcfcfd; display: grid; gap: 5px; }
+    .feed-item.ok { border-left: 4px solid var(--good); }
+    .feed-item.bad { border-left: 4px solid var(--bad); }
+    .feed-item.warn { border-left: 4px solid var(--warn); }
+    .feed-item.watch { border-left: 4px solid var(--blue); }
+    .feed-head { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
+    .feed-title { font-weight: 700; font-size: 13px; overflow-wrap: anywhere; }
+    .feed-time { color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .feed-message { color: #344054; font-size: 13px; overflow-wrap: anywhere; }
+    .feed-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     details { margin-top: 12px; border-top: 1px solid #eaecf0; padding-top: 10px; }
     summary { cursor: pointer; font-weight: 600; color: #344054; }
-    @media (max-width: 1100px) { .control-grid,.data-grid { grid-template-columns: 1fr; } .full { grid-column: auto; } header { align-items: flex-start; flex-direction: column; } }
-    @media (max-width: 620px) { main, header { padding-left: 12px; padding-right: 12px; } .status,.metrics,.links,.row { grid-template-columns: 1fr; } }
+    @media (max-width: 1180px) { .topbar,.control-grid,.data-grid,.raw-grid { grid-template-columns: 1fr; } .full { grid-column: auto; } .watch,.metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 680px) { main, header { padding-left: 12px; padding-right: 12px; } header { align-items: flex-start; flex-direction: column; } .status,.metrics,.links,.row,.watch { grid-template-columns: 1fr; } .actions { width: 100%; } }
   </style>
 </head>
 <body>
   <header>
-    <div><h1>AI Option Trader Command Center</h1><div class="muted" id="refreshText">Loading...</div></div>
+    <div><h1>Bank Nifty Option Command Center</h1><div class="muted" id="refreshText">Loading...</div></div>
     <div class="actions">
       <a class="linkbtn secondary" href="/docs" target="_blank">Docs</a>
       <a class="linkbtn secondary" href="/kite/auth" target="_blank">Kite Login</a>
@@ -359,27 +391,43 @@ def command_center_dashboard() -> HTMLResponse:
     </div>
   </header>
   <main>
-    <section class="panel"><div class="status" id="statusCards"></div></section>
+    <section class="topbar">
+      <div class="panel ready" id="readyPanel">
+        <div class="ready-title">
+          <div><strong id="readyTitle">Checking system</strong><div class="summary-line" id="readySummary">Loading live state...</div></div>
+          <span class="chip" id="modeChip">Mode</span>
+        </div>
+        <div class="chips" id="readyChips"></div>
+        <div class="watch" id="watchPanel"></div>
+      </div>
+      <div class="panel">
+        <h2>System Health</h2>
+        <div class="status" id="statusCards"></div>
+      </div>
+    </section>
     <section class="control-grid">
       <div class="panel">
-        <h2>Automation Control</h2>
+        <h2>Automation</h2>
         <label>Order mode</label><select id="orderMode"><option value="paper">Paper orders</option><option value="live">Live orders</option></select>
         <div class="actions">
-          <button onclick="startAutomation()">Start Full Automation</button><button class="danger" onclick="stopAutomation()">Stop Full Automation</button>
-          <button class="secondary" onclick="scanOnce()">Run One Scan</button><button class="secondary" onclick="evaluateOpen()">Evaluate Open</button>
+          <button onclick="startAutomation()">Start</button><button class="danger" onclick="stopAutomation()">Stop</button>
+          <button class="secondary" onclick="scanOnce()">Scan Once</button><button class="secondary" onclick="evaluateOpen()">Evaluate Open</button>
         </div>
         <details>
           <summary>Advanced</summary>
           <div class="row"><div><label>Side</label><select id="side"><option>BUY</option><option>SELL</option></select></div><div><label>Limit</label><input id="limit" type="number" value="5" min="1" max="25"></div></div>
-          <label>Symbols</label><input id="symbols" value="">
+          <label>Symbols</label><input id="symbols" value="BANKNIFTY">
           <div class="row"><div><label>Scan seconds</label><input id="interval" type="number" value="30" min="3"></div><div><label>Outcome seconds</label><input id="outcomeInterval" type="number" value="30" min="10"></div></div>
         </details>
         <pre id="actionResult">{}</pre>
       </div>
       <div class="panel">
-        <h2>Live Activity</h2>
+        <h2>Today</h2>
         <div class="metrics" id="metrics"></div>
-        <pre id="activityJson">{}</pre>
+        <details>
+          <summary>Activity JSON</summary>
+          <pre id="activityJson">{}</pre>
+        </details>
       </div>
     </section>
     <section class="panel">
@@ -394,6 +442,10 @@ def command_center_dashboard() -> HTMLResponse:
         <a class="linkbtn secondary" href="/risk/status" target="_blank">Risk</a>
         <a class="linkbtn secondary" href="/research/settings" target="_blank">Research</a>
         <a class="linkbtn secondary" href="/research/outcome-learning" target="_blank">Learning</a>
+        <a class="linkbtn secondary" href="/research/professional-insights" target="_blank">Insights</a>
+        <a class="linkbtn secondary" href="/research/daily-review" target="_blank">Daily Review</a>
+        <a class="linkbtn secondary" href="/kite/websocket/status" target="_blank">WebSocket</a>
+        <a class="linkbtn secondary" href="/market-data/cache/status" target="_blank">Data Cache</a>
         <a class="linkbtn secondary" href="/data/ingest/status" target="_blank">Ingestion</a>
         <a class="linkbtn secondary" href="/data/collector/status" target="_blank">Collector</a>
         <a class="linkbtn secondary" href="/automation/status" target="_blank">Automation</a>
@@ -403,13 +455,20 @@ def command_center_dashboard() -> HTMLResponse:
       </div>
     </section>
     <section class="data-grid">
-      <div class="panel"><h2>Latest Scan Opportunities</h2><div class="tablewrap"><table id="latestTable"></table></div></div>
-      <div class="panel"><h2>Failure Analysis</h2><pre id="failureJson">{}</pre></div>
-      <div class="panel"><h2>Saved Opportunity Journal</h2><div class="tablewrap"><table id="journalTable"></table></div></div>
-      <div class="panel"><h2>Outcome Learning</h2><pre id="learningJson">{}</pre></div>
-      <div class="panel full"><h2>Trade Decision / Exit Watch</h2><pre id="decisionJson">{}</pre></div>
-      <div class="panel"><h2>Paper / Execution State</h2><pre id="ordersJson">{}</pre></div>
-      <div class="panel full"><h2>Kite Account</h2><pre id="accountJson">{}</pre></div>
+      <div class="panel"><h2>Active Trade / Exit Watch</h2><div id="activeTrade"></div></div>
+      <div class="panel"><h2>Latest Watch</h2><div id="latestWatch"></div></div>
+      <div class="panel full"><h2>System Thought Feed</h2><div class="feed" id="decisionFeed"><div class="empty">Loading recent decisions...</div></div></div>
+      <div class="panel"><h2>Latest Opportunities</h2><div class="tablewrap"><table id="latestTable"></table></div></div>
+      <div class="panel"><h2>Opportunity Journal</h2><div class="tablewrap"><table id="journalTable"></table></div></div>
+      <div class="panel full">
+        <h2>Raw Details</h2>
+        <div class="raw-grid">
+          <details open><summary>Decision / Exit</summary><pre id="decisionJson">{}</pre></details>
+          <details><summary>Orders / Paper</summary><pre id="ordersJson">{}</pre></details>
+          <details><summary>Learning / Failures</summary><pre id="learningJson">{}</pre><pre id="failureJson">{}</pre></details>
+          <details><summary>Kite Account</summary><pre id="accountJson">{}</pre></details>
+        </div>
+      </div>
     </section>
   </main>
 <script>
@@ -423,17 +482,111 @@ async function postJson(path, body={}) {
   if (!res.ok) throw new Error(`${path}: ${res.status}`);
   return await res.json();
 }
-function pill(label, ok, detail) {
-  return `<div class="pill ${ok ? "ok" : "bad"}"><strong>${label}</strong><span>${detail || ""}</span></div>`;
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+function pill(label, state, detail) {
+  return `<div class="pill ${state}"><strong>${esc(label)}</strong><span>${esc(detail || "")}</span></div>`;
+}
+function chip(label, state="") {
+  return `<span class="chip ${state}">${esc(label)}</span>`;
 }
 function metric(label, value) {
-  return `<div class="metric"><span>${label}</span><strong>${value ?? "-"}</strong></div>`;
+  return `<div class="metric"><span>${esc(label)}</span><strong>${esc(value ?? "-")}</strong></div>`;
 }
-function table(el, rows) {
-  const keys = ["id","symbol","action","tradingsymbol","entry_price","stop_loss","target_1","quantity","score","status","outcome"];
+function table(el, rows, keys) {
   if (!rows || !rows.length) { el.innerHTML = "<tr><td>No rows yet.</td></tr>"; return; }
-  el.innerHTML = `<thead><tr>${keys.map(k => `<th>${k}</th>`).join("")}</tr></thead><tbody>` +
-    rows.map(r => `<tr>${keys.map(k => `<td>${r[k] ?? ""}</td>`).join("")}</tr>`).join("") + "</tbody>";
+  el.innerHTML = `<thead><tr>${keys.map(k => `<th>${esc(k)}</th>`).join("")}</tr></thead><tbody>` +
+    rows.map(r => `<tr>${keys.map(k => `<td>${esc(r[k])}</td>`).join("")}</tr>`).join("") + "</tbody>";
+}
+function latestSignal(latest) {
+  return (latest.opportunities || [])[0] || null;
+}
+function firstOpenTrade(trades) {
+  return (trades || []).find(x => x.status !== "closed") || null;
+}
+function timing(signal) {
+  return signal?.factor_scores?.entry_timing || {};
+}
+function watchItem(label, value) {
+  return `<div class="watch-item"><span>${esc(label)}</span><strong>${esc(value ?? "-")}</strong></div>`;
+}
+function renderActiveTrade(trade) {
+  const el = document.getElementById("activeTrade");
+  if (!trade) { el.innerHTML = `<div class="empty">No open trade.</div>`; return; }
+  el.innerHTML = `<div class="watch">
+    ${watchItem("Contract", trade.tradingsymbol)}
+    ${watchItem("Status", trade.status)}
+    ${watchItem("Entry", trade.entry_price)}
+    ${watchItem("SL", trade.stop_loss)}
+    ${watchItem("Target 1", trade.target_1)}
+    ${watchItem("Price source", trade.price_source || "-")}
+    ${watchItem("Exit order", trade.exit_order_status || "-")}
+    ${watchItem("Net P&L", trade.net_pnl ?? trade.pnl ?? "-")}
+  </div>`;
+}
+function renderLatestWatch(signal) {
+  const el = document.getElementById("latestWatch");
+  if (!signal) { el.innerHTML = `<div class="empty">No current opportunity.</div>`; return; }
+  const t = timing(signal);
+  el.innerHTML = `<div class="watch">
+    ${watchItem("State", t.entry_timing_state || signal.setup_state || "SIGNAL")}
+    ${watchItem("Action", signal.action)}
+    ${watchItem("Contract", signal.tradingsymbol)}
+    ${watchItem("Entry", signal.entry_price)}
+    ${watchItem("SL", signal.stop_loss)}
+    ${watchItem("Target 1", signal.target_1)}
+    ${watchItem("Chase", t.chase_risk || "-")}
+    ${watchItem("Reason", t.entry_timing_reason || "Qualified signal")}
+  </div>`;
+}
+function renderReady(h, d, k, au, a, m, c, ws, risk, latest, trades) {
+  const blockers = [];
+  if (h.status !== "ok") blockers.push("API");
+  if (d.status !== "ok") blockers.push("Database");
+  if (k.status !== "ok") blockers.push("Kite");
+  if (risk.passed === false) blockers.push("Risk");
+  if (!au.running && !a.running) blockers.push("Automation stopped");
+  if (!m.running) blockers.push("Exit monitor stopped");
+  if ((ws.websocket_enabled || ws.enabled) && ws.websocket_connected === false) blockers.push("WebSocket");
+  const panel = document.getElementById("readyPanel");
+  const mode = au.config?.order_mode || a.mode || "paper";
+  const sig = latestSignal(latest);
+  const active = firstOpenTrade(trades.trades || []);
+  const state = timing(sig).entry_timing_state || sig?.setup_state || (sig ? "SIGNAL" : "NO_ACTIVE_SETUP");
+  const panelState = blockers.length ? (blockers.length > 2 ? "bad" : "warn") : "ok";
+  panel.className = `panel ready ${panelState}`;
+  document.getElementById("readyTitle").textContent = blockers.length ? "Needs Attention" : "System Ready";
+  document.getElementById("readySummary").textContent = blockers.length ? `Blocked by: ${blockers.join(", ")}` : `${state}${active ? " with active trade" : ""}`;
+  document.getElementById("modeChip").className = `chip ${mode === "live" ? "bad" : "ok"}`;
+  document.getElementById("modeChip").textContent = mode.toUpperCase();
+  document.getElementById("readyChips").innerHTML = [
+    chip(au.running ? "Automation running" : "Automation stopped", au.running ? "ok" : "bad"),
+    chip(m.running ? "Exit monitor running" : "Exit monitor stopped", m.running ? "ok" : "bad"),
+    chip(k.status === "ok" ? "Kite OK" : "Kite issue", k.status === "ok" ? "ok" : "bad"),
+    chip(ws.websocket_connected ? "WebSocket connected" : "WebSocket not connected", ws.websocket_connected ? "ok" : "warn"),
+    chip(risk.passed === false ? "Risk blocked" : "Risk allowed", risk.passed === false ? "bad" : "ok")
+  ].join("");
+  const t = timing(sig);
+  document.getElementById("watchPanel").innerHTML =
+    watchItem("Setup", state) +
+    watchItem("Contract", sig?.tradingsymbol || active?.tradingsymbol || "-") +
+    watchItem("Trigger", t.entry_trigger_price || "-") +
+    watchItem("Reason", t.entry_timing_reason || (sig ? "Qualified signal" : "-"));
+}
+function renderDecisionFeed(feed) {
+  const el = document.getElementById("decisionFeed");
+  const events = feed.events || [];
+  if (!events.length) { el.innerHTML = `<div class="empty">No scanner thoughts recorded yet.</div>`; return; }
+  el.innerHTML = events.map(item => {
+    const meta = [item.tradingsymbol, item.score !== undefined && item.score !== null ? `score ${item.score}` : null, item.status, item.outcome]
+      .filter(Boolean).join(" | ");
+    return `<div class="feed-item ${esc(item.severity || "warn")}">
+      <div class="feed-head"><div class="feed-title">${esc(item.title)}</div><div class="feed-time">${esc(item.time || "")}</div></div>
+      <div class="feed-message">${esc(item.message || "")}</div>
+      <div class="feed-meta">${esc(meta)}</div>
+    </div>`;
+  }).join("");
 }
 function payload() {
   const orderMode = document.getElementById("orderMode").value;
@@ -483,26 +636,33 @@ function loadControls(config) {
   window.controlsLoaded = true;
 }
 async function refreshAll() {
-  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, collector, ingest] = await Promise.allSettled([
+  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, collector, ingest, websocket, cache, decisionFeed] = await Promise.allSettled([
     getJson("/health"), getJson("/db/health"), getJson("/kite/health"), getJson("/auto-trader/status"), getJson("/opportunity-monitor/status"),
     getJson("/opportunities/performance"), getJson("/auto-trader/latest"), getJson("/opportunities?limit=50"), getJson("/opportunities/failure-analysis"),
     getJson("/research/outcome-learning"), getJson("/auto-trader/executions"), getJson("/paper/trades"), getJson("/kite/margins"), getJson("/kite/positions"), getJson("/risk/status"), getJson("/trades?limit=50"),
-    getJson("/automation/status"), getJson("/data/collector/status"), getJson("/data/ingest/status")
+    getJson("/automation/status"), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30")
   ]);
   const val = r => r.status === "fulfilled" ? r.value : {error: r.reason.message};
-  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), c=val(collector), ing=val(ingest);
+  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), c=val(collector), ing=val(ingest), ws=val(websocket), cacheStatus=val(cache), feed=val(decisionFeed);
   loadControls(au.config);
   document.getElementById("statusCards").innerHTML =
-    pill("API", h.status === "ok", h.status || h.error) + pill("Database", d.status === "ok", d.status || d.error) +
-    pill("Automation", !!au.running, au.running ? (au.market_open ? "running, market open" : "running, market closed") : "stopped") +
-    pill("Kite", k.status === "ok", k.status || k.error || "check") + pill("Auto Trader", !!a.running, a.running ? "running" : "stopped") +
-    pill("Collector", !!c.running, c.running ? "running" : "stopped") + pill("Outcome Monitor", !!m.running, m.running ? "running" : "stopped");
+    pill("API", h.status === "ok" ? "ok" : "bad", h.status || h.error) + pill("Database", d.status === "ok" ? "ok" : "bad", d.status || d.error) +
+    pill("Kite", k.status === "ok" ? "ok" : "bad", k.status || k.error || "check") + pill("WebSocket", ws.websocket_connected ? "ok" : "warn", ws.websocket_connected ? "connected" : (ws.websocket_enabled ? "not connected" : "disabled")) +
+    pill("Automation", au.running ? "ok" : "bad", au.running ? (au.market_open ? "running, market open" : "running") : "stopped") +
+    pill("Auto Trader", a.running ? "ok" : "bad", a.running ? "running" : "stopped") +
+    pill("Collector", c.running ? "ok" : "warn", c.running ? "running" : "stopped") + pill("Exit Monitor", m.running ? "ok" : "bad", m.running ? "running" : "stopped") +
+    pill("Data Cache", cacheStatus.status === "ok" ? "ok" : "warn", cacheStatus.status || cacheStatus.error || "check");
+  renderReady(h, d, k, au, a, m, c, ws, r, l, t);
+  renderActiveTrade(firstOpenTrade(t.trades || []));
+  renderLatestWatch(latestSignal(l));
+  renderDecisionFeed(feed);
   document.getElementById("metrics").innerHTML =
     metric("Last scan", a.last_scan_at || "-") + metric("Latest found", a.latest_count || 0) + metric("Executions", a.execution_count || 0) +
-    metric("Open", p.open || 0) + metric("Closed", p.closed || 0) + metric("Risk", r.passed === false ? "Blocked" : "Allowed");
-  document.getElementById("activityJson").textContent = JSON.stringify({automation:au, auto_trader:a, collector:c, ingestion:ing, monitor:m, performance:p, risk:r}, null, 2);
-  table(document.getElementById("latestTable"), l.opportunities || []);
-  table(document.getElementById("journalTable"), j.opportunities || []);
+    metric("Open", p.open || 0) + metric("Closed", p.closed || 0) + metric("Win rate", p.closed ? `${Math.round((p.wins || 0) / p.closed * 100)}%` : "0%") +
+    metric("P&L", p.pnl || 0) + metric("Risk", r.passed === false ? "Blocked" : "Allowed");
+  document.getElementById("activityJson").textContent = JSON.stringify({automation:au, auto_trader:a, collector:c, ingestion:ing, monitor:m, performance:p, risk:r, websocket:ws, cache:cacheStatus, decision_feed:feed}, null, 2);
+  table(document.getElementById("latestTable"), l.opportunities || [], ["symbol","action","tradingsymbol","entry_price","stop_loss","target_1","quantity","score"]);
+  table(document.getElementById("journalTable"), j.opportunities || [], ["id","created_at","action","tradingsymbol","entry_price","stop_loss","target_1","score","status","outcome","pnl"]);
   document.getElementById("failureJson").textContent = JSON.stringify(f, null, 2);
   document.getElementById("learningJson").textContent = JSON.stringify(learn, null, 2);
   document.getElementById("decisionJson").textContent = JSON.stringify({
@@ -521,6 +681,140 @@ setInterval(refreshAll, 5000);
 </html>
         """
     )
+
+
+def _decision_event_from_opportunity(record) -> dict[str, object]:
+    factors = _json_dict(getattr(record, "factor_scores_json", None))
+    timing = factors.get("entry_timing", {}) if isinstance(factors.get("entry_timing"), dict) else {}
+    state = str(timing.get("entry_timing_state") or "ACCEPTED")
+    reason = str(timing.get("entry_timing_reason") or "Accepted opportunity saved")
+    return {
+        "time": format_ist(record.created_at),
+        "sort_time": record.created_at.isoformat() if record.created_at else "",
+        "type": "accepted_opportunity",
+        "severity": "ok",
+        "title": f"{state}: {record.action}",
+        "message": reason,
+        "symbol": record.symbol,
+        "tradingsymbol": record.tradingsymbol,
+        "score": record.score,
+        "entry_price": record.entry_price,
+        "stop_loss": record.stop_loss,
+        "target_1": record.target_1,
+        "status": record.status,
+        "outcome": record.outcome,
+        "state": state,
+    }
+
+
+def _decision_event_from_rejection(record) -> dict[str, object]:
+    factors = _json_dict(getattr(record, "factor_scores_json", None))
+    timing = factors.get("entry_timing", {}) if isinstance(factors.get("entry_timing"), dict) else {}
+    reasons = _json_list(getattr(record, "reasons_json", None))
+    state = str(timing.get("entry_timing_state") or "REJECTED")
+    reason = str(timing.get("entry_timing_reason") or "; ".join(reasons[:3]) or record.primary_gate or "Rejected setup")
+    severity = "warn"
+    if any(item in reasons for item in ["entry_too_late", "chase_risk_high", "selected_option_quote_invalid"]):
+        severity = "bad"
+    elif any(item in reasons for item in ["waiting_for_entry_trigger", "premium_trigger_not_broken_yet"]):
+        severity = "watch"
+    return {
+        "time": format_ist(record.created_at),
+        "sort_time": record.created_at.isoformat() if record.created_at else "",
+        "type": "rejected_opportunity",
+        "severity": severity,
+        "title": f"{state}: {record.action or record.side}",
+        "message": reason,
+        "symbol": record.symbol,
+        "tradingsymbol": record.tradingsymbol,
+        "score": record.score,
+        "primary_gate": record.primary_gate,
+        "reasons": reasons,
+        "later_outcome": record.later_outcome,
+        "state": state,
+    }
+
+
+def _decision_event_from_trade(record) -> dict[str, object]:
+    status = str(record.status or "unknown")
+    outcome = str(record.outcome or "")
+    if status == "closed":
+        title = f"Trade closed: {outcome or 'exit'}"
+        severity = "ok" if (record.net_pnl or record.pnl or 0) >= 0 else "bad"
+        message = f"Exit {record.exit_price}; net P&L {record.net_pnl if record.net_pnl is not None else record.pnl}"
+    elif status in {"closing", "exit_failed", "reconciliation_mismatch"}:
+        title = f"Exit attention: {status}"
+        severity = "bad"
+        message = str(record.exit_last_error or record.exit_order_status or "Exit needs monitoring")
+    else:
+        title = f"Trade open: {record.action}"
+        severity = "watch"
+        message = f"Entry {record.entry_price}; SL {record.stop_loss}; Target 1 {record.target_1}"
+    return {
+        "time": format_ist(record.updated_at or record.created_at),
+        "sort_time": (record.updated_at or record.created_at).isoformat() if (record.updated_at or record.created_at) else "",
+        "type": "trade",
+        "severity": severity,
+        "title": title,
+        "message": message,
+        "symbol": record.symbol,
+        "tradingsymbol": record.tradingsymbol,
+        "mode": record.mode,
+        "status": record.status,
+        "outcome": record.outcome,
+        "entry_price": record.entry_price,
+        "stop_loss": record.stop_loss,
+        "target_1": record.target_1,
+        "net_pnl": record.net_pnl,
+    }
+
+
+def _decision_event_from_execution(item: dict[str, object]) -> dict[str, object]:
+    signal = item.get("signal", {}) if isinstance(item.get("signal"), dict) else {}
+    result = item.get("result", {}) if isinstance(item.get("result"), dict) else {}
+    return {
+        "time": item.get("time"),
+        "sort_time": str(item.get("time") or ""),
+        "type": "auto_execution",
+        "severity": "ok",
+        "title": f"Order action: {result.get('status') or 'submitted'}",
+        "message": f"{signal.get('action') or ''} {signal.get('tradingsymbol') or signal.get('symbol') or ''}".strip(),
+        "tradingsymbol": signal.get("tradingsymbol"),
+        "score": signal.get("score"),
+        "order_key": item.get("order_key"),
+    }
+
+
+def _decision_event_from_error(item: dict[str, object]) -> dict[str, object]:
+    return {
+        "time": item.get("time"),
+        "sort_time": str(item.get("time") or ""),
+        "type": "auto_error",
+        "severity": "bad",
+        "title": "Automation error",
+        "message": item.get("error"),
+        "order_key": item.get("order_key"),
+    }
+
+
+def _json_dict(value: str | None) -> dict[str, object]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _json_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        return [str(item) for item in parsed] if isinstance(parsed, list) else []
+    except json.JSONDecodeError:
+        return []
 
 
 def opportunity_record_to_dict(record) -> dict[str, object]:
@@ -1803,6 +2097,30 @@ def get_auto_trader_executions() -> dict[str, object]:
         "executions": auto_trader_service.executions,
         "errors": auto_trader_service.errors,
     }
+
+
+@app.get(
+    "/dashboard/decision-feed",
+    tags=["01 System"],
+    summary="Show recent scanner thoughts, rejected setups, accepted opportunities, and trade events",
+)
+def get_dashboard_decision_feed(limit: int = 30) -> dict[str, object]:
+    limit = max(5, min(int(limit or 30), 100))
+    events: list[dict[str, object]] = []
+    for record in opportunity_repository.list_opportunities(limit=limit):
+        events.append(_decision_event_from_opportunity(record))
+    for record in rejected_opportunity_repository.list_rejections(symbol="BANKNIFTY", limit=limit):
+        events.append(_decision_event_from_rejection(record))
+    for record in trade_repository.list_trades(limit=limit):
+        events.append(_decision_event_from_trade(record))
+    for item in auto_trader_service.executions[-limit:]:
+        events.append(_decision_event_from_execution(item))
+    for item in auto_trader_service.errors[-limit:]:
+        events.append(_decision_event_from_error(item))
+    events = sorted(events, key=lambda item: str(item.get("sort_time") or ""), reverse=True)[:limit]
+    for item in events:
+        item.pop("sort_time", None)
+    return {"status": "ok", "count": len(events), "events": events}
 
 
 @app.get(

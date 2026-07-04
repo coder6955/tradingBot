@@ -14,6 +14,18 @@ from app.services.trade_repository import TradeRepository
 from app.services.time_utils import ist_now_naive
 
 
+def regular_market_now() -> datetime:
+    return datetime(2026, 7, 3, 10, 30, 0)
+
+
+def weekend_now() -> datetime:
+    return datetime(2026, 7, 4, 10, 30, 0)
+
+
+def after_market_now() -> datetime:
+    return datetime(2026, 7, 3, 16, 0, 0)
+
+
 class FakeTicker:
     MODE_FULL = "full"
 
@@ -133,6 +145,8 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
             "enable_underlying_invalidation_exit": settings.enable_underlying_invalidation_exit,
             "enable_premium_invalidation_exit": settings.enable_premium_invalidation_exit,
             "live_auto_squareoff": settings.live_auto_squareoff,
+            "option_time_stop_minutes": settings.option_time_stop_minutes,
+            "exit_open_trades_before_close_minutes": settings.exit_open_trades_before_close_minutes,
         }
         object.__setattr__(settings, "enable_kite_websocket", True)
         object.__setattr__(settings, "websocket_live_stale_blocks", True)
@@ -150,7 +164,7 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
             pass
 
     def test_websocket_feed_stores_latest_tick(self) -> None:
-        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker)
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=regular_market_now)
         feed.start()
         feed._on_ticks(None, [{"instrument_token": 123, "last_price": 88.5, "volume_traded": 900}])
 
@@ -208,7 +222,7 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertFalse(feed.is_fresh(123, max_age_seconds=3))
 
     def test_reconnect_resubscribes_active_tokens(self) -> None:
-        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker)
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=regular_market_now)
         feed.start()
         feed.subscribe({111, 222})
         ticker = feed._ticker
@@ -218,6 +232,72 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
 
         self.assertEqual(feed.reconnect_count, 1)
         self.assertIn([111, 222], [sorted(item) for item in ticker.subscribed])
+
+    def test_subscribe_starts_websocket_during_regular_market(self) -> None:
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=regular_market_now)
+
+        result = feed.subscribe({111, 222})
+
+        self.assertTrue(feed.running)
+        self.assertTrue(feed.connected)
+        self.assertEqual(result["subscribed"], [111, 222])
+
+    def test_subscribe_queues_without_connecting_on_weekend(self) -> None:
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=weekend_now)
+
+        result = feed.subscribe({111, 222})
+        status = feed.status()
+
+        self.assertFalse(feed.running)
+        self.assertFalse(feed.connected)
+        self.assertEqual(result["reason"], "market_closed")
+        self.assertEqual(result["queued"], [111, 222])
+        self.assertEqual(status["websocket_status"], "DISABLED_OUTSIDE_MARKET_HOURS")
+        self.assertEqual(status["reconnect_skipped_reason"], "market_closed")
+
+    def test_websocket_start_skips_weekend_without_error_or_reconnect(self) -> None:
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=weekend_now)
+
+        result = feed.start()
+        status = feed.status()
+
+        self.assertFalse(result["started"])
+        self.assertEqual(result["reason"], "market_closed")
+        self.assertEqual(status["market_session"], "WEEKEND")
+        self.assertEqual(status["websocket_status"], "DISABLED_OUTSIDE_MARKET_HOURS")
+        self.assertEqual(status["reconnect_skipped_reason"], "market_closed")
+        self.assertIsNone(status["last_error"])
+        self.assertFalse(status["running"])
+        self.assertFalse(status["websocket_connected"])
+        self.assertEqual(feed.reconnect_count, 0)
+
+    def test_websocket_close_skips_reconnect_after_market(self) -> None:
+        reconnect_calls: list[bool] = []
+
+        class ClosingTicker(FakeTicker):
+            def reconnect(self) -> None:
+                reconnect_calls.append(True)
+
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=ClosingTicker, clock=after_market_now)
+
+        feed._on_close(ClosingTicker("k", "t"), 1006, "closed")
+        status = feed.status()
+
+        self.assertEqual(reconnect_calls, [])
+        self.assertEqual(status["market_session"], "AFTER_MARKET")
+        self.assertEqual(status["websocket_status"], "MARKET_CLOSED")
+        self.assertEqual(status["reconnect_skipped_reason"], "market_closed")
+        self.assertIsNone(status["last_error"])
+
+    def test_noreconnect_does_not_mark_exhausted_outside_market(self) -> None:
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=weekend_now)
+
+        feed._on_noreconnect(FakeTicker("k", "t"))
+        status = feed.status()
+
+        self.assertEqual(status["websocket_status"], "DISABLED_OUTSIDE_MARKET_HOURS")
+        self.assertEqual(status["reconnect_skipped_reason"], "market_closed")
+        self.assertIsNone(status["last_error"])
 
     def test_active_feed_falls_back_to_polling_in_paper_mode(self) -> None:
         ws = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker)
@@ -254,6 +334,8 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         object.__setattr__(settings, "enable_underlying_invalidation_exit", False)
         object.__setattr__(settings, "enable_premium_invalidation_exit", False)
         object.__setattr__(settings, "live_auto_squareoff", True)
+        object.__setattr__(settings, "option_time_stop_minutes", 0)
+        object.__setattr__(settings, "exit_open_trades_before_close_minutes", 0)
         repo = TradeRepository()
         signal = Signal(
             symbol="BANKNIFTY",
@@ -270,7 +352,7 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
             quantity=15,
             score=90,
         )
-        repo.create_trade(signal, mode="paper", status="filled", requested_quantity=15, placed_quantity=15)
+        record = repo.create_trade(signal, mode="paper", status="filled", requested_quantity=15, placed_quantity=15)
         active = FakeActiveFeed(price=111)
         service = TradeExitService(
             trade_repository=repo,
@@ -281,9 +363,9 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
 
         result = service.evaluate_once(limit=10)
 
-        self.assertEqual(result["closed"], 1)
-        self.assertEqual(result["results"][0]["outcome"], "target_1")
-        self.assertEqual(result["results"][0]["price_source"], "kite_websocket")
+        target_result = next(item for item in result["results"] if item.get("trade_id") == record.id)
+        self.assertEqual(target_result["outcome"], "target_1")
+        self.assertEqual(target_result["price_source"], "kite_websocket")
         self.assertTrue(any(123 in tokens for tokens in active.subscriptions))
 
     def test_trade_exit_reports_live_stale_reason(self) -> None:
