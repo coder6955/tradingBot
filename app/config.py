@@ -96,6 +96,14 @@ class Settings:
     backtest_slippage_pct: float = float(os.getenv("BACKTEST_SLIPPAGE_PCT", "1.0"))
     backtest_charges_pct: float = float(os.getenv("BACKTEST_CHARGES_PCT", "0.20"))
     backtest_walk_forward_train_pct: float = float(os.getenv("BACKTEST_WALK_FORWARD_TRAIN_PCT", "70.0"))
+    enable_after_market_research_job: bool = os.getenv("ENABLE_AFTER_MARKET_RESEARCH_JOB", "true").lower() == "true"
+    after_market_research_time: str = os.getenv("AFTER_MARKET_RESEARCH_TIME", "15:45")
+    after_market_research_symbol: str = os.getenv("AFTER_MARKET_RESEARCH_SYMBOL", "BANKNIFTY")
+    after_market_research_timeframe: str = os.getenv("AFTER_MARKET_RESEARCH_TIMEFRAME", "5minute")
+    after_market_research_direction: str = os.getenv("AFTER_MARKET_RESEARCH_DIRECTION", "BOTH")
+    after_market_research_horizon_candles: int = int(os.getenv("AFTER_MARKET_RESEARCH_HORIZON_CANDLES", "12"))
+    after_market_research_limit: int = int(os.getenv("AFTER_MARKET_RESEARCH_LIMIT", "3000"))
+    after_market_research_decision_mode: str = os.getenv("AFTER_MARKET_RESEARCH_DECISION_MODE", "scanner_parity")
     enable_strategy_edge_guard: bool = os.getenv("ENABLE_STRATEGY_EDGE_GUARD", "false").lower() == "true"
     min_strategy_trades: int = int(os.getenv("MIN_STRATEGY_TRADES", "30"))
     min_strategy_expectancy_pct: float = float(os.getenv("MIN_STRATEGY_EXPECTANCY_PCT", "0.05"))

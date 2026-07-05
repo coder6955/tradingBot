@@ -48,6 +48,20 @@ class FakeExitService:
         return {"enabled": True, "evaluated": 0, "closed": 0, "results": [], "limit": limit}
 
 
+class FakeAfterMarketResearchService:
+    def status(self):
+        return {
+            "status": "ok",
+            "enabled": True,
+            "running": False,
+            "last_run_date": "2026-07-03",
+            "next_action": "research_completed_for_today",
+        }
+
+    def run_once(self, *, trigger="manual", force=False):
+        return {"action": "after_market_research", "status": "ok", "trigger": trigger, "force": force}
+
+
 class FakePollingProvider:
     def quote(self, instruments):
         return {instruments[0]: {"last_price": 100.0}}
@@ -140,6 +154,8 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("Active Trade / Exit Watch", html)
         self.assertIn("Latest Watch", html)
         self.assertIn("System Thought Feed", html)
+        self.assertIn("After-Market Research", html)
+        self.assertIn("/research/after-market/status", html)
 
     def test_dashboard_decision_feed_shows_rejected_setup(self) -> None:
         RejectedOpportunityRepository().save_rejection(
@@ -288,6 +304,18 @@ class ApiIntegrationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["diagnostics"][0]["reasons"], ["test rejection"])
+
+    def test_after_market_research_endpoints(self) -> None:
+        fake_service = FakeAfterMarketResearchService()
+        with patch.object(api, "after_market_research_service", fake_service):
+            status = self.client.get("/research/after-market/status")
+            run = self.client.post("/research/after-market/run", json={"force": True})
+
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.json()["next_action"], "research_completed_for_today")
+        self.assertEqual(run.status_code, 200)
+        self.assertEqual(run.json()["status"], "ok")
+        self.assertTrue(run.json()["force"])
 
     def test_trades_endpoint(self) -> None:
         response = self.client.get("/trades?limit=5")

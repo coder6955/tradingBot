@@ -26,6 +26,7 @@ from app.services.greeks_service import GreeksService
 from app.services.notification_service import NotificationService
 from app.services.execution_analytics_service import ExecutionAnalyticsService
 from app.services.active_price_feed import ActiveTradePriceFeed
+from app.services.after_market_research_service import AfterMarketResearchService
 from app.services.armed_entry_tracker_service import ArmedEntryTrackerService
 from app.services.banknifty_option_prewarm_service import BankNiftyOptionPrewarmService
 from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed
@@ -63,7 +64,7 @@ Recommended sequence:
 4. Start automation: `POST /automation/start`
 5. Watch automation: `GET /automation/status`, `GET /dashboard`
 6. Manual override if needed: `GET /scanner/diagnostics?side=BUY&symbols=BANKNIFTY`
-7. Research quality: `GET /research/professional-readiness`, `GET /research/opportunity-analytics`, `GET /research/execution-analytics`, `GET /research/outcome-learning`, `POST /research/backtest/options`, `POST /research/walk-forward`
+7. Research quality: `GET /research/after-market/status`, `GET /research/professional-readiness`, `GET /research/opportunity-analytics`, `GET /research/execution-analytics`, `GET /research/outcome-learning`, `POST /research/backtest/options`, `POST /research/walk-forward`
 8. Watch saved opportunities: `GET /opportunities`, `GET /opportunities/performance`
 9. Study failures: `POST /opportunities/evaluate-open`, `GET /opportunities/failure-analysis`
 10. Live orders only after validation: set `LIVE_TRADING_MODE=true`, `PAPER_TRADING_MODE=false`, `AUTOMATION_PLACE_ORDERS=true`, and `AUTOMATION_CONFIRM_LIVE=true`
@@ -118,6 +119,10 @@ outcome_learning_service = OutcomeLearningService()
 opportunity_analytics_service = OpportunityAnalyticsService()
 execution_analytics_service = ExecutionAnalyticsService()
 professional_insights_service = ProfessionalInsightsService()
+after_market_research_service = AfterMarketResearchService(
+    backtest_service=backtest_service,
+    professional_insights_service=professional_insights_service,
+)
 professional_readiness_service = ProfessionalReadinessService(
     backtest_service=backtest_service,
     opportunity_analytics_service=opportunity_analytics_service,
@@ -224,6 +229,7 @@ automation_supervisor_service = AutomationSupervisorService(
     outcome_service=opportunity_outcome_service,
     risk_management_service=risk_management_service,
     notification_service=notification_service,
+    after_market_research_service=after_market_research_service,
 )
 
 
@@ -483,6 +489,7 @@ def command_center_dashboard() -> HTMLResponse:
         <div class="actions">
           <button onclick="startAutomation()">Start</button><button class="danger" onclick="stopAutomation()">Stop</button>
           <button class="secondary" onclick="scanOnce()">Scan Once</button><button class="secondary" onclick="evaluateOpen()">Evaluate Open</button>
+          <button class="secondary" onclick="runAfterMarketResearch()">After-Market Research</button>
         </div>
         <details>
           <summary>Advanced</summary>
@@ -515,6 +522,7 @@ def command_center_dashboard() -> HTMLResponse:
         <a class="linkbtn secondary" href="/research/outcome-learning" target="_blank">Learning</a>
         <a class="linkbtn secondary" href="/research/professional-insights" target="_blank">Insights</a>
         <a class="linkbtn secondary" href="/research/daily-review" target="_blank">Daily Review</a>
+        <a class="linkbtn secondary" href="/research/after-market/status" target="_blank">After-Market</a>
         <a class="linkbtn secondary" href="/kite/websocket/status" target="_blank">WebSocket</a>
         <a class="linkbtn secondary" href="/market-data/cache/status" target="_blank">Data Cache</a>
         <a class="linkbtn secondary" href="/data/ingest/status" target="_blank">Ingestion</a>
@@ -680,6 +688,7 @@ async function showAction(fn) {
 }
 function scanOnce(){ showAction(() => postJson("/auto-trader/scan-once", {...payload(), place_orders:false})); }
 function evaluateOpen(){ showAction(() => postJson("/opportunities/evaluate-open", {limit:100})); }
+function runAfterMarketResearch(){ showAction(() => postJson("/research/after-market/run", {force:false})); }
 function automationPayload(){ return {
   order_mode: document.getElementById("orderMode").value,
   symbols: document.getElementById("symbols").value,
@@ -707,14 +716,14 @@ function loadControls(config) {
   window.controlsLoaded = true;
 }
 async function refreshAll() {
-  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, collector, ingest, websocket, cache, decisionFeed] = await Promise.allSettled([
+  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, collector, ingest, websocket, cache, decisionFeed, afterMarketResearch] = await Promise.allSettled([
     getJson("/health"), getJson("/db/health"), getJson("/kite/health"), getJson("/auto-trader/status"), getJson("/opportunity-monitor/status"),
     getJson("/opportunities/performance"), getJson("/auto-trader/latest"), getJson("/opportunities?limit=50"), getJson("/opportunities/failure-analysis"),
     getJson("/research/outcome-learning"), getJson("/auto-trader/executions"), getJson("/paper/trades"), getJson("/kite/margins"), getJson("/kite/positions"), getJson("/risk/status"), getJson("/trades?limit=50"),
-    getJson("/automation/status"), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30")
+    getJson("/automation/status"), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30"), getJson("/research/after-market/status")
   ]);
   const val = r => r.status === "fulfilled" ? r.value : {error: r.reason.message};
-  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), c=val(collector), ing=val(ingest), ws=val(websocket), cacheStatus=val(cache), feed=val(decisionFeed);
+  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), c=val(collector), ing=val(ingest), ws=val(websocket), cacheStatus=val(cache), feed=val(decisionFeed), researchJob=val(afterMarketResearch);
   loadControls(au.config);
   document.getElementById("statusCards").innerHTML =
     pill("API", h.status === "ok" ? "ok" : "bad", h.status || h.error) + pill("Database", d.status === "ok" ? "ok" : "bad", d.status || d.error) +
@@ -722,6 +731,7 @@ async function refreshAll() {
     pill("Automation", au.running ? "ok" : "bad", au.running ? (au.market_open ? "running, market open" : "running") : "stopped") +
     pill("Auto Trader", a.running ? "ok" : "bad", a.running ? "running" : "stopped") +
     pill("Collector", c.running ? "ok" : "warn", c.running ? "running" : "stopped") + pill("Exit Monitor", m.running ? "ok" : "bad", m.running ? "running" : "stopped") +
+    pill("Research Job", researchJob.running ? "warn" : (researchJob.enabled ? "ok" : "warn"), researchJob.running ? "running" : (researchJob.last_run_date ? `last ${researchJob.last_run_date}` : researchJob.next_action || "idle")) +
     pill("Data Cache", cacheStatus.status === "ok" ? "ok" : "warn", cacheStatus.status || cacheStatus.error || "check");
   renderReady(h, d, k, au, a, m, c, ws, r, l, t);
   renderActiveTrade(firstOpenTrade(t.trades || []));
@@ -730,8 +740,8 @@ async function refreshAll() {
   document.getElementById("metrics").innerHTML =
     metric("Last scan", a.last_scan_at || "-") + metric("Latest found", a.latest_count || 0) + metric("Executions", a.execution_count || 0) +
     metric("Open", p.open || 0) + metric("Closed", p.closed || 0) + metric("Win rate", p.closed ? `${Math.round((p.wins || 0) / p.closed * 100)}%` : "0%") +
-    metric("P&L", p.pnl || 0) + metric("Risk", r.passed === false ? "Blocked" : "Allowed");
-  document.getElementById("activityJson").textContent = JSON.stringify({automation:au, auto_trader:a, collector:c, ingestion:ing, monitor:m, performance:p, risk:r, websocket:ws, cache:cacheStatus, decision_feed:feed}, null, 2);
+    metric("P&L", p.pnl || 0) + metric("Risk", r.passed === false ? "Blocked" : "Allowed") + metric("Research", researchJob.last_run_date || researchJob.next_action || "-");
+  document.getElementById("activityJson").textContent = JSON.stringify({automation:au, auto_trader:a, collector:c, ingestion:ing, monitor:m, performance:p, risk:r, websocket:ws, cache:cacheStatus, after_market_research:researchJob, decision_feed:feed}, null, 2);
   table(document.getElementById("latestTable"), l.opportunities || [], ["symbol","action","tradingsymbol","entry_price","stop_loss","target_1","quantity","score"]);
   table(document.getElementById("journalTable"), j.opportunities || [], ["id","created_at","action","tradingsymbol","entry_price","stop_loss","target_1","score","status","outcome","pnl"]);
   document.getElementById("failureJson").textContent = JSON.stringify(f, null, 2);
@@ -1270,6 +1280,17 @@ def get_research_settings() -> dict[str, object]:
             "charges_pct": settings.backtest_charges_pct,
             "walk_forward_train_pct": settings.backtest_walk_forward_train_pct,
         },
+        "after_market_research_job": {
+            "enabled": settings.enable_after_market_research_job,
+            "run_time": settings.after_market_research_time,
+            "symbol": settings.after_market_research_symbol,
+            "timeframe": settings.after_market_research_timeframe,
+            "direction": settings.after_market_research_direction,
+            "horizon_candles": settings.after_market_research_horizon_candles,
+            "limit": settings.after_market_research_limit,
+            "decision_mode": settings.after_market_research_decision_mode,
+            "note": "Runs after market close and never inside live scanner decision flow.",
+        },
         "strategy_edge_guard": {
             "enabled": settings.enable_strategy_edge_guard,
             "min_trades": settings.min_strategy_trades,
@@ -1485,6 +1506,35 @@ def get_daily_banknifty_summary(date: str | None = None) -> dict[str, object]:
 
 
 @app.get(
+    "/research/after-market/status",
+    tags=["10 Research"],
+    summary="Get after-market research job status",
+    description="Shows the scheduled after-market evidence job status. This job does not run inside live scanning.",
+)
+def get_after_market_research_status() -> dict[str, object]:
+    return after_market_research_service.status()
+
+
+@app.post(
+    "/research/after-market/run",
+    tags=["10 Research"],
+    summary="Run after-market research job once",
+    description=(
+        "Runs the after-market evidence job manually. By default it only runs after market close; pass "
+        "`force=true` only when you deliberately want a manual research refresh."
+    ),
+)
+def run_after_market_research(
+    payload: dict[str, object] | None = Body(
+        default=None,
+        examples=[{"force": False}],
+    )
+) -> dict[str, object]:
+    payload = payload or {}
+    return after_market_research_service.run_once(trigger="manual", force=bool(payload.get("force", False)))
+
+
+@app.get(
     "/research/trade-journal",
     tags=["10 Research"],
     summary="Unified opportunity, rejection, and trade timeline",
@@ -1668,6 +1718,7 @@ def run_option_premium_backtest(
                 "symbol": "NIFTY",
                 "timeframe": "5minute",
                 "direction": "BOTH",
+                "decision_mode": "scanner_parity",
                 "horizon_candles": 12,
                 "limit": 3000,
             }
@@ -1681,6 +1732,7 @@ def run_option_premium_backtest(
             direction=str(payload.get("direction") or "BOTH"),
             horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
             limit=int(payload.get("limit") or 3000),
+            decision_mode=str(payload.get("decision_mode") or "scanner_parity"),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1730,6 +1782,7 @@ def run_walk_forward_validation(
                 "symbol": "NIFTY",
                 "timeframe": "5minute",
                 "direction": "BOTH",
+                "decision_mode": "scanner_parity",
                 "horizon_candles": 12,
                 "limit": 3000,
             }
@@ -1743,6 +1796,7 @@ def run_walk_forward_validation(
             direction=str(payload.get("direction") or "BOTH"),
             horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
             limit=int(payload.get("limit") or 3000),
+            decision_mode=str(payload.get("decision_mode") or "scanner_parity"),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

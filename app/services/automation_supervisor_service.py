@@ -26,6 +26,7 @@ class AutomationSupervisorService:
         outcome_service: OpportunityOutcomeService,
         risk_management_service: RiskManagementService,
         notification_service: NotificationService | None = None,
+        after_market_research_service: Any | None = None,
     ) -> None:
         self.data_ingestion_service = data_ingestion_service
         self.snapshot_collector_service = snapshot_collector_service
@@ -33,6 +34,7 @@ class AutomationSupervisorService:
         self.outcome_service = outcome_service
         self.risk_management_service = risk_management_service
         self.notification_service = notification_service or NotificationService()
+        self.after_market_research_service = after_market_research_service
         self.task: asyncio.Task[None] | None = None
         self.running = False
         self.config: dict[str, Any] = {}
@@ -85,6 +87,7 @@ class AutomationSupervisorService:
                 "auto_trader": self.auto_trader_service.status(),
                 "outcome_monitor": self.outcome_service.status(),
                 "risk": self.risk_management_service.evaluate_entry(),
+                "after_market_research": self.after_market_research_service.status() if self.after_market_research_service else {"enabled": False},
             },
         }
 
@@ -104,6 +107,7 @@ class AutomationSupervisorService:
                 actions.extend(self._ensure_intraday_services())
             else:
                 self._evaluate_open_once(actions)
+                self._run_after_market_research_if_due(now, actions)
                 actions.append({"action": "market_closed", "status": "ok", "message": "intraday services remain stopped unless manually started"})
             self.last_actions.extend(actions)
             return {"status": "ok", "market_open": self._market_is_open(now), "actions": actions, "automation": self.status()}
@@ -184,6 +188,16 @@ class AutomationSupervisorService:
             actions.append({"action": "evaluate_open_opportunities", "status": "ok", "result": result})
         except Exception as exc:
             actions.append({"action": "evaluate_open_opportunities", "status": "error", "message": str(exc)})
+
+    def _run_after_market_research_if_due(self, now: datetime, actions: list[dict[str, Any]]) -> None:
+        if self.after_market_research_service is None:
+            return
+        try:
+            result = self.after_market_research_service.maybe_run_after_market(now)
+            if result.get("status") != "idle":
+                actions.append(result)
+        except Exception as exc:
+            actions.append({"action": "after_market_research", "status": "error", "message": str(exc)})
 
     async def _stop_intraday_services(self) -> None:
         if self.auto_trader_service.running:
