@@ -9,6 +9,7 @@ from app.services.indicator_scoring_service import IndicatorScoringService
 from app.services.armed_entry_tracker_service import ArmedEntryTrackerService
 from app.services.banknifty_intelligence_service import BankNiftyIntelligenceService
 from app.services.banknifty_option_prewarm_service import BankNiftyOptionPrewarmService
+from app.services.banknifty_regime_filter_service import BankNiftyRegimeFilterService
 from app.services.day_type_service import DayTypeService
 from app.services.data_freshness_service import DataFreshnessService
 from app.services.decision_engine_service import DecisionEngineService
@@ -23,6 +24,7 @@ from app.services.option_quality_service import OptionQualityService
 from app.services.outcome_learning_service import OutcomeLearningService
 from app.services.price_action_service import PriceActionService
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
+from app.services.setup_family_classifier_service import SetupFamilyClassifierService
 from app.services.signal_service import SignalService
 from app.services.strategy_edge_service import StrategyEdgeService
 from app.services.time_bucket_edge_service import TimeBucketEdgeService
@@ -61,7 +63,9 @@ class ScannerService:
         banknifty_option_prewarm_service: BankNiftyOptionPrewarmService | None = None,
         entry_timing_service: EntryTimingService | None = None,
         volatility_edge_service: VolatilityEdgeService | None = None,
+        banknifty_regime_filter_service: BankNiftyRegimeFilterService | None = None,
         armed_entry_tracker: ArmedEntryTrackerService | None = None,
+        setup_family_classifier: SetupFamilyClassifierService | None = None,
     ) -> None:
         self.signal_service = signal_service or SignalService()
         self.scoring_service = scoring_service or IndicatorScoringService()
@@ -82,7 +86,9 @@ class ScannerService:
         self.banknifty_option_prewarm_service = banknifty_option_prewarm_service
         self.entry_timing_service = entry_timing_service or EntryTimingService()
         self.volatility_edge_service = volatility_edge_service or VolatilityEdgeService()
+        self.banknifty_regime_filter_service = banknifty_regime_filter_service or BankNiftyRegimeFilterService()
         self.armed_entry_tracker = armed_entry_tracker
+        self.setup_family_classifier = setup_family_classifier or SetupFamilyClassifierService()
 
         # Market data is independent from live order placement. When Kite data is
         # requested, fail closed instead of silently returning mock opportunities.
@@ -255,6 +261,14 @@ class ScannerService:
                     "banknifty_option_prewarm": prewarm_eval,
                     "kite_calls": self._feed_call_counts(),
                 }
+                factor_scores = self._with_setup_family(
+                    factor_scores=factor_scores,
+                    symbol=symbol,
+                    trend=trend,
+                    side=side,
+                    snapshot=snapshot,
+                    contract=contract,
+                )
                 factor_scores = self._with_strategy_metadata(factor_scores, order_mode)
                 self._log_decision(
                     symbol=symbol,
@@ -338,6 +352,18 @@ class ScannerService:
                 side=side,
                 expected_move_check=banknifty_details.get("expectedMoveCheck") if isinstance(banknifty_details, dict) else None,
             )
+            banknifty_regime_eval = self.banknifty_regime_filter_service.evaluate(
+                symbol=symbol,
+                trend=trend,
+                snapshot=snapshot,
+                contract=contract,
+                prices=prices,
+                premium_eval=premium_eval,
+                day_type_eval=day_type_eval,
+                time_bucket_eval=time_bucket_eval,
+                banknifty_eval=banknifty_eval,
+                volatility_eval=volatility_eval,
+            )
             entry_timing_eval = self.entry_timing_service.evaluate(
                 contract=contract,
                 prices=prices,
@@ -372,6 +398,7 @@ class ScannerService:
                 "time_bucket_edge": time_bucket_eval,
                 "strategy_edge": edge_eval,
                 "banknifty_intelligence": banknifty_eval,
+                "banknifty_regime_filter": banknifty_regime_eval,
                 "volatility_edge": volatility_eval,
                 "liquidity": liquidity_score,
                 "contract": self._contract_payload(contract),
@@ -384,6 +411,14 @@ class ScannerService:
             }
             banknifty_fields = self._banknifty_response_fields(banknifty_eval)
             factor_scores.update(banknifty_fields)
+            factor_scores = self._with_setup_family(
+                factor_scores=factor_scores,
+                symbol=symbol,
+                trend=trend,
+                side=side,
+                snapshot=snapshot,
+                contract=contract,
+            )
             outcome_learning_eval = self.outcome_learning_service.evaluate(
                 symbol=symbol,
                 action=self._action(side, trend),
@@ -415,6 +450,7 @@ class ScannerService:
                 banknifty_eval=banknifty_eval,
                 outcome_learning_eval=outcome_learning_eval,
                 volatility_eval=volatility_eval,
+                banknifty_regime_eval=banknifty_regime_eval,
                 enforce_budget=enforce_budget,
             )
             if not freshness_eval.get("passed", False):
@@ -861,6 +897,7 @@ class ScannerService:
         banknifty_eval: dict[str, object],
         outcome_learning_eval: dict[str, object],
         volatility_eval: dict[str, object] | None = None,
+        banknifty_regime_eval: dict[str, object] | None = None,
         enforce_budget: bool = False,
     ) -> list[str]:
         failures = self.trade_setup_service.risk_checks(combined_score, contract, prices["entry_price"], side, enforce_budget=enforce_budget)
@@ -887,6 +924,8 @@ class ScannerService:
             failures.extend(str(reason) for reason in volatility_eval.get("reasons", ["volatility edge guard failed"]))
         if settings.enable_banknifty_intelligence and not banknifty_eval.get("passed", False):
             failures.extend(str(reason) for reason in banknifty_eval.get("hard_reasons", ["Bank Nifty intelligence no-trade filter failed"]))
+        if settings.enable_banknifty_regime_filter and banknifty_regime_eval and not banknifty_regime_eval.get("passed", False):
+            failures.extend(str(reason) for reason in banknifty_regime_eval.get("hard_reasons", ["Bank Nifty option-buying regime filter failed"]))
         if settings.enable_outcome_learning_guard and not outcome_learning_eval.get("passed", False):
             failures.extend(str(reason) for reason in outcome_learning_eval.get("reasons", ["outcome learning guard failed"]))
         return list(dict.fromkeys(failures))
@@ -1068,11 +1107,15 @@ class ScannerService:
         if "strategy_metadata" in factor_scores:
             return factor_scores
         enriched = dict(factor_scores)
+        setup_family = enriched.get("setup_family") if isinstance(enriched.get("setup_family"), dict) else {}
         enriched["strategy_metadata"] = {
             "strategy_name": settings.strategy_name,
             "strategy_version": settings.strategy_version,
             "order_mode": order_mode,
             "generated_at": self._decision_timestamp(),
+            "setup_type": enriched.get("setup_type"),
+            "setup_family_name": setup_family.get("name") if isinstance(setup_family, dict) else enriched.get("setup_family_name"),
+            "setup_family_group": setup_family.get("group") if isinstance(setup_family, dict) else enriched.get("setup_family_group"),
             "hard_gate_thresholds": {
                 "min_signal_score": settings.min_signal_score,
                 "min_option_quality_score": settings.min_option_quality_score,
@@ -1125,6 +1168,33 @@ class ScannerService:
                 "enable_banknifty_option_prewarm": settings.enable_banknifty_option_prewarm,
             },
         }
+        return enriched
+
+    def _with_setup_family(
+        self,
+        *,
+        factor_scores: dict[str, object],
+        symbol: str,
+        trend: str,
+        side: str,
+        snapshot: dict[str, object] | None,
+        contract: OptionContract | None = None,
+    ) -> dict[str, object]:
+        if "setup_family" in factor_scores:
+            return factor_scores
+        enriched = dict(factor_scores)
+        family = self.setup_family_classifier.classify(
+            symbol=symbol,
+            trend=trend,
+            side=side,
+            snapshot=snapshot,
+            factor_scores=enriched,
+            contract=contract,
+        )
+        enriched["setup_family"] = family
+        enriched["setup_family_name"] = family.get("name")
+        enriched["setup_family_group"] = family.get("group")
+        enriched["setup_type"] = self._setup_type(side, trend) if str(trend).lower() in {"bullish", "bearish"} else "unknown_directional_setup"
         return enriched
 
     def _nested_value(self, value: object, *keys: str) -> object:
@@ -1225,6 +1295,8 @@ class ScannerService:
         volatility_details = volatility.get("details", {}) if isinstance(volatility.get("details"), dict) else {}
         armed = factor_scores.get("armed_entry", {}) if factor_scores else {}
         armed = armed if isinstance(armed, dict) else {}
+        setup_family = factor_scores.get("setup_family", {}) if factor_scores else {}
+        setup_family = setup_family if isinstance(setup_family, dict) else {}
         return {
             "symbol": symbol,
             "score": score,
@@ -1261,6 +1333,9 @@ class ScannerService:
             "paper_event_entry_enabled": armed.get("paper_event_entry_enabled", settings.enable_event_driven_paper_entry),
             "live_event_entry_blocked": armed.get("live_event_entry_blocked", False),
             "reason": armed.get("latest_reason") or armed.get("reason") or timing.get("entry_timing_reason"),
+            "setup_family": setup_family.get("name"),
+            "setup_family_group": setup_family.get("group"),
+            "setup_family_reasons": setup_family.get("reasons", []),
             "volatility_edge_score": volatility.get("score"),
             "volatility_edge_classification": volatility.get("classification"),
             "volatility_edge_for_option_buying": volatility.get("volatility_edge_for_option_buying"),

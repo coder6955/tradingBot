@@ -13,6 +13,7 @@ from app.services.day_type_service import DayTypeService
 from app.services.greeks_service import GreeksService
 from app.services.indicator_service import compute_ema, compute_macd, compute_rsi
 from app.services.market_regime_service import MarketRegimeService
+from app.services.execution_realism_service import ExecutionRealismService
 from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
 from app.services.option_quality_service import OptionQualityService
 from app.services.trade_setup_service import OptionContract, TradeSetupService
@@ -49,6 +50,20 @@ class OptionBacktestTrade:
     spread_impact_pct: float
     bars_held: int
     reason: str
+    intended_entry_price: float | None = None
+    intended_exit_price: float | None = None
+    execution_price_impact_pct: float = 0.0
+    execution_realism: dict[str, Any] | None = None
+    highest_price_during_trade: float | None = None
+    lowest_price_during_trade: float | None = None
+    mfe_points: float | None = None
+    mfe_percent: float | None = None
+    mae_points: float | None = None
+    mae_percent: float | None = None
+    time_to_mfe: float | None = None
+    time_to_mae: float | None = None
+    mfe_recorded_at: str | None = None
+    mae_recorded_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -968,23 +983,89 @@ class BacktestService:
         target = float(signal.target_1 or 0.0)
         if entry_raw <= 0 or stop <= 0 or target <= entry_raw:
             return None
-        entry_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
-        exit_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
-        entry = entry_raw * (1 + entry_friction_pct / 100)
-        exit_price = float(series[min(option_idx + horizon, len(series) - 1)].close_price) * (1 - exit_friction_pct / 100)
+        realism = ExecutionRealismService()
+        expiry = self._parse_expiry_from_symbol(tradingsymbol, idx_timestamp.isoformat())
+        if settings.enable_execution_realism:
+            entry_fill = realism.entry_fill(
+                intended_price=entry_raw,
+                side="BUY",
+                timestamp=idx_timestamp,
+                expiry=expiry.date() if expiry else None,
+            )
+            entry = entry_fill.fill_price
+        else:
+            entry_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
+            entry_fill = None
+            entry = entry_raw * (1 + entry_friction_pct / 100)
+        entry_timestamp = self._candle_timestamp(series[option_idx], idx_timestamp)
+        high_water = entry
+        low_water = entry
+        mfe_timestamp = entry_timestamp
+        mae_timestamp = entry_timestamp
+        final_candle = series[min(option_idx + horizon, len(series) - 1)]
+        intended_exit = float(final_candle.close_price)
+        if settings.enable_execution_realism:
+            exit_fill = realism.exit_fill(
+                intended_price=intended_exit,
+                side="BUY",
+                outcome="time_exit",
+                candle=final_candle,
+                timestamp=final_candle.timestamp if isinstance(final_candle.timestamp, datetime) else idx_timestamp,
+                expiry=expiry.date() if expiry else None,
+            )
+            exit_price = exit_fill.fill_price
+        else:
+            exit_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
+            exit_fill = None
+            exit_price = intended_exit * (1 - exit_friction_pct / 100)
         outcome = "expired"
         bars_held = min(horizon, len(series) - option_idx - 1)
         for offset in range(1, min(horizon, len(series) - option_idx - 1) + 1):
             candle = series[option_idx + offset]
             low = float(candle.low_price)
             high = float(candle.high_price)
+            high_water, low_water, mfe_timestamp, mae_timestamp = self._observe_option_excursion(
+                entry=entry,
+                high_water=high_water,
+                low_water=low_water,
+                mfe_timestamp=mfe_timestamp,
+                mae_timestamp=mae_timestamp,
+                candle=candle,
+                fallback_timestamp=idx_timestamp,
+            )
             if low <= stop:
-                exit_price = stop * (1 - exit_friction_pct / 100)
+                intended_exit = stop
+                if settings.enable_execution_realism:
+                    exit_fill = realism.exit_fill(
+                        intended_price=stop,
+                        side="BUY",
+                        outcome="stop_loss",
+                        candle=candle,
+                        timestamp=candle.timestamp if isinstance(candle.timestamp, datetime) else idx_timestamp,
+                        expiry=expiry.date() if expiry else None,
+                    )
+                    exit_price = exit_fill.fill_price
+                else:
+                    exit_price = stop * (1 - exit_friction_pct / 100)
                 outcome = "stop_loss"
                 bars_held = offset
                 break
             if high >= target:
-                exit_price = target * (1 - exit_friction_pct / 100)
+                intended_exit = target
+                if settings.enable_execution_realism:
+                    exit_fill = realism.exit_fill(
+                        intended_price=target,
+                        side="BUY",
+                        outcome="target",
+                        candle=candle,
+                        timestamp=candle.timestamp if isinstance(candle.timestamp, datetime) else idx_timestamp,
+                        expiry=expiry.date() if expiry else None,
+                    )
+                    if not exit_fill.filled:
+                        continue
+                    exit_price = exit_fill.fill_price
+                else:
+                    exit_price = target * (1 - exit_friction_pct / 100)
                 outcome = "target"
                 bars_held = offset
                 break
@@ -1007,6 +1088,21 @@ class BacktestService:
             spread_impact_pct=round(settings.paper_spread_impact_pct_per_side * 2, 3),
             bars_held=bars_held,
             reason=reason,
+            intended_entry_price=round(entry_raw, 2),
+            intended_exit_price=round(intended_exit, 2),
+            execution_price_impact_pct=round(((entry - entry_raw) + (intended_exit - exit_price)) / max(entry_raw, 0.01) * 100, 3),
+            execution_realism={
+                "entry_fill": entry_fill.to_dict() if entry_fill else None,
+                "exit_fill": exit_fill.to_dict() if exit_fill else None,
+            },
+            **self._excursion_payload(
+                entry=entry,
+                high_water=high_water,
+                low_water=low_water,
+                entry_timestamp=entry_timestamp,
+                mfe_timestamp=mfe_timestamp,
+                mae_timestamp=mae_timestamp,
+            ),
         )
 
     def _load_option_snapshots(self, option_candles: dict[str, list[Candle]]) -> dict[str, list[OptionQuoteSnapshot]]:
@@ -1295,12 +1391,43 @@ class BacktestService:
         entry_raw = float(series[option_idx].close_price)
         if entry_raw <= 0:
             return None
-        entry_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
-        exit_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
-        entry = entry_raw * (1 + entry_friction_pct / 100)
+        realism = ExecutionRealismService()
+        expiry = self._parse_expiry_from_symbol(selected_symbol, timestamp.isoformat(sep=" ") if isinstance(timestamp, datetime) else str(timestamp))
+        if settings.enable_execution_realism:
+            entry_fill = realism.entry_fill(
+                intended_price=entry_raw,
+                side="BUY",
+                timestamp=timestamp if isinstance(timestamp, datetime) else None,
+                expiry=expiry.date() if expiry else None,
+            )
+            entry = entry_fill.fill_price
+        else:
+            entry_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
+            entry_fill = None
+            entry = entry_raw * (1 + entry_friction_pct / 100)
+        entry_timestamp = self._candle_timestamp(series[option_idx], timestamp if isinstance(timestamp, datetime) else None)
+        high_water = entry
+        low_water = entry
+        mfe_timestamp = entry_timestamp
+        mae_timestamp = entry_timestamp
         stop = entry * (1 - settings.backtest_option_stop_loss_pct / 100)
         target = entry * (1 + settings.backtest_option_target_pct / 100)
-        exit_price = float(series[min(option_idx + horizon, len(series) - 1)].close_price) * (1 - exit_friction_pct / 100)
+        final_candle = series[min(option_idx + horizon, len(series) - 1)]
+        intended_exit = float(final_candle.close_price)
+        if settings.enable_execution_realism:
+            exit_fill = realism.exit_fill(
+                intended_price=intended_exit,
+                side="BUY",
+                outcome="time_exit",
+                candle=final_candle,
+                timestamp=final_candle.timestamp if isinstance(final_candle.timestamp, datetime) else None,
+                expiry=expiry.date() if expiry else None,
+            )
+            exit_price = exit_fill.fill_price
+        else:
+            exit_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
+            exit_fill = None
+            exit_price = intended_exit * (1 - exit_friction_pct / 100)
         outcome = "expired"
         bars_held = min(horizon, len(series) - option_idx - 1)
 
@@ -1308,13 +1435,48 @@ class BacktestService:
             candle = series[option_idx + offset]
             low = float(candle.low_price)
             high = float(candle.high_price)
+            high_water, low_water, mfe_timestamp, mae_timestamp = self._observe_option_excursion(
+                entry=entry,
+                high_water=high_water,
+                low_water=low_water,
+                mfe_timestamp=mfe_timestamp,
+                mae_timestamp=mae_timestamp,
+                candle=candle,
+                fallback_timestamp=timestamp if isinstance(timestamp, datetime) else None,
+            )
             if low <= stop:
-                exit_price = stop * (1 - exit_friction_pct / 100)
+                intended_exit = stop
+                if settings.enable_execution_realism:
+                    exit_fill = realism.exit_fill(
+                        intended_price=stop,
+                        side="BUY",
+                        outcome="stop_loss",
+                        candle=candle,
+                        timestamp=candle.timestamp if isinstance(candle.timestamp, datetime) else None,
+                        expiry=expiry.date() if expiry else None,
+                    )
+                    exit_price = exit_fill.fill_price
+                else:
+                    exit_price = stop * (1 - exit_friction_pct / 100)
                 outcome = "stop_loss"
                 bars_held = offset
                 break
             if high >= target:
-                exit_price = target * (1 - exit_friction_pct / 100)
+                intended_exit = target
+                if settings.enable_execution_realism:
+                    exit_fill = realism.exit_fill(
+                        intended_price=target,
+                        side="BUY",
+                        outcome="target",
+                        candle=candle,
+                        timestamp=candle.timestamp if isinstance(candle.timestamp, datetime) else None,
+                        expiry=expiry.date() if expiry else None,
+                    )
+                    if not exit_fill.filled:
+                        continue
+                    exit_price = exit_fill.fill_price
+                else:
+                    exit_price = target * (1 - exit_friction_pct / 100)
                 outcome = "target"
                 bars_held = offset
                 break
@@ -1337,7 +1499,85 @@ class BacktestService:
             spread_impact_pct=round(settings.paper_spread_impact_pct_per_side * 2, 3),
             bars_held=bars_held,
             reason=reason,
+            intended_entry_price=round(entry_raw, 2),
+            intended_exit_price=round(intended_exit, 2),
+            execution_price_impact_pct=round(((entry - entry_raw) + (intended_exit - exit_price)) / max(entry_raw, 0.01) * 100, 3),
+            execution_realism={
+                "entry_fill": entry_fill.to_dict() if entry_fill else None,
+                "exit_fill": exit_fill.to_dict() if exit_fill else None,
+            },
+            **self._excursion_payload(
+                entry=entry,
+                high_water=high_water,
+                low_water=low_water,
+                entry_timestamp=entry_timestamp,
+                mfe_timestamp=mfe_timestamp,
+                mae_timestamp=mae_timestamp,
+            ),
         )
+
+    def _observe_option_excursion(
+        self,
+        *,
+        entry: float,
+        high_water: float,
+        low_water: float,
+        mfe_timestamp: datetime,
+        mae_timestamp: datetime,
+        candle: Candle,
+        fallback_timestamp: datetime | None,
+    ) -> tuple[float, float, datetime, datetime]:
+        try:
+            high = float(candle.high_price)
+            low = float(candle.low_price)
+        except (TypeError, ValueError):
+            return high_water, low_water, mfe_timestamp, mae_timestamp
+        timestamp = self._candle_timestamp(candle, fallback_timestamp)
+        if high > 0 and high > high_water:
+            high_water = high
+            mfe_timestamp = timestamp
+        if low > 0 and low < low_water:
+            low_water = low
+            mae_timestamp = timestamp
+        return high_water, low_water, mfe_timestamp, mae_timestamp
+
+    def _excursion_payload(
+        self,
+        *,
+        entry: float,
+        high_water: float,
+        low_water: float,
+        entry_timestamp: datetime,
+        mfe_timestamp: datetime,
+        mae_timestamp: datetime,
+    ) -> dict[str, Any]:
+        if entry <= 0:
+            return {}
+        mfe_points = max(0.0, high_water - entry)
+        mae_points = max(0.0, entry - low_water)
+        return {
+            "highest_price_during_trade": round(high_water, 4),
+            "lowest_price_during_trade": round(low_water, 4),
+            "mfe_points": round(mfe_points, 4),
+            "mfe_percent": round((mfe_points / entry) * 100, 4),
+            "mae_points": round(mae_points, 4),
+            "mae_percent": round((mae_points / entry) * 100, 4),
+            "time_to_mfe": round(max(0.0, (mfe_timestamp - entry_timestamp).total_seconds()), 3),
+            "time_to_mae": round(max(0.0, (mae_timestamp - entry_timestamp).total_seconds()), 3),
+            "mfe_recorded_at": mfe_timestamp.isoformat(sep=" "),
+            "mae_recorded_at": mae_timestamp.isoformat(sep=" "),
+        }
+
+    def _candle_timestamp(self, candle: Candle, fallback: datetime | None) -> datetime:
+        value = getattr(candle, "timestamp", None)
+        if isinstance(value, datetime):
+            return value
+        if value is not None:
+            try:
+                return datetime.fromisoformat(str(value))
+            except ValueError:
+                pass
+        return fallback or datetime.now()
 
     def _summarize(self, trades: list[BacktestTrade]) -> dict[str, Any]:
         if not trades:
@@ -1395,6 +1635,11 @@ class BacktestService:
                 "avg_time_in_trade_minutes": 0.0,
                 "gross_pnl_pct": 0.0,
                 "net_pnl_pct": 0.0,
+                "execution_realism_enabled": settings.enable_execution_realism,
+                "avg_execution_price_impact_pct": 0.0,
+                "avg_mfe_percent": 0.0,
+                "avg_mae_percent": 0.0,
+                "avg_captured_mfe_percent": 0.0,
             }
         wins = [trade for trade in trades if trade.pnl_pct > 0]
         losses = [trade for trade in trades if trade.pnl_pct < 0]
@@ -1404,6 +1649,11 @@ class BacktestService:
         raw_gross_loss = abs(sum(trade.gross_pnl_pct for trade in trades if trade.gross_pnl_pct < 0))
         avg_bars = sum(trade.bars_held for trade in trades) / len(trades)
         avg_minutes = avg_bars * self._timeframe_minutes(timeframe)
+        captured = [
+            (max(0.0, float(trade.option_exit or 0.0) - float(trade.option_entry or 0.0)) / float(trade.mfe_points or 0.0)) * 100
+            for trade in trades
+            if float(trade.mfe_points or 0.0) > 0 and float(trade.option_entry or 0.0) > 0
+        ]
         return {
             "trades": len(trades),
             "wins": len(wins),
@@ -1425,6 +1675,12 @@ class BacktestService:
             "avg_time_in_trade_minutes": round(avg_minutes, 2),
             "gross_pnl_pct": round(sum(trade.gross_pnl_pct for trade in trades), 3),
             "net_pnl_pct": round(sum(trade.pnl_pct for trade in trades), 3),
+            "execution_realism_enabled": settings.enable_execution_realism,
+            "avg_execution_price_impact_pct": round(sum(float(trade.execution_price_impact_pct or 0.0) for trade in trades) / len(trades), 3),
+            "total_execution_price_impact_pct": round(sum(float(trade.execution_price_impact_pct or 0.0) for trade in trades), 3),
+            "avg_mfe_percent": round(sum(float(trade.mfe_percent or 0.0) for trade in trades) / len(trades), 3),
+            "avg_mae_percent": round(sum(float(trade.mae_percent or 0.0) for trade in trades) / len(trades), 3),
+            "avg_captured_mfe_percent": round(sum(captured) / len(captured), 3) if captured else 0.0,
         }
 
     def _ablation_impact(self, baseline: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:

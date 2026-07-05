@@ -4,6 +4,7 @@ import json
 from dataclasses import asdict
 from datetime import datetime, time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func
 
@@ -35,6 +36,19 @@ class TradeRepository:
     ) -> TradeRecord:
         session = get_session()
         try:
+            response = order_response or asdict(signal)
+            if isinstance(response, dict):
+                response = dict(response)
+                response.setdefault("signal_factor_scores", signal.factor_scores)
+                response.setdefault("setup_type", signal.setup_type)
+                family = signal.factor_scores.get("setup_family") if isinstance(signal.factor_scores, dict) else None
+                if isinstance(family, dict):
+                    response.setdefault("setup_family", family)
+                    response.setdefault("setup_family_name", family.get("name"))
+                    response.setdefault("setup_family_group", family.get("group"))
+            paper_entry_price = float(response.get("entry_price") or signal.entry_price or 0.0) if isinstance(response, dict) else float(signal.entry_price or 0.0)
+            initial_entry_price = paper_entry_price if mode == "paper" else float(signal.entry_price or 0.0)
+            now = ist_now_naive()
             record = TradeRecord(
                 opportunity_id=opportunity_id,
                 symbol=signal.symbol,
@@ -50,13 +64,23 @@ class TradeRepository:
                 placed_quantity=placed_quantity,
                 filled_quantity=placed_quantity if mode == "paper" else 0,
                 remaining_quantity=placed_quantity,
-                entry_price=signal.entry_price,
-                average_price=signal.entry_price if mode == "paper" else None,
+                entry_price=paper_entry_price if mode == "paper" else signal.entry_price,
+                average_price=paper_entry_price if mode == "paper" else None,
+                highest_price_during_trade=initial_entry_price if initial_entry_price > 0 else None,
+                lowest_price_during_trade=initial_entry_price if initial_entry_price > 0 else None,
+                mfe_points=0.0 if initial_entry_price > 0 else None,
+                mfe_percent=0.0 if initial_entry_price > 0 else None,
+                mae_points=0.0 if initial_entry_price > 0 else None,
+                mae_percent=0.0 if initial_entry_price > 0 else None,
+                time_to_mfe=0.0 if initial_entry_price > 0 else None,
+                time_to_mae=0.0 if initial_entry_price > 0 else None,
+                mfe_recorded_at=now if initial_entry_price > 0 else None,
+                mae_recorded_at=now if initial_entry_price > 0 else None,
                 stop_loss=signal.stop_loss,
                 target_1=signal.target_1,
                 target_2=signal.target_2,
                 target_3=signal.target_3,
-                order_response_json=json.dumps(order_response or asdict(signal), default=str),
+                order_response_json=json.dumps(response, default=str),
                 notes=notes,
             )
             session.add(record)
@@ -80,6 +104,27 @@ class TradeRepository:
         session = get_session()
         try:
             return session.get(TradeRecord, trade_id)
+        finally:
+            session.close()
+
+    def update_mfe_mae(
+        self,
+        trade_id: int,
+        *,
+        price: float,
+        price_timestamp: datetime | None = None,
+    ) -> TradeRecord | None:
+        session = get_session()
+        try:
+            record = session.get(TradeRecord, trade_id)
+            if record is None:
+                raise ValueError(f"trade {trade_id} was not found")
+            if not self._apply_mfe_mae(record, price=price, price_timestamp=price_timestamp):
+                return record
+            record.updated_at = ist_now_naive()
+            session.commit()
+            session.refresh(record)
+            return record
         finally:
             session.close()
 
@@ -269,6 +314,7 @@ class TradeRepository:
             record.exit_order_id = exit_order_id or record.exit_order_id
             record.exit_order_status = exit_order_status or record.exit_order_status
             record.exit_confirmed_at = ist_now_naive()
+            self._apply_mfe_mae(record, price=exit_price, price_timestamp=price_timestamp)
             if exit_order_response is not None:
                 record.exit_order_response_json = json.dumps(exit_order_response, default=str)
             record.updated_at = ist_now_naive()
@@ -280,6 +326,8 @@ class TradeRepository:
                     exit_price=float(exit_price),
                     quantity=int(qty or 0),
                     side=str(record.side),
+                    include_slippage=not (settings.enable_execution_realism and str(record.mode).lower() == "paper"),
+                    include_spread=not (settings.enable_execution_realism and str(record.mode).lower() == "paper"),
                 )
                 record.gross_pnl = pnl.gross_pnl
                 record.net_pnl = pnl.net_pnl
@@ -312,6 +360,7 @@ class TradeRepository:
                 side=str(record.side),
             )
             existing.append({"outcome": outcome, "quantity": close_qty, "exit_price": exit_price, **pnl.to_dict()})
+            self._apply_mfe_mae(record, price=exit_price, price_timestamp=ist_now_naive())
             record.partial_exit_json = json.dumps(existing, default=str)
             record.remaining_quantity = remaining - close_qty
             record.gross_pnl = float(record.gross_pnl or 0.0) + pnl.gross_pnl
@@ -330,6 +379,81 @@ class TradeRepository:
             return record
         finally:
             session.close()
+
+    def _apply_mfe_mae(self, record: TradeRecord, *, price: float, price_timestamp: datetime | None = None) -> bool:
+        try:
+            observed_price = float(price)
+        except (TypeError, ValueError):
+            return False
+        if observed_price <= 0:
+            return False
+        entry = self._entry_for_excursion(record)
+        if entry <= 0:
+            return False
+        observed_at = self._normalize_timestamp(price_timestamp)
+        missing_metrics = (
+            record.highest_price_during_trade is None
+            or record.lowest_price_during_trade is None
+            or record.mfe_points is None
+            or record.mae_points is None
+            or record.mfe_percent is None
+            or record.mae_percent is None
+        )
+        high = float(record.highest_price_during_trade or entry)
+        low = float(record.lowest_price_during_trade or entry)
+        changed = False
+        if observed_price > high:
+            high = observed_price
+            record.highest_price_during_trade = round(high, 4)
+            record.mfe_recorded_at = observed_at
+            record.time_to_mfe = self._seconds_since_created(record, observed_at)
+            changed = True
+        elif record.highest_price_during_trade is None:
+            record.highest_price_during_trade = round(high, 4)
+            record.mfe_recorded_at = observed_at
+            record.time_to_mfe = self._seconds_since_created(record, observed_at)
+            changed = True
+        if observed_price < low:
+            low = observed_price
+            record.lowest_price_during_trade = round(low, 4)
+            record.mae_recorded_at = observed_at
+            record.time_to_mae = self._seconds_since_created(record, observed_at)
+            changed = True
+        elif record.lowest_price_during_trade is None:
+            record.lowest_price_during_trade = round(low, 4)
+            record.mae_recorded_at = observed_at
+            record.time_to_mae = self._seconds_since_created(record, observed_at)
+            changed = True
+
+        if str(record.side or "BUY").upper() == "SELL":
+            mfe_points = max(0.0, entry - low)
+            mae_points = max(0.0, high - entry)
+        else:
+            mfe_points = max(0.0, high - entry)
+            mae_points = max(0.0, entry - low)
+        record.mfe_points = round(mfe_points, 4)
+        record.mae_points = round(mae_points, 4)
+        record.mfe_percent = round((mfe_points / entry) * 100, 4)
+        record.mae_percent = round((mae_points / entry) * 100, 4)
+        return changed or missing_metrics
+
+    def _entry_for_excursion(self, record: TradeRecord) -> float:
+        try:
+            return float(record.average_price or record.entry_price or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _normalize_timestamp(self, value: datetime | None) -> datetime:
+        timestamp = value or ist_now_naive()
+        if timestamp.tzinfo is None:
+            return timestamp
+        return timestamp.astimezone(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+
+    def _seconds_since_created(self, record: TradeRecord, value: datetime) -> float:
+        created_at = record.created_at or value
+        if created_at.tzinfo is not None:
+            created_at = created_at.astimezone(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+        return round(max(0.0, (value - created_at).total_seconds()), 3)
 
     def today_trades(self) -> list[TradeRecord]:
         session = get_session()

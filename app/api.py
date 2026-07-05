@@ -521,6 +521,9 @@ def command_center_dashboard() -> HTMLResponse:
         <a class="linkbtn secondary" href="/research/settings" target="_blank">Research</a>
         <a class="linkbtn secondary" href="/research/outcome-learning" target="_blank">Learning</a>
         <a class="linkbtn secondary" href="/research/professional-insights" target="_blank">Insights</a>
+        <a class="linkbtn secondary" href="/research/research-engine" target="_blank">Research Engine</a>
+        <a class="linkbtn secondary" href="/research/threshold-validation" target="_blank">Thresholds</a>
+        <a class="linkbtn secondary" href="/research/execution-realism" target="_blank">Execution Realism</a>
         <a class="linkbtn secondary" href="/research/daily-review" target="_blank">Daily Review</a>
         <a class="linkbtn secondary" href="/research/after-market/status" target="_blank">After-Market</a>
         <a class="linkbtn secondary" href="/kite/websocket/status" target="_blank">WebSocket</a>
@@ -967,6 +970,16 @@ def trade_record_to_dict(record) -> dict[str, object]:
         "price_source": getattr(record, "price_source", None),
         "price_timestamp": format_ist(getattr(record, "price_timestamp", None)),
         "price_age_seconds": getattr(record, "price_age_seconds", None),
+        "highest_price_during_trade": getattr(record, "highest_price_during_trade", None),
+        "lowest_price_during_trade": getattr(record, "lowest_price_during_trade", None),
+        "mfe_points": getattr(record, "mfe_points", None),
+        "mfe_percent": getattr(record, "mfe_percent", None),
+        "mae_points": getattr(record, "mae_points", None),
+        "mae_percent": getattr(record, "mae_percent", None),
+        "time_to_mfe": getattr(record, "time_to_mfe", None),
+        "time_to_mae": getattr(record, "time_to_mae", None),
+        "mfe_recorded_at": format_ist(getattr(record, "mfe_recorded_at", None)),
+        "mae_recorded_at": format_ist(getattr(record, "mae_recorded_at", None)),
         "gross_pnl": getattr(record, "gross_pnl", None),
         "net_pnl": getattr(record, "net_pnl", None),
         "charges": getattr(record, "charges", None),
@@ -1313,6 +1326,15 @@ def get_research_settings() -> dict[str, object]:
             "min_outcome_learning_expectancy_pct": settings.min_outcome_learning_expectancy_pct,
             "min_outcome_learning_win_rate_pct": settings.min_outcome_learning_win_rate_pct,
             "outcome_learning_lookback": settings.outcome_learning_lookback,
+            "banknifty_regime_filter": {
+                "enabled": settings.enable_banknifty_regime_filter,
+                "min_score": settings.min_banknifty_regime_score,
+                "significant_gap_pct": settings.banknifty_significant_gap_pct,
+                "compression_day_range_pct": settings.banknifty_compression_day_range_pct,
+                "late_trade_cutoff_time": settings.banknifty_late_trade_cutoff_time,
+                "late_trade_min_premium_score": settings.banknifty_late_trade_min_premium_score,
+                "expiry_min_premium_score": settings.banknifty_expiry_min_premium_score,
+            },
         },
         "automation_learning_loop": {
             "intraday_candle_sync": settings.automation_intraday_candle_sync,
@@ -1347,6 +1369,17 @@ def get_research_settings() -> dict[str, object]:
                 "target1_pct": settings.partial_target1_pct,
                 "move_sl_to_cost": settings.partial_move_sl_to_cost,
                 "note": "disabled by default; only practical when quantity can be split by lot size",
+            },
+            "execution_realism": {
+                "enabled": settings.enable_execution_realism,
+                "entry_buy_slippage_pct": settings.realism_entry_buy_slippage_pct,
+                "exit_target_slippage_pct": settings.realism_exit_target_slippage_pct,
+                "exit_stop_overshoot_pct": settings.realism_exit_stop_overshoot_pct,
+                "no_fill_touch_buffer_pct": settings.realism_no_fill_touch_buffer_pct,
+                "first_15_min_extra_slippage_pct": settings.realism_first_15_min_extra_slippage_pct,
+                "expiry_day_extra_slippage_pct": settings.realism_expiry_day_extra_slippage_pct,
+                "high_iv_extra_slippage_pct": settings.realism_high_iv_extra_slippage_pct,
+                "wide_spread_extra_slippage_pct": settings.realism_wide_spread_extra_slippage_pct,
             },
         },
         "freshness": {
@@ -1481,6 +1514,57 @@ def get_execution_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dic
 )
 def get_professional_insights(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
     return professional_insights_service.analyze(symbol=symbol, limit=limit)
+
+
+@app.get(
+    "/research/research-engine",
+    tags=["10 Research"],
+    summary="Research engine report for accepted and rejected Bank Nifty setups",
+    description=(
+        "Shows filter rejection quality, missed rejected winners, accepted loss impact, and net expectancy "
+        "by setup family, weekday, time block, DTE, IV regime, and trend regime. Read-only; does not alter strategy."
+    ),
+)
+def get_research_engine_report(symbol: str = "BANKNIFTY", limit: int = 2000) -> dict[str, object]:
+    return professional_insights_service.research_engine_report(symbol=symbol, limit=limit)
+
+
+@app.get(
+    "/research/threshold-validation",
+    tags=["10 Research"],
+    summary="Validate whether current strategy thresholds are helping or hurting",
+    description=(
+        "Read-only threshold evidence report. It inventories configured thresholds and validates score buckets, "
+        "rejection gates, setup families, time/regime segments, and score sensitivity without changing live strategy."
+    ),
+)
+def get_threshold_validation_report(
+    symbol: str = "BANKNIFTY",
+    limit: int = 3000,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    setup_family: str | None = None,
+    mode: str = "all",
+) -> dict[str, object]:
+    parsed_start = datetime.fromisoformat(start_date).date() if start_date else None
+    parsed_end = datetime.fromisoformat(end_date).date() if end_date else None
+    return professional_insights_service.threshold_validation_report(
+        symbol=symbol,
+        limit=limit,
+        start_date=parsed_start,
+        end_date=parsed_end,
+        setup_family=setup_family,
+        mode=mode,
+    )
+
+
+@app.get(
+    "/research/execution-realism",
+    tags=["10 Research"],
+    summary="Inspect conservative paper/backtest fill realism and execution drag",
+)
+def get_execution_realism_report(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+    return professional_insights_service.execution_realism_report(symbol=symbol, limit=limit)
 
 
 @app.get(

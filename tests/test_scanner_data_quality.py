@@ -151,6 +151,19 @@ class FakeArmedEntryTracker:
         }
 
 
+class FakeBlockingRegimeFilterService:
+    def evaluate(self, **kwargs):
+        return {
+            "enabled": True,
+            "passed": False,
+            "score": 40,
+            "classification": "NO_BUY_REGIME",
+            "hard_reasons": ["opening_trap_structure"],
+            "soft_reasons": [],
+            "details": {"verdict": "Do not buy Bank Nifty options in this regime: opening_trap_structure"},
+        }
+
+
 class ScannerDataQualityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.originals = {
@@ -160,6 +173,7 @@ class ScannerDataQualityTests(unittest.TestCase):
             "enable_strategy_edge_guard": settings.enable_strategy_edge_guard,
             "enable_volatility_edge": settings.enable_volatility_edge,
             "enable_volatility_edge_hard_gate": settings.enable_volatility_edge_hard_gate,
+            "enable_banknifty_regime_filter": settings.enable_banknifty_regime_filter,
             "enable_kite_websocket": settings.enable_kite_websocket,
         }
         object.__setattr__(settings, "use_kite_market_data", True)
@@ -168,6 +182,7 @@ class ScannerDataQualityTests(unittest.TestCase):
         object.__setattr__(settings, "enable_strategy_edge_guard", False)
         object.__setattr__(settings, "enable_volatility_edge", True)
         object.__setattr__(settings, "enable_volatility_edge_hard_gate", False)
+        object.__setattr__(settings, "enable_banknifty_regime_filter", False)
         object.__setattr__(settings, "enable_kite_websocket", False)
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.temp_db.close()
@@ -351,6 +366,28 @@ class ScannerDataQualityTests(unittest.TestCase):
 
         self.assertIn("volatility_edge", factors)
         self.assertIn("reasons", factors["volatility_edge"])
+
+    def test_banknifty_regime_filter_blocks_scanner_signal(self) -> None:
+        object.__setattr__(settings, "enable_banknifty_regime_filter", True)
+        scanner = ScannerService(
+            feed=BankNiftyQualityFeed(
+                {
+                    "instrument_token": 580001,
+                    "last_price": 1087.1,
+                    "depth": {"buy": [{"price": 1086.0}], "sell": [{"price": 1087.1}]},
+                    "volume": 100000,
+                    "oi": 100000,
+                }
+            ),
+            rejected_opportunity_repository=RejectedOpportunityRepository(),
+            banknifty_regime_filter_service=FakeBlockingRegimeFilterService(),
+        )
+
+        result = scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")[0]
+
+        self.assertFalse(result["passed"])
+        self.assertIn("opening_trap_structure", result["reasons"])
+        self.assertEqual(result["factor_scores"]["banknifty_regime_filter"]["classification"], "NO_BUY_REGIME")
 
     def test_scanner_registers_armed_setup_when_entry_timing_is_armed(self) -> None:
         originals = {

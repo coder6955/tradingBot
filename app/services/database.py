@@ -172,6 +172,16 @@ class TradeRecord(Base):
     price_source = Column(String(50), nullable=True)
     price_timestamp = Column(DateTime, nullable=True)
     price_age_seconds = Column(Float, nullable=True)
+    highest_price_during_trade = Column(Float, nullable=True)
+    lowest_price_during_trade = Column(Float, nullable=True)
+    mfe_points = Column(Float, nullable=True)
+    mfe_percent = Column(Float, nullable=True)
+    mae_points = Column(Float, nullable=True)
+    mae_percent = Column(Float, nullable=True)
+    time_to_mfe = Column(Float, nullable=True)
+    time_to_mae = Column(Float, nullable=True)
+    mfe_recorded_at = Column(DateTime, nullable=True)
+    mae_recorded_at = Column(DateTime, nullable=True)
     pnl = Column(Float, nullable=True)
     gross_pnl = Column(Float, nullable=True)
     net_pnl = Column(Float, nullable=True)
@@ -289,6 +299,16 @@ def _ensure_trade_columns() -> None:
         "price_source": "VARCHAR(50)",
         "price_timestamp": "DATETIME",
         "price_age_seconds": "FLOAT",
+        "highest_price_during_trade": "FLOAT",
+        "lowest_price_during_trade": "FLOAT",
+        "mfe_points": "FLOAT",
+        "mfe_percent": "FLOAT",
+        "mae_points": "FLOAT",
+        "mae_percent": "FLOAT",
+        "time_to_mfe": "FLOAT",
+        "time_to_mae": "FLOAT",
+        "mfe_recorded_at": "DATETIME",
+        "mae_recorded_at": "DATETIME",
     }
     with engine.begin() as connection:
         for column, column_type in required.items():

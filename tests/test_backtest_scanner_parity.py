@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from app.config import settings
 from app.services.backtest_service import BacktestService
@@ -131,6 +132,36 @@ class BacktestScannerParityTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["mode"], "option_premium_replay")
         self.assertEqual(result["decision_mode"], "legacy")
+
+    def test_realistic_backtest_does_not_fill_target_on_bare_touch(self) -> None:
+        service = BacktestService()
+        start = datetime(2026, 7, 6, 10, 0)
+        underlying = [
+            SimpleNamespace(timestamp=start, close_price=58000),
+            SimpleNamespace(timestamp=start + timedelta(minutes=5), close_price=58020),
+            SimpleNamespace(timestamp=start + timedelta(minutes=10), close_price=58030),
+        ]
+        option_candles = {
+            "BANKNIFTY26JUL58000CE": [
+                SimpleNamespace(timestamp=start, open_price=100, high_price=101, low_price=99, close_price=100, volume=10000),
+                SimpleNamespace(timestamp=start + timedelta(minutes=5), open_price=118, high_price=120.4, low_price=116, close_price=119, volume=10000),
+                SimpleNamespace(timestamp=start + timedelta(minutes=10), open_price=110, high_price=112, low_price=108, close_price=110, volume=10000),
+            ]
+        }
+
+        trade = service._simulate_option_trade(
+            underlying=underlying,
+            option_candles=option_candles,
+            idx=0,
+            direction="CALL",
+            horizon=2,
+            reason="test",
+        )
+
+        self.assertIsNotNone(trade)
+        assert trade is not None
+        self.assertNotEqual(trade.outcome, "target")
+        self.assertIn("execution_realism", trade.to_dict())
 
     def _seed_history(self) -> None:
         start = datetime(2026, 7, 3, 9, 15)

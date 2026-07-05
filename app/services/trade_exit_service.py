@@ -81,6 +81,7 @@ class TradeExitService:
                 "price_rejection_reason": reason,
             }
         current_price = current_tick.price
+        self._record_price_excursion(trade, current_tick)
 
         outcome = self._outcome_for_price(provider, trade, current_price)
         if outcome is None:
@@ -110,11 +111,16 @@ class TradeExitService:
         if str(trade.mode).lower() == "live":
             return self._submit_live_exit(provider, trade, current_tick, outcome)
 
-        squareoff = self._squareoff(provider, trade, current_price)
+        squareoff = self._squareoff(provider, trade, current_price, outcome=outcome, tick=current_tick)
+        close_price = current_price
+        if str(trade.mode).lower() == "paper":
+            paper_payload = squareoff.get("paper") if isinstance(squareoff, dict) else None
+            if isinstance(paper_payload, dict) and paper_payload.get("exit_price") is not None:
+                close_price = float(paper_payload.get("exit_price") or current_price)
         updated = self.trade_repository.close_trade(
             int(trade.id),
             outcome=outcome,
-            exit_price=current_price,
+            exit_price=close_price,
             notes=f"Auto square-off: {outcome}; {squareoff}",
             **self._price_metadata(current_tick, include_in_db=True),
         )
@@ -125,7 +131,8 @@ class TradeExitService:
             "mode": updated.mode,
             "closed": True,
             "outcome": outcome,
-            "exit_price": current_price,
+            "exit_price": close_price,
+            "intended_exit_price": current_price,
             **self._price_metadata(current_tick),
             "gross_pnl": updated.gross_pnl,
             "net_pnl": updated.net_pnl if updated.net_pnl is not None else updated.pnl,
@@ -134,10 +141,26 @@ class TradeExitService:
             "squareoff": squareoff,
         }
 
-    def _squareoff(self, provider: KiteProvider, trade: Any, exit_price: float) -> dict[str, Any]:
+    def _record_price_excursion(self, trade: Any, tick: PriceTick) -> None:
+        try:
+            self.trade_repository.update_mfe_mae(
+                int(trade.id),
+                price=float(tick.price),
+                price_timestamp=tick.timestamp,
+            )
+        except Exception:
+            logger.exception("Failed to update MFE/MAE for trade_id=%s tradingsymbol=%s", getattr(trade, "id", None), getattr(trade, "tradingsymbol", None))
+
+    def _squareoff(self, provider: KiteProvider, trade: Any, exit_price: float, outcome: str = "exit", tick: PriceTick | None = None) -> dict[str, Any]:
         if trade.mode == "paper":
             try:
-                paper = self.paper_trading_service.close_trade(str(trade.tradingsymbol), exit_price=exit_price)
+                paper = self.paper_trading_service.close_trade(
+                    str(trade.tradingsymbol),
+                    exit_price=exit_price,
+                    outcome=outcome,
+                    bid=tick.bid if tick else None,
+                    ask=tick.ask if tick else None,
+                )
                 return {"status": "paper_closed", "paper": paper}
             except Exception as exc:
                 return {"status": "paper_close_record_only", "message": str(exc)}

@@ -105,6 +105,186 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
         self.assertIn("rejection_gate:entry_too_late", result["factor_attribution"])
         self.assertIn("test_strategy", result["strategy_versions"]["versions"])
 
+    def test_research_engine_report_ranks_filters_and_segments_expectancy(self) -> None:
+        opportunity_repo = OpportunityRepository()
+        rejected_repo = RejectedOpportunityRepository()
+        ce_winner = opportunity_repo.save_opportunity(
+            self._signal(
+                "BUY_CE",
+                "BANKNIFTY26JUL58000CE",
+                100,
+                80,
+                140,
+                factor_scores={
+                    "volatility_edge": {"classification": "iv_expansion_supported", "details": {"iv_rank": 45}},
+                    "day_type": {"details": {"day_type": "trend_expansion"}},
+                },
+            )
+        )
+        pe_loser = opportunity_repo.save_opportunity(
+            self._signal(
+                "BUY_PE",
+                "BANKNIFTY26JUL57000PE",
+                100,
+                80,
+                140,
+                factor_scores={
+                    "volatility_edge": {"classification": "iv_crush_risk", "main_risk": "iv_crush", "details": {"iv_rank": 88}},
+                    "day_type": {"details": {"day_type": "rotation_range"}},
+                },
+            )
+        )
+        opportunity_repo.update_outcome(ce_winner.id, outcome="target_1", exit_price=140)
+        opportunity_repo.update_outcome(pe_loser.id, outcome="stop_loss", exit_price=80)
+        missed = rejected_repo.save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=76,
+            reasons=["range_compression_without_expansion", "option premium has not broken recent high"],
+            contract=SimpleNamespace(
+                tradingsymbol="BANKNIFTY26JUL58100CE",
+                exchange="NFO",
+                expiry="2026-07-26",
+                strike=58100,
+                option_type="CE",
+            ),
+            factor_scores={
+                "prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80},
+                "volatility_edge": {"classification": "iv_expansion_supported", "details": {"iv_rank": 50}},
+                "day_type": {"details": {"day_type": "trend_expansion"}},
+            },
+            market_session="REGULAR_MARKET",
+            learning_eligible=True,
+        )
+        saved = rejected_repo.save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_PE",
+            score=70,
+            reasons=["late_day_premium_decay_environment"],
+            contract=SimpleNamespace(
+                tradingsymbol="BANKNIFTY26JUL57000PE",
+                exchange="NFO",
+                expiry="2026-07-26",
+                strike=57000,
+                option_type="PE",
+            ),
+            factor_scores={
+                "prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80},
+                "volatility_edge": {"classification": "iv_crush_risk", "main_risk": "iv_crush", "details": {"iv_rank": 90}},
+                "day_type": {"details": {"day_type": "rotation_range"}},
+            },
+            market_session="REGULAR_MARKET",
+            learning_eligible=True,
+        )
+        rejected_repo.mark_later_outcome(missed.id, outcome="would_have_hit_target_1", exit_price=130)
+        rejected_repo.mark_later_outcome(saved.id, outcome="would_have_hit_stop_loss", exit_price=80)
+
+        result = ProfessionalInsightsService().research_engine_report(symbol="BANKNIFTY", limit=100)
+
+        self.assertEqual(result["sample"]["closed_accepted_opportunities"], 2)
+        self.assertEqual(result["sample"]["reviewed_rejections_with_later_outcome"], 2)
+        filters = {row["filter_name"]: row for row in result["filter_rejection_quality"]["filters"]}
+        self.assertEqual(filters["range_compression_without_expansion"]["later_winner_count"], 1)
+        self.assertEqual(filters["late_day_premium_decay_environment"]["later_loser_count"], 1)
+        self.assertEqual(result["accepted_trade_loss_impact"]["losing_count"], 1)
+        self.assertIn("buy_ce", result["segment_expectancy"]["setup_family"])
+        self.assertIn("iv:iv_expansion_supported", result["segment_expectancy"]["iv_regime"])
+        self.assertIn("trend_expansion", result["segment_expectancy"]["trend_regime"])
+        self.assertEqual(result["setup_family_ranking"][0]["setup_family"], "buy_ce")
+        self.assertFalse(result["research_readiness"]["safe_to_enable_live"])
+
+    def test_research_engine_uses_professional_setup_family_label(self) -> None:
+        opportunity_repo = OpportunityRepository()
+        trade_repo = TradeRepository()
+        signal = self._signal(
+            "BUY_CE",
+            "BANKNIFTY26JUL58000CE",
+            100,
+            80,
+            140,
+            factor_scores={
+                "setup_family": {
+                    "name": "vwap_reclaim_continuation",
+                    "group": "vwap_continuation",
+                    "reasons": ["Bank Nifty and option premium are above VWAP"],
+                }
+            },
+        )
+        opportunity = opportunity_repo.save_opportunity(signal)
+        opportunity_repo.update_outcome(opportunity.id, outcome="target_1", exit_price=140)
+        trade = trade_repo.create_trade(signal, mode="paper", status="filled", requested_quantity=15, placed_quantity=15)
+        trade_repo.close_trade(trade.id, outcome="target_1", exit_price=140)
+
+        result = ProfessionalInsightsService().research_engine_report(symbol="BANKNIFTY", limit=100)
+
+        self.assertIn("vwap_reclaim_continuation", result["segment_expectancy"]["setup_family"])
+        self.assertEqual(result["setup_family_ranking"][0]["setup_family"], "vwap_reclaim_continuation")
+
+    def test_threshold_validation_report_scores_rejections_and_sensitivity(self) -> None:
+        opportunity_repo = OpportunityRepository()
+        trade_repo = TradeRepository()
+        rejected_repo = RejectedOpportunityRepository()
+        original_min_score = 86
+        signal = self._signal(
+            "BUY_CE",
+            "BANKNIFTY26JUL58000CE",
+            100,
+            80,
+            140,
+            factor_scores={"setup_family": {"name": "opening_drive_continuation", "group": "opening_drive"}},
+        )
+        opportunity = opportunity_repo.save_opportunity(signal)
+        opportunity_repo.update_outcome(opportunity.id, outcome="target_1", exit_price=140)
+        trade = trade_repo.create_trade(signal, mode="paper", status="filled", requested_quantity=15, placed_quantity=15)
+        trade_repo.update_mfe_mae(trade.id, price=150)
+        trade_repo.close_trade(trade.id, outcome="target_1", exit_price=135)
+        rejected = rejected_repo.save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=78,
+            reasons=["option premium has not broken recent high"],
+            contract=SimpleNamespace(
+                tradingsymbol="BANKNIFTY26JUL58100CE",
+                exchange="NFO",
+                expiry="2026-07-26",
+                strike=58100,
+                option_type="CE",
+            ),
+            factor_scores={
+                "prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80},
+                "setup_family": {"name": "opening_drive_continuation", "group": "opening_drive"},
+            },
+            market_session="REGULAR_MARKET",
+            learning_eligible=True,
+        )
+        rejected_repo.mark_later_outcome(rejected.id, outcome="would_have_hit_stop_loss", exit_price=80)
+
+        result = ProfessionalInsightsService().threshold_validation_report(symbol="BANKNIFTY", limit=100)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("threshold_inventory", result)
+        self.assertTrue(any(item["threshold_name"] == "min_signal_score" for item in result["threshold_inventory"]))
+        self.assertIn("high_score", result["score_threshold_validation"]["buckets"])
+        self.assertGreaterEqual(result["score_threshold_validation"]["buckets"]["high_score"]["accepted_count"], 1)
+        reasons = {row["gate_or_reason"]: row for row in result["rejection_threshold_validation"]["rows"]}
+        self.assertIn("option_premium_has_not_broken_recent_high", reasons)
+        self.assertEqual(reasons["option_premium_has_not_broken_recent_high"]["later_loser_count"], 1)
+        self.assertIn("opening_drive_continuation", result["setup_family_threshold_validation"])
+        self.assertTrue(result["threshold_sensitivity"]["minimum_score"])
+        self.assertEqual(original_min_score, signal.score)
+
+    def test_threshold_validation_empty_report_is_clean_and_inconclusive(self) -> None:
+        result = ProfessionalInsightsService().threshold_validation_report(symbol="BANKNIFTY", limit=100)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["score_threshold_validation"]["buckets"]["below_threshold"]["trades"], 0)
+        self.assertFalse(result["data_support"]["accepted_vs_rejected"])
+        self.assertTrue(result["threshold_sensitivity"]["minimum_score"])
+        self.assertTrue(result["not_measurable_yet"])
+
     def test_professional_insights_daily_review_and_journal(self) -> None:
         repo = OpportunityRepository()
         trade_repo = TradeRepository()
@@ -221,7 +401,15 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
         self.assertEqual(result["option_snapshots"]["rows"], 1)
         self.assertTrue(result["readiness"]["has_underlying_candles"])
 
-    def _signal(self, action: str, tradingsymbol: str, entry: float, stop: float, target: float) -> Signal:
+    def _signal(
+        self,
+        action: str,
+        tradingsymbol: str,
+        entry: float,
+        stop: float,
+        target: float,
+        factor_scores: dict[str, object] | None = None,
+    ) -> Signal:
         return Signal(
             symbol="BANKNIFTY",
             action=action,
@@ -239,7 +427,7 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             risk_reward=1.5,
             score=86,
             setup_type="directional_option_buy",
-            factor_scores={"score_breakdown": {"score": 86}},
+            factor_scores={"score_breakdown": {"score": 86}, **(factor_scores or {})},
         )
 
 

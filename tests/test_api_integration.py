@@ -155,7 +155,11 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("Latest Watch", html)
         self.assertIn("System Thought Feed", html)
         self.assertIn("After-Market Research", html)
+        self.assertIn("Research Engine", html)
+        self.assertIn("Thresholds", html)
         self.assertIn("/research/after-market/status", html)
+        self.assertIn("/research/research-engine", html)
+        self.assertIn("/research/threshold-validation", html)
 
     def test_dashboard_decision_feed_shows_rejected_setup(self) -> None:
         RejectedOpportunityRepository().save_rejection(
@@ -316,6 +320,37 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(run.status_code, 200)
         self.assertEqual(run.json()["status"], "ok")
         self.assertTrue(run.json()["force"])
+
+    def test_research_engine_endpoint(self) -> None:
+        response = self.client.get("/research/research-engine?symbol=BANKNIFTY&limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("filter_rejection_quality", payload)
+        self.assertIn("accepted_trade_loss_impact", payload)
+        self.assertIn("segment_expectancy", payload)
+
+    def test_threshold_validation_endpoint(self) -> None:
+        response = self.client.get("/research/threshold-validation?symbol=BANKNIFTY&limit=10&mode=all")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("threshold_inventory", payload)
+        self.assertIn("score_threshold_validation", payload)
+        self.assertIn("threshold_sensitivity", payload)
+        self.assertIn("verdicts", payload)
+
+    def test_execution_realism_endpoint(self) -> None:
+        response = self.client.get("/research/execution-realism?symbol=BANKNIFTY&limit=10")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("assumptions", payload)
+        self.assertTrue(payload["assumptions"]["enabled"])
+        self.assertIn("execution_drag", payload)
 
     def test_trades_endpoint(self) -> None:
         response = self.client.get("/trades?limit=5")
