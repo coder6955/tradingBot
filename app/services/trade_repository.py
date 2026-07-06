@@ -6,13 +6,13 @@ from datetime import datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from app.config import settings
 from app.models import Signal
 from app.services.database import TradeRecord, get_session
 from app.services.realistic_pnl_service import RealisticPnlService
-from app.services.time_utils import ist_now_naive, ist_today
+from app.services.time_utils import format_ist, ist_now_naive, ist_today
 
 
 class TradeRepository:
@@ -90,13 +90,49 @@ class TradeRepository:
         finally:
             session.close()
 
-    def list_trades(self, status: str | None = None, limit: int = 100) -> list[TradeRecord]:
+    def list_trades(self, status: str | None = None, limit: int = 100, include_artifacts: bool = False) -> list[TradeRecord]:
         session = get_session()
         try:
             query = session.query(TradeRecord).order_by(TradeRecord.id.desc())
+            if not include_artifacts:
+                query = query.filter(TradeRecord.mode != "test_artifact")
             if status:
                 query = query.filter(TradeRecord.status == status)
             return query.limit(limit).all()
+        finally:
+            session.close()
+
+    def suspected_test_artifacts(self, limit: int = 100) -> dict[str, Any]:
+        session = get_session()
+        try:
+            rows = self._suspected_test_artifact_query(session).order_by(TradeRecord.id.desc()).limit(limit).all()
+            return {
+                "count": len(rows),
+                "artifacts": [self._artifact_summary(row) for row in rows],
+                "criteria": [
+                    "opportunity_id is null",
+                    "mode is paper/live",
+                    "non-BANKNIFTY symbol/tradingsymbol OR broker_order_id=test-order OR target_1 missing OR empty signal_factor_scores",
+                ],
+            }
+        finally:
+            session.close()
+
+    def quarantine_suspected_test_artifacts(self, limit: int = 100, dry_run: bool = True) -> dict[str, Any]:
+        session = get_session()
+        try:
+            rows = self._suspected_test_artifact_query(session).order_by(TradeRecord.id.desc()).limit(limit).all()
+            artifacts = [self._artifact_summary(row) for row in rows]
+            if not dry_run:
+                now = ist_now_naive()
+                for row in rows:
+                    row.mode = "test_artifact"
+                    row.status = "invalid_test_data"
+                    row.updated_at = now
+                    prefix = "quarantined synthetic test artifact"
+                    row.notes = f"{prefix}; {row.notes}" if row.notes else prefix
+                session.commit()
+            return {"dry_run": dry_run, "count": len(artifacts), "artifacts": artifacts}
         finally:
             session.close()
 
@@ -106,6 +142,38 @@ class TradeRepository:
             return session.get(TradeRecord, trade_id)
         finally:
             session.close()
+
+    def _suspected_test_artifact_query(self, session: Any) -> Any:
+        return (
+            session.query(TradeRecord)
+            .filter(TradeRecord.opportunity_id.is_(None))
+            .filter(TradeRecord.mode.in_(["paper", "live"]))
+            .filter(
+                or_(
+                    TradeRecord.symbol != "BANKNIFTY",
+                    ~TradeRecord.tradingsymbol.like("BANKNIFTY%"),
+                    TradeRecord.broker_order_id == "test-order",
+                    TradeRecord.target_1.is_(None),
+                    TradeRecord.order_response_json.like('%"signal_factor_scores": {}%'),
+                )
+            )
+        )
+
+    def _artifact_summary(self, row: TradeRecord) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "created_at": format_ist(row.created_at),
+            "symbol": row.symbol,
+            "tradingsymbol": row.tradingsymbol,
+            "mode": row.mode,
+            "status": row.status,
+            "entry_price": row.entry_price,
+            "stop_loss": row.stop_loss,
+            "target_1": row.target_1,
+            "broker_order_id": row.broker_order_id,
+            "opportunity_id": row.opportunity_id,
+            "notes": row.notes,
+        }
 
     def update_mfe_mae(
         self,
@@ -262,6 +330,40 @@ class TradeRepository:
                 record.exit_confirmed_at = ist_now_naive()
             if notes:
                 record.notes = notes
+            session.commit()
+            session.refresh(record)
+            return record
+        finally:
+            session.close()
+
+    def update_protective_order(
+        self,
+        trade_id: int,
+        *,
+        status: str,
+        broker_payload: dict[str, Any],
+        protective_order_id: str | None = None,
+        trigger_price: float | None = None,
+        error: str | None = None,
+        cancelled: bool = False,
+    ) -> TradeRecord:
+        session = get_session()
+        try:
+            record = session.get(TradeRecord, trade_id)
+            if record is None:
+                raise ValueError(f"trade {trade_id} was not found")
+            record.protective_order_status = status
+            if protective_order_id:
+                record.protective_order_id = protective_order_id
+            if trigger_price is not None:
+                record.protective_trigger_price = trigger_price
+            record.protective_order_response_json = json.dumps(broker_payload, default=str)
+            record.protective_last_error = error
+            if protective_order_id and record.protective_requested_at is None:
+                record.protective_requested_at = ist_now_naive()
+            if cancelled:
+                record.protective_cancelled_at = ist_now_naive()
+            record.updated_at = ist_now_naive()
             session.commit()
             session.refresh(record)
             return record
@@ -516,7 +618,11 @@ class TradeRepository:
             return (
                 session.query(TradeRecord)
                 .filter(TradeRecord.mode == "live")
-                .filter((TradeRecord.broker_order_id == order_id) | (TradeRecord.exit_order_id == order_id))
+                .filter(
+                    (TradeRecord.broker_order_id == order_id)
+                    | (TradeRecord.exit_order_id == order_id)
+                    | (TradeRecord.protective_order_id == order_id)
+                )
                 .order_by(TradeRecord.id.desc())
                 .all()
             )

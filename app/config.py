@@ -158,6 +158,7 @@ class Settings:
     min_outcome_learning_expectancy_pct: float = float(os.getenv("MIN_OUTCOME_LEARNING_EXPECTANCY_PCT", "0.0"))
     min_outcome_learning_win_rate_pct: float = float(os.getenv("MIN_OUTCOME_LEARNING_WIN_RATE_PCT", "35.0"))
     outcome_learning_lookback: int = int(os.getenv("OUTCOME_LEARNING_LOOKBACK", "500"))
+    outcome_learning_cache_ttl_seconds: int = int(os.getenv("OUTCOME_LEARNING_CACHE_TTL_SECONDS", "900"))
     enforce_execution_quality: bool = os.getenv("ENFORCE_EXECUTION_QUALITY", "true").lower() == "true"
     max_execution_spread_pct: float = float(os.getenv("MAX_EXECUTION_SPREAD_PCT", "3.0"))
     max_entry_price_deviation_pct: float = float(os.getenv("MAX_ENTRY_PRICE_DEVIATION_PCT", "8.0"))
@@ -170,7 +171,7 @@ class Settings:
     automation_outcome_interval_seconds: int = int(os.getenv("AUTOMATION_OUTCOME_INTERVAL_SECONDS", "30"))
     automation_ingest_days: int = int(os.getenv("AUTOMATION_INGEST_DAYS", "365"))
     automation_checkpoint_overlap_minutes: int = int(os.getenv("AUTOMATION_CHECKPOINT_OVERLAP_MINUTES", "30"))
-    automation_intraday_candle_sync: bool = os.getenv("AUTOMATION_INTRADAY_CANDLE_SYNC", "true").lower() == "true"
+    automation_intraday_candle_sync: bool = os.getenv("AUTOMATION_INTRADAY_CANDLE_SYNC", "false").lower() == "true"
     automation_intraday_candle_sync_minutes: int = int(os.getenv("AUTOMATION_INTRADAY_CANDLE_SYNC_MINUTES", "5"))
     automation_place_orders: bool = os.getenv("AUTOMATION_PLACE_ORDERS", "true").lower() == "true"
     automation_confirm_live: bool = os.getenv("AUTOMATION_CONFIRM_LIVE", "false").lower() == "true"
@@ -186,6 +187,16 @@ class Settings:
     kite_snapshot_cache_ttl_seconds: int = int(os.getenv("KITE_SNAPSHOT_CACHE_TTL_SECONDS", "3"))
     kite_quote_cache_ttl_seconds: int = int(os.getenv("KITE_QUOTE_CACHE_TTL_SECONDS", "2"))
     kite_instrument_cache_ttl_seconds: int = int(os.getenv("KITE_INSTRUMENT_CACHE_TTL_SECONDS", "21600"))
+    kite_instrument_cache_file: str = os.getenv("KITE_INSTRUMENT_CACHE_FILE", str(BASE_DIR / ".cache" / "kite_instruments.json"))
+    kite_option_chain_quote_limit: int = int(os.getenv("KITE_OPTION_CHAIN_QUOTE_LIMIT", "80"))
+    kite_option_chain_strike_radius: int = int(os.getenv("KITE_OPTION_CHAIN_STRIKE_RADIUS", "3"))
+    kite_snapshot_historical_fallback_enabled: bool = os.getenv("KITE_SNAPSHOT_HISTORICAL_FALLBACK_ENABLED", "false").lower() == "true"
+    kite_api_timeout_seconds: int = int(os.getenv("KITE_API_TIMEOUT_SECONDS", "5"))
+    scanner_response_cache_ttl_seconds: int = int(os.getenv("SCANNER_RESPONSE_CACHE_TTL_SECONDS", "5"))
+    scanner_response_stale_ttl_seconds: int = int(os.getenv("SCANNER_RESPONSE_STALE_TTL_SECONDS", "60"))
+    scanner_refresh_stuck_seconds: int = int(os.getenv("SCANNER_REFRESH_STUCK_SECONDS", "30"))
+    account_funds_cache_ttl_seconds: int = int(os.getenv("ACCOUNT_FUNDS_CACHE_TTL_SECONDS", "5"))
+    dashboard_broker_cache_ttl_seconds: int = int(os.getenv("DASHBOARD_BROKER_CACHE_TTL_SECONDS", "60"))
     option_quote_premium_mismatch_tolerance_pct: float = float(os.getenv("OPTION_QUOTE_PREMIUM_MISMATCH_TOLERANCE_PCT", "25.0"))
     estimated_brokerage_per_order: float = float(os.getenv("ESTIMATED_BROKERAGE_PER_ORDER", "20.0"))
     estimated_stt_sell_pct: float = float(os.getenv("ESTIMATED_STT_SELL_PCT", "0.0625"))
@@ -199,8 +210,13 @@ class Settings:
     enable_kite_websocket: bool = os.getenv("ENABLE_KITE_WEBSOCKET", "false").lower() == "true"
     websocket_price_stale_seconds: int = int(os.getenv("WEBSOCKET_PRICE_STALE_SECONDS", "3"))
     websocket_reconnect_enabled: bool = os.getenv("WEBSOCKET_RECONNECT_ENABLED", "true").lower() == "true"
+    websocket_reconnect_min_gap_seconds: int = int(os.getenv("WEBSOCKET_RECONNECT_MIN_GAP_SECONDS", "5"))
+    websocket_reconnect_window_seconds: int = int(os.getenv("WEBSOCKET_RECONNECT_WINDOW_SECONDS", "60"))
+    websocket_reconnect_max_attempts_per_window: int = int(os.getenv("WEBSOCKET_RECONNECT_MAX_ATTEMPTS_PER_WINDOW", "5"))
     websocket_live_stale_blocks: bool = os.getenv("WEBSOCKET_LIVE_STALE_BLOCKS", "true").lower() == "true"
     websocket_live_require_exchange_timestamp: bool = os.getenv("WEBSOCKET_LIVE_REQUIRE_EXCHANGE_TIMESTAMP", "true").lower() == "true"
+    websocket_event_queue_size: int = int(os.getenv("WEBSOCKET_EVENT_QUEUE_SIZE", "1000"))
+    websocket_candle_persist_queue_size: int = int(os.getenv("WEBSOCKET_CANDLE_PERSIST_QUEUE_SIZE", "1000"))
     enable_websocket_premium_candle_builder: bool = os.getenv("ENABLE_WEBSOCKET_PREMIUM_CANDLE_BUILDER", "true").lower() == "true"
     websocket_premium_candle_timeframe: str = os.getenv("WEBSOCKET_PREMIUM_CANDLE_TIMEFRAME", "1minute")
     websocket_premium_candle_retention_minutes: int = int(os.getenv("WEBSOCKET_PREMIUM_CANDLE_RETENTION_MINUTES", "60"))

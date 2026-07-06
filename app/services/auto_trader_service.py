@@ -105,7 +105,7 @@ class AutoTraderService:
     async def _run(self) -> None:
         while self.running:
             try:
-                self.scan_once()
+                await asyncio.to_thread(self.scan_once)
             except Exception as exc:
                 self.errors.append(
                     {

@@ -194,6 +194,25 @@ class TradeExitService:
         return {"status": "live_partial_squareoff_submitted", "response": response}
 
     def _submit_live_exit(self, provider: KiteProvider, trade: Any, tick: PriceTick, outcome: str) -> dict[str, Any]:
+        protective_order_id = str(getattr(trade, "protective_order_id", "") or "")
+        if protective_order_id and outcome == "stop_loss":
+            protective_result = self._handle_protective_stop_exit(provider, trade, protective_order_id, tick, outcome)
+            if protective_result is not None:
+                return protective_result
+        if protective_order_id:
+            cancel_result = self._cancel_protective_order_before_exit(provider, trade, protective_order_id)
+            if not cancel_result.get("cancelled"):
+                reason = f"protective SL cancel failed before live exit: {cancel_result.get('reason') or cancel_result}"
+                failed = self.trade_repository.mark_exit_failed(int(trade.id), reason=reason, broker_payload={"protective_cancel": cancel_result})
+                self._alert(f"CRITICAL: {reason} for {trade.tradingsymbol} trade_id={trade.id}")
+                return {
+                    "trade_id": failed.id,
+                    "tradingsymbol": failed.tradingsymbol,
+                    "closed": False,
+                    "reason": "protective_order_cancel_failed",
+                    "protective_cancel": cancel_result,
+                    **self._price_metadata(tick),
+                }
         closing = self.trade_repository.try_mark_closing(
             int(trade.id),
             outcome=outcome,
@@ -249,6 +268,92 @@ class TradeExitService:
             "confirmation": confirmed,
             **self._price_metadata(tick),
         }
+
+    def _handle_protective_stop_exit(self, provider: KiteProvider, trade: Any, protective_order_id: str, tick: PriceTick, outcome: str) -> dict[str, Any] | None:
+        try:
+            history = provider.order_history(protective_order_id)
+        except Exception as exc:
+            return {
+                "trade_id": trade.id,
+                "tradingsymbol": trade.tradingsymbol,
+                "closed": False,
+                "reason": "protective_order_history_unavailable",
+                "message": str(exc),
+                **self._price_metadata(tick),
+            }
+        latest = history[-1] if history else {}
+        order_status = str(latest.get("status") or "").lower()
+        self.trade_repository.update_protective_order(
+            int(trade.id),
+            status=order_status or "unknown",
+            protective_order_id=protective_order_id,
+            broker_payload={"history": history, "latest": latest},
+        )
+        if order_status in {"complete", "filled"}:
+            return self._confirm_live_exit(provider, trade, exit_order_id=protective_order_id, outcome=outcome, exit_price=tick.price, price_tick=tick)
+        if order_status in {"rejected", "cancelled", "canceled", "failed"}:
+            reason = f"protective SL order {order_status}"
+            failed = self.trade_repository.mark_exit_failed(
+                int(trade.id),
+                reason=reason,
+                broker_payload={"protective_history": history, "latest": latest},
+            )
+            self._alert(f"CRITICAL: {reason} for {trade.tradingsymbol} trade_id={trade.id} order_id={protective_order_id}")
+            return {
+                "trade_id": failed.id,
+                "tradingsymbol": failed.tradingsymbol,
+                "closed": False,
+                "reason": "protective_order_failed",
+                "protective_order_status": order_status,
+                **self._price_metadata(tick),
+            }
+        return {
+            "trade_id": trade.id,
+            "tradingsymbol": trade.tradingsymbol,
+            "closed": False,
+            "reason": "protective_stop_order_pending",
+            "protective_order_id": protective_order_id,
+            "protective_order_status": order_status or "unknown",
+            **self._price_metadata(tick),
+        }
+
+    def _cancel_protective_order_before_exit(self, provider: KiteProvider, trade: Any, protective_order_id: str) -> dict[str, Any]:
+        try:
+            history = provider.order_history(protective_order_id)
+        except Exception as exc:
+            return {"cancelled": False, "reason": "protective_order_history_unavailable", "message": str(exc)}
+        latest = history[-1] if history else {}
+        status = str(latest.get("status") or "").lower()
+        if status in {"complete", "filled"}:
+            return {"cancelled": False, "reason": "protective_order_already_filled", "latest": latest}
+        if status in {"cancelled", "canceled"}:
+            self.trade_repository.update_protective_order(
+                int(trade.id),
+                status=status,
+                protective_order_id=protective_order_id,
+                broker_payload={"history": history, "latest": latest},
+                cancelled=True,
+            )
+            return {"cancelled": True, "already_cancelled": True, "latest": latest}
+        try:
+            response = provider.cancel_order(protective_order_id)
+        except Exception as exc:
+            self.trade_repository.update_protective_order(
+                int(trade.id),
+                status="cancel_failed",
+                protective_order_id=protective_order_id,
+                broker_payload={"history": history, "latest": latest, "cancel_error": str(exc)},
+                error=str(exc),
+            )
+            return {"cancelled": False, "reason": "cancel_order_failed", "message": str(exc)}
+        self.trade_repository.update_protective_order(
+            int(trade.id),
+            status=str(response.get("status") or "cancelled") if isinstance(response, dict) else "cancelled",
+            protective_order_id=protective_order_id,
+            broker_payload={"history": history, "latest": latest, "cancel_response": response},
+            cancelled=True,
+        )
+        return {"cancelled": True, "response": response}
 
     def _evaluate_closing_trade(self, provider: KiteProvider, trade: Any) -> dict[str, Any]:
         if str(trade.mode).lower() != "live":

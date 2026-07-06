@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List
 
 from app.config import settings
@@ -40,7 +42,7 @@ class KiteFeed:
         if KiteConnect is None:
             self.client = None
         else:
-            self.client = KiteConnect(api_key=settings.kite_api_key)
+            self.client = self._kite_client()
             access_token = load_access_token() or settings.kite_access_token
             if access_token:
                 try:
@@ -56,42 +58,67 @@ class KiteFeed:
         except Exception:
             return default
 
+    def _kite_client(self) -> Any:
+        try:
+            return KiteConnect(api_key=settings.kite_api_key, timeout=max(1, int(settings.kite_api_timeout_seconds)))
+        except TypeError:
+            return KiteConnect(api_key=settings.kite_api_key)
+
+    def get_snapshots(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Return lightweight quote-only snapshots for broad market context."""
+        if self.client is None or not symbols:
+            return {symbol.upper(): self._stored_snapshot(symbol, self._default_snapshot(symbol)) for symbol in symbols}
+
+        now = ist_now_naive()
+        unique_symbols = list(dict.fromkeys(symbol.upper() for symbol in symbols if symbol))
+        instruments_by_symbol = {
+            symbol: f"NSE:{self._kite_symbol(symbol)}" if ":" not in self._kite_symbol(symbol) else self._kite_symbol(symbol)
+            for symbol in unique_symbols
+        }
+        snapshots = {symbol: self._default_snapshot(symbol) for symbol in unique_symbols}
+        try:
+            self._call_counts["quote"] += 1
+            quotes = self.client.quote(list(instruments_by_symbol.values()))  # type: ignore
+        except Exception:
+            quotes = {}
+
+        for symbol, instrument in instruments_by_symbol.items():
+            payload = quotes.get(instrument) if isinstance(quotes, dict) else {}
+            payload = payload if isinstance(payload, dict) else {}
+            price = self._float(payload.get("last_price"))
+            ohlc = payload.get("ohlc") if isinstance(payload.get("ohlc"), dict) else {}
+            previous_close = self._float(ohlc.get("close"))
+            day_open = self._float(ohlc.get("open"))
+            day_high = self._float(ohlc.get("high"))
+            day_low = self._float(ohlc.get("low"))
+            volume = self._float(payload.get("volume"))
+            if price is not None and price > 0:
+                snapshots[symbol].update(
+                    {
+                        "is_real_data": True,
+                        "price": price,
+                        "instrument_token": self._safe_int(payload.get("instrument_token"), None),  # type: ignore
+                        "quote_timestamp": now.isoformat(sep=" "),
+                        "previous_day_close": previous_close or 0.0,
+                        "day_open": day_open or 0.0,
+                        "day_high": day_high or price,
+                        "day_low": day_low or price,
+                        "trend_bullish": price >= (previous_close or price),
+                        "volume_confirmed": bool(volume and volume > 0),
+                    }
+                )
+                self._snapshot_cache[symbol] = (now, snapshots[symbol])
+            else:
+                snapshots[symbol] = self._stored_snapshot(symbol, snapshots[symbol])
+        return snapshots
+
     def get_snapshot(self, symbol: str) -> Dict[str, Any]:
         cached = self._cached_snapshot(symbol)
         if cached is not None:
             return cached
 
         started_at = ist_now_naive()
-        # Default fallback snapshot
-        snapshot = {
-            "symbol": symbol,
-            "source": "kite",
-            "is_real_data": False,
-            "price": 0.0,
-            "rsi": 50,
-            "adx": 15,
-            "macd_positive": False,
-            "ema_alignment": False,
-            "vwap_above_price": False,
-            "volume_confirmed": False,
-            "trend_bullish": False,
-            "market_context": "neutral",
-            "instrument_token": None,
-            "candles": [],
-            "vwap": 0.0,
-            "ema_9": 0.0,
-            "ema_21": 0.0,
-            "macd": 0.0,
-            "macd_signal": 0.0,
-            "previous_day_high": 0.0,
-            "previous_day_low": 0.0,
-            "previous_day_close": 0.0,
-            "day_open": 0.0,
-            "day_high": 0.0,
-            "day_low": 0.0,
-            "quote_timestamp": None,
-            "candle_timestamp": None,
-        }
+        snapshot = self._default_snapshot(symbol)
 
         if self.client is None:
             return self._stored_snapshot(symbol, snapshot)
@@ -119,11 +146,19 @@ class KiteFeed:
             # ignore network / key errors
             pass
 
+        stored_snapshot = self._stored_snapshot(symbol, snapshot)
+        if stored_snapshot.get("source") == "stored_candles":
+            self._snapshot_cache[symbol.upper()] = (ist_now_naive(), stored_snapshot)
+            return stored_snapshot
+        if not settings.kite_snapshot_historical_fallback_enabled:
+            self._snapshot_cache[symbol.upper()] = (ist_now_naive(), snapshot)
+            return snapshot
+
         # Try to get a few historical candles to derive simple indicators
         try:
             token = self._find_instrument_token(symbol)
             if token is None:
-                return self._stored_snapshot(symbol, snapshot)
+                return stored_snapshot
             snapshot["instrument_token"] = token
             now = ist_now_naive()
             to_dt = now
@@ -195,10 +230,16 @@ class KiteFeed:
         cached_at = self._instrument_cache_at.get(exchange)
         ttl = timedelta(seconds=max(1, settings.kite_instrument_cache_ttl_seconds))
         if exchange not in self._instrument_cache or cached_at is None or ist_now_naive() - cached_at > ttl:
+            persisted = self._load_persisted_instruments(exchange, ttl)
+            if persisted is not None:
+                self._instrument_cache[exchange] = persisted
+                self._instrument_cache_at[exchange] = ist_now_naive()
+                return self._instrument_cache[exchange]
             try:
                 self._call_counts["instruments"] += 1
                 self._instrument_cache[exchange] = self.client.instruments(exchange)  # type: ignore
                 self._instrument_cache_at[exchange] = ist_now_naive()
+                self._save_persisted_instruments(exchange, self._instrument_cache[exchange])
             except Exception:
                 self._instrument_cache[exchange] = []
         return self._instrument_cache[exchange]
@@ -250,12 +291,91 @@ class KiteFeed:
             return cached[1]
         return None
 
+    def _default_snapshot(self, symbol: str) -> Dict[str, Any]:
+        return {
+            "symbol": symbol,
+            "source": "kite",
+            "is_real_data": False,
+            "price": 0.0,
+            "rsi": 50,
+            "adx": 15,
+            "macd_positive": False,
+            "ema_alignment": False,
+            "vwap_above_price": False,
+            "volume_confirmed": False,
+            "trend_bullish": False,
+            "market_context": "neutral",
+            "instrument_token": None,
+            "candles": [],
+            "vwap": 0.0,
+            "ema_9": 0.0,
+            "ema_21": 0.0,
+            "macd": 0.0,
+            "macd_signal": 0.0,
+            "previous_day_high": 0.0,
+            "previous_day_low": 0.0,
+            "previous_day_close": 0.0,
+            "day_open": 0.0,
+            "day_high": 0.0,
+            "day_low": 0.0,
+            "quote_timestamp": None,
+            "candle_timestamp": None,
+        }
+
+    def _float(self, value: Any) -> float | None:
+        try:
+            if value is not None:
+                return float(value)
+        except (TypeError, ValueError):
+            return None
+        return None
+
     def _find_instrument_token(self, symbol: str) -> int | None:
         exchange_symbol = self._kite_symbol(symbol).split(":", 1)[-1].upper()
         for item in self.get_instruments(settings.default_exchange):
             if str(item.get("tradingsymbol", "")).upper() == exchange_symbol:
                 return self._safe_int(item.get("instrument_token"), None)  # type: ignore
         return None
+
+    def _load_persisted_instruments(self, exchange: str, ttl: timedelta) -> List[Dict[str, Any]] | None:
+        path = Path(settings.kite_instrument_cache_file)
+        try:
+            if not path.exists():
+                return None
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            exchange_payload = payload.get(exchange)
+            if not isinstance(exchange_payload, dict):
+                return None
+            cached_at = datetime.fromisoformat(str(exchange_payload.get("cached_at")))
+            if ist_now_naive() - cached_at > ttl:
+                return None
+            rows = exchange_payload.get("instruments")
+            if not isinstance(rows, list):
+                return None
+            return [dict(row) for row in rows if isinstance(row, dict)]
+        except Exception:
+            return None
+
+    def _save_persisted_instruments(self, exchange: str, instruments: List[Dict[str, Any]]) -> None:
+        path = Path(settings.kite_instrument_cache_file)
+        try:
+            payload: dict[str, Any] = {}
+            if path.exists():
+                try:
+                    existing = json.loads(path.read_text(encoding="utf-8"))
+                    if isinstance(existing, dict):
+                        payload = existing
+                except Exception:
+                    payload = {}
+            payload[exchange] = {
+                "cached_at": ist_now_naive().isoformat(),
+                "source": "kite_instruments",
+                "instruments": instruments,
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, default=str), encoding="utf-8")
+        except Exception:
+            pass
 
     def _stored_snapshot(self, symbol: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
         candles = self._recent_stored_candles(symbol)

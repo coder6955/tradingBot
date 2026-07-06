@@ -169,6 +169,13 @@ class TradeRecord(Base):
     exit_last_error = Column(Text, nullable=True)
     exit_requested_at = Column(DateTime, nullable=True)
     exit_confirmed_at = Column(DateTime, nullable=True)
+    protective_order_id = Column(String(100), nullable=True, index=True)
+    protective_order_status = Column(String(50), nullable=True, index=True)
+    protective_trigger_price = Column(Float, nullable=True)
+    protective_order_response_json = Column(Text, nullable=True)
+    protective_last_error = Column(Text, nullable=True)
+    protective_requested_at = Column(DateTime, nullable=True)
+    protective_cancelled_at = Column(DateTime, nullable=True)
     price_source = Column(String(50), nullable=True)
     price_timestamp = Column(DateTime, nullable=True)
     price_age_seconds = Column(Float, nullable=True)
@@ -296,6 +303,13 @@ def _ensure_trade_columns() -> None:
         "exit_last_error": "TEXT",
         "exit_requested_at": "DATETIME",
         "exit_confirmed_at": "DATETIME",
+        "protective_order_id": "VARCHAR(100)",
+        "protective_order_status": "VARCHAR(50)",
+        "protective_trigger_price": "FLOAT",
+        "protective_order_response_json": "TEXT",
+        "protective_last_error": "TEXT",
+        "protective_requested_at": "DATETIME",
+        "protective_cancelled_at": "DATETIME",
         "price_source": "VARCHAR(50)",
         "price_timestamp": "DATETIME",
         "price_age_seconds": "FLOAT",

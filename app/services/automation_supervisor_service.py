@@ -41,6 +41,7 @@ class AutomationSupervisorService:
         self.last_cycle_at: str | None = None
         self.last_bootstrap_date: str | None = None
         self.last_intraday_candle_sync_at: datetime | None = None
+        self.last_market_closed_evaluation_date: str | None = None
         self.last_intraday_candle_sync_result: dict[str, Any] = {}
         self.last_bootstrap_result: dict[str, Any] = {}
         self.last_actions: list[dict[str, Any]] = []
@@ -106,9 +107,10 @@ class AutomationSupervisorService:
                 self._sync_intraday_candles_if_due(now, actions)
                 actions.extend(self._ensure_intraday_services())
             else:
-                self._evaluate_open_once(actions)
+                actions.extend(self._stop_intraday_services_now())
+                self._evaluate_open_once_if_due(now, actions)
                 self._run_after_market_research_if_due(now, actions)
-                actions.append({"action": "market_closed", "status": "ok", "message": "intraday services remain stopped unless manually started"})
+                actions.append({"action": "market_closed", "status": "ok", "message": "intraday Kite scanning services are stopped outside market hours"})
             self.last_actions.extend(actions)
             return {"status": "ok", "market_open": self._market_is_open(now), "actions": actions, "automation": self.status()}
         except Exception as exc:
@@ -189,6 +191,18 @@ class AutomationSupervisorService:
         except Exception as exc:
             actions.append({"action": "evaluate_open_opportunities", "status": "error", "message": str(exc)})
 
+    def _evaluate_open_once_if_due(self, now: datetime, actions: list[dict[str, Any]]) -> None:
+        market_close = self._parse_time(settings.market_close_time)
+        if now.weekday() >= 5 or now.time() <= market_close:
+            actions.append({"action": "evaluate_open_opportunities", "status": "skipped", "reason": "market_not_closed_for_day"})
+            return
+        today = now.date().isoformat()
+        if self.last_market_closed_evaluation_date == today:
+            actions.append({"action": "evaluate_open_opportunities", "status": "skipped", "reason": "already_checked_after_market_close"})
+            return
+        self._evaluate_open_once(actions)
+        self.last_market_closed_evaluation_date = today
+
     def _run_after_market_research_if_due(self, now: datetime, actions: list[dict[str, Any]]) -> None:
         if self.after_market_research_service is None:
             return
@@ -204,6 +218,24 @@ class AutomationSupervisorService:
             await self.auto_trader_service.stop()
         if self.snapshot_collector_service.running:
             await self.snapshot_collector_service.stop()
+        if self.outcome_service.running:
+            await self.outcome_service.stop()
+
+    def _stop_intraday_services_now(self) -> list[dict[str, Any]]:
+        actions: list[dict[str, Any]] = []
+        for action, service in (
+            ("stop_auto_trader", self.auto_trader_service),
+            ("stop_snapshot_collector", self.snapshot_collector_service),
+            ("stop_outcome_monitor", self.outcome_service),
+        ):
+            if not getattr(service, "running", False):
+                continue
+            setattr(service, "running", False)
+            task = getattr(service, "task", None)
+            if task is not None:
+                task.cancel()
+            actions.append({"action": action, "status": "ok", "reason": "market_closed", "service": service.status()})
+        return actions
 
     def _should_bootstrap_today(self, now: datetime) -> bool:
         if now.weekday() >= 5:

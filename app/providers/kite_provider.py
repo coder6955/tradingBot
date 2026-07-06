@@ -20,10 +20,16 @@ class KiteProvider:
             self.client = None
             self.access_token = load_access_token() or settings.kite_access_token
             return
-        self.client = KiteConnect(api_key=settings.kite_api_key)
+        self.client = self._kite_client()
         self.access_token = load_access_token() or settings.kite_access_token
         if self.access_token:
             self.client.set_access_token(self.access_token)
+
+    def _kite_client(self) -> Any:
+        try:
+            return KiteConnect(api_key=settings.kite_api_key, timeout=max(1, int(settings.kite_api_timeout_seconds)))
+        except TypeError:
+            return KiteConnect(api_key=settings.kite_api_key)
 
     def generate_login_url(self) -> str:
         if self.client is None:
@@ -119,6 +125,7 @@ class KiteProvider:
         order_type: str = "MARKET",
         product: str | None = None,
         price: float | None = None,
+        trigger_price: float | None = None,
         validity: str = "DAY",
         variety: str = "regular",
     ) -> Dict[str, Any]:
@@ -132,9 +139,15 @@ class KiteProvider:
             product=product or settings.default_product,
             order_type=order_type,
             price=price,
+            trigger_price=trigger_price,
             validity=validity,
         )
         return {"status": "submitted", "order_id": order_id}
+
+    def cancel_order(self, order_id: str, variety: str = "regular") -> Dict[str, Any]:
+        self._ensure_ready()
+        cancelled = self.client.cancel_order(variety=variety, order_id=order_id)  # type: ignore
+        return {"status": "cancelled", "order_id": cancelled or order_id}
 
     def _ensure_ready(self) -> None:
         if not settings.kite_api_key:

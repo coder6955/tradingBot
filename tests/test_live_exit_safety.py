@@ -22,6 +22,7 @@ class LiveExitProvider:
         self.average_price = average_price
         self.filled_quantity = filled_quantity
         self.place_order_count = 0
+        self.cancel_order_count = 0
         self._lock = threading.Lock()
 
     def instruments(self, exchange=None):
@@ -36,6 +37,10 @@ class LiveExitProvider:
         with self._lock:
             self.place_order_count += 1
         return {"status": "submitted", "order_id": "exit-1", **kwargs}
+
+    def cancel_order(self, order_id, variety="regular"):
+        self.cancel_order_count += 1
+        return {"status": "cancelled", "order_id": order_id, "variety": variety}
 
     def order_history(self, order_id):
         return [
@@ -59,6 +64,25 @@ class BrokerPositionOnlyProvider(LiveExitProvider):
 
     def positions(self):
         return self._positions
+
+
+class ProtectiveExitProvider(LiveExitProvider):
+    def __init__(self, *, protective_status: str = "OPEN", **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.protective_status = protective_status
+
+    def order_history(self, order_id):
+        if order_id == "protective-1":
+            return [
+                {
+                    "order_id": order_id,
+                    "status": self.protective_status,
+                    "filled_quantity": 0 if self.protective_status.upper() not in {"COMPLETE", "FILLED"} else 15,
+                    "quantity": 15,
+                    "average_price": self.average_price if self.protective_status.upper() in {"COMPLETE", "FILLED"} else 0,
+                }
+            ]
+        return super().order_history(order_id)
 
 
 class FixedActiveFeed:
@@ -192,6 +216,49 @@ class LiveExitSafetyTests(unittest.TestCase):
         self.assertEqual(trade.status, "closed")
         self.assertEqual(trade.exit_confirmed_at is not None, True)
 
+    def test_target_exit_cancels_protective_sl_before_market_squareoff(self) -> None:
+        trade = self._create_live_trade()
+        self.repo.update_protective_order(
+            int(trade.id),
+            status="OPEN",
+            protective_order_id="protective-1",
+            trigger_price=90,
+            broker_payload={"status": "OPEN"},
+        )
+        provider = ProtectiveExitProvider(protective_status="OPEN", order_status="COMPLETE", position_quantity=0)
+
+        result = self._service(provider).evaluate_once(limit=10)
+        updated = self.repo.list_trades(limit=1)[0]
+
+        self.assertTrue(result["results"][0]["closed"])
+        self.assertEqual(provider.cancel_order_count, 1)
+        self.assertEqual(provider.place_order_count, 1)
+        self.assertEqual(updated.protective_order_status, "cancelled")
+
+    def test_stop_loss_waits_for_pending_protective_sl_and_does_not_double_sell(self) -> None:
+        trade = self._create_live_trade()
+        self.repo.update_protective_order(
+            int(trade.id),
+            status="TRIGGER PENDING",
+            protective_order_id="protective-1",
+            trigger_price=90,
+            broker_payload={"status": "TRIGGER PENDING"},
+        )
+        provider = ProtectiveExitProvider(protective_status="TRIGGER PENDING", position_quantity=15)
+        service = TradeExitService(
+            trade_repository=self.repo,
+            kite_provider_factory=lambda: provider,
+            paper_trading_service=PaperTradingService(),
+            active_price_feed=FixedActiveFeed(price=89.0),
+        )
+
+        result = service.evaluate_once(limit=10)
+        updated = self.repo.list_trades(limit=1)[0]
+
+        self.assertEqual(result["results"][0]["reason"], "protective_stop_order_pending")
+        self.assertEqual(provider.place_order_count, 0)
+        self.assertEqual(updated.status, "filled")
+
     def test_stuck_exit_report_includes_closing_and_exit_failed(self) -> None:
         closing = self._create_live_trade()
         self.repo.try_mark_closing(int(closing.id), outcome="target_1", exit_price=111)
@@ -236,6 +303,50 @@ class LiveExitSafetyTests(unittest.TestCase):
         self.assertTrue(first["handled"])
         self.assertTrue(second["duplicate"])
         self.assertEqual(calls, [record.id])
+
+    def test_broker_sync_places_pending_protective_sl_after_entry_fill(self) -> None:
+        record = self._create_live_trade(status="submitted")
+        self.repo.update_protective_order(
+            int(record.id),
+            status="pending_entry_confirmation",
+            trigger_price=90,
+            broker_payload={"reason": "entry pending"},
+        )
+        provider = LiveExitProvider(order_status="COMPLETE", position_quantity=15)
+        service = BrokerSyncService(self.repo, kite_provider_factory=lambda: provider)
+        original = settings.enable_broker_emergency_sl
+        try:
+            object.__setattr__(settings, "enable_broker_emergency_sl", True)
+            result = service.sync_trade(int(record.id), provider=provider)
+        finally:
+            object.__setattr__(settings, "enable_broker_emergency_sl", original)
+        updated = self.repo.list_trades(limit=1)[0]
+
+        self.assertTrue(result["broker_emergency_sl"]["submitted"])
+        self.assertEqual(provider.place_order_count, 1)
+        self.assertEqual(updated.protective_order_id, "exit-1")
+        self.assertEqual(updated.protective_trigger_price, 90)
+
+    def test_protective_sl_postback_marks_trade_closing_for_confirmation(self) -> None:
+        record = self._create_live_trade()
+        self.repo.update_protective_order(
+            int(record.id),
+            status="TRIGGER PENDING",
+            protective_order_id="protective-1",
+            trigger_price=90,
+            broker_payload={"status": "TRIGGER PENDING"},
+        )
+        calls = []
+        provider = ProtectiveExitProvider(protective_status="COMPLETE", position_quantity=0, average_price=89)
+        service = BrokerSyncService(self.repo, kite_provider_factory=lambda: provider, exit_confirmation_callback=lambda trade_id: calls.append(trade_id) or {"trade_id": trade_id, "closed": True})
+
+        result = service.handle_order_postback({"order_id": "protective-1", "status": "COMPLETE", "filled_quantity": 15, "average_price": 89})
+        updated = self.repo.list_trades(limit=1)[0]
+
+        self.assertTrue(result["handled"])
+        self.assertEqual(calls, [record.id])
+        self.assertEqual(updated.status, "closing")
+        self.assertEqual(updated.exit_order_id, "protective-1")
 
 
 if __name__ == "__main__":

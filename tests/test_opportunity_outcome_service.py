@@ -63,7 +63,7 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             },
         )
         record = repo.save_opportunity(signal)
-        service = OpportunityOutcomeService(repo, kite_provider_factory=lambda: FakeKiteProvider())  # type: ignore[arg-type]
+        service = OpportunityOutcomeService(repo, kite_provider_factory=lambda: FakeKiteProvider(), market_session_provider=lambda: "AFTER_MARKET")  # type: ignore[arg-type]
 
         result = service.evaluate_once()
         updated = repo.get_opportunity(record.id)
@@ -104,7 +104,12 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             market_session="REGULAR_MARKET",
         )
         rejected_service = RejectedOpportunityOutcomeService(rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=121))  # type: ignore[arg-type]
-        service = OpportunityOutcomeService(repo, kite_provider_factory=lambda: FakeKiteProvider(), rejected_outcome_service=rejected_service)  # type: ignore[arg-type]
+        service = OpportunityOutcomeService(
+            repo,
+            kite_provider_factory=lambda: FakeKiteProvider(),
+            rejected_outcome_service=rejected_service,
+            market_session_provider=lambda: "AFTER_MARKET",
+        )  # type: ignore[arg-type]
 
         result = service.evaluate_once()
         analysis = rejected_repo.analyze(symbol="BANKNIFTY")
@@ -153,6 +158,32 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
         self.assertEqual(analysis["sample"]["learning_eligible"], 0)
         self.assertEqual(analysis["sample"]["learning_excluded"], 1)
         self.assertEqual(analysis["learning_exclusion_reasons"]["manual_diagnostic"], 1)
+
+    def test_regular_market_defers_review_labeling_but_keeps_trade_exits(self) -> None:
+        repo = OpportunityRepository()
+        provider_calls: list[bool] = []
+
+        class FakeTradeExitService:
+            def evaluate_once(self, limit=100):  # type: ignore[no-untyped-def]
+                return {"evaluated": 1, "limit": limit}
+
+        def provider_factory():
+            provider_calls.append(True)
+            return FakeKiteProvider()
+
+        service = OpportunityOutcomeService(
+            repo,
+            kite_provider_factory=provider_factory,  # type: ignore[arg-type]
+            trade_exit_service=FakeTradeExitService(),  # type: ignore[arg-type]
+            market_session_provider=lambda: "REGULAR_MARKET",
+        )
+
+        result = service.evaluate_once(limit=10)
+
+        self.assertTrue(result["review_analysis_deferred"])
+        self.assertEqual(result["deferred_reason"], "market_open")
+        self.assertEqual(result["trade_exits"], {"evaluated": 1, "limit": 10})
+        self.assertEqual(provider_calls, [])
 
 
 if __name__ == "__main__":

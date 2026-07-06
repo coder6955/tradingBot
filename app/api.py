@@ -1,6 +1,9 @@
 import json
+import logging
+import threading
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, time
+from typing import Callable
 
 from fastapi import Body, FastAPI, HTTPException
 from sqlalchemy import text
@@ -40,6 +43,7 @@ from app.services.outcome_learning_service import OutcomeLearningService
 from app.services.professional_readiness_service import ProfessionalReadinessService
 from app.services.professional_insights_service import ProfessionalInsightsService
 from app.services.risk_management_service import RiskManagementService
+from app.services.runtime_trading_config_service import RuntimeTradingConfigService
 from app.services.strategy_edge_service import StrategyEdgeService
 from app.services.strategy_validation_repository import StrategyValidationRepository
 from app.services.strategy_version_registry import StrategyVersionRegistry
@@ -47,7 +51,7 @@ from app.services.time_bucket_edge_service import TimeBucketEdgeService
 from app.services.trade_exit_service import TradeExitService
 from app.services.trade_repository import TradeRepository
 from app.services.trade_setup_service import OptionContract
-from app.services.time_utils import format_ist
+from app.services.time_utils import format_ist, ist_now_naive
 from app.providers.kite_provider import KiteProvider
 from app.providers.kite_feed import KiteFeed
 from app.providers.token_store import save_access_token, load_access_token
@@ -71,6 +75,8 @@ Recommended sequence:
 
 Safety note: signals are probability-ranked trade setups, not guaranteed-profit trades.
 """
+
+logger = logging.getLogger(__name__)
 
 OPENAPI_TAGS = [
     {"name": "01 System", "description": "Start here: app health, DB health, and workflow overview."},
@@ -100,6 +106,7 @@ opportunity_repository = OpportunityRepository()
 rejected_opportunity_repository = RejectedOpportunityRepository()
 trade_repository = TradeRepository()
 risk_management_service = RiskManagementService(trade_repository)
+runtime_trading_config_service = RuntimeTradingConfigService()
 notification_service = NotificationService()
 greeks_service = GreeksService()
 option_quality_service = OptionQualityService(greeks_service)
@@ -130,6 +137,9 @@ professional_readiness_service = ProfessionalReadinessService(
     option_history_repository=option_history_repository,
 )
 armed_entry_tracker_service: ArmedEntryTrackerService | None = None
+dashboard_broker_cache: dict[str, tuple[datetime, dict[str, object]]] = {}
+scanner_response_cache: dict[str, dict[str, object]] = {}
+scanner_response_cache_lock = threading.RLock()
 
 
 def get_kite_provider() -> KiteProvider:
@@ -214,6 +224,7 @@ opportunity_outcome_service = OpportunityOutcomeService(
     trade_exit_service=trade_exit_service,
     rejected_outcome_service=rejected_opportunity_outcome_service,
     market_data_coordinator=market_data_coordinator,
+    market_session_provider=kite_websocket_price_feed.market_session,
 )
 broker_sync_service = BrokerSyncService(
     trade_repository=trade_repository,
@@ -245,6 +256,17 @@ async def startup_automation() -> None:
         pass
     if settings.enable_kite_websocket:
         active_trade_price_feed.start()
+    try:
+        if _scanner_market_is_open():
+            _start_scanner_refresh(
+                cache_key=_scanner_cache_key(side=settings.automation_side, symbols=settings.automation_symbols, limit=settings.automation_scan_limit, order_mode=settings.default_order_mode),
+                side=settings.automation_side,
+                symbols=settings.automation_symbols,
+                limit=settings.automation_scan_limit,
+                order_mode=settings.default_order_mode,
+            )
+    except Exception:
+        pass
     try:
         broker_sync_service.sync_open_trades(limit=100)
         broker_sync_service.reconcile_startup_positions()
@@ -454,6 +476,21 @@ def command_center_dashboard() -> HTMLResponse:
     .feed-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     details { margin-top: 12px; border-top: 1px solid #eaecf0; padding-top: 10px; }
     summary { cursor: pointer; font-weight: 600; color: #344054; }
+    .modal { display: none; position: fixed; inset: 0; background: rgba(16, 24, 40, .48); z-index: 30; align-items: center; justify-content: center; padding: 18px; }
+    .modal.open { display: flex; }
+    .modal-card { width: min(780px, 100%); max-height: 92vh; overflow: auto; background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 16px; box-shadow: 0 24px 70px rgba(16, 24, 40, .28); }
+    .modal-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+    .modal-head h2 { font-size: 18px; margin-top: 8px; }
+    .confirm-copy { color: #475467; font-size: 13px; margin: 4px 0 10px; }
+    .warning { border: 1px solid #fedf89; background: #fffaeb; color: #93370d; border-radius: 8px; padding: 10px; margin: 8px 0 12px; font-size: 13px; }
+    .check-row { display: flex; gap: 10px; align-items: flex-start; border: 1px solid #eaecf0; border-radius: 8px; padding: 10px; margin: 8px 0; background: #fff; }
+    .check-row input { width: auto; min-height: auto; margin-top: 3px; }
+    .check-row span { display: block; color: #667085; font-size: 12px; line-height: 1.35; margin-top: 3px; }
+    .check-row.locked { background: #f9fafb; }
+    .check-row.disabled { opacity: .55; }
+    .check-row.final { border-color: #99f6e4; background: #f0fdfa; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+    .error { color: var(--bad); font-weight: 700; font-size: 13px; min-height: 18px; margin-top: 8px; }
     @media (max-width: 1180px) { .topbar,.control-grid,.data-grid,.raw-grid { grid-template-columns: 1fr; } .full { grid-column: auto; } .watch,.metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 680px) { main, header { padding-left: 12px; padding-right: 12px; } header { align-items: flex-start; flex-direction: column; } .status,.metrics,.links,.row,.watch { grid-template-columns: 1fr; } .actions { width: 100%; } }
   </style>
@@ -485,7 +522,7 @@ def command_center_dashboard() -> HTMLResponse:
     <section class="control-grid">
       <div class="panel">
         <h2>Automation</h2>
-        <label>Order mode</label><select id="orderMode"><option value="paper">Paper orders</option><option value="live">Live orders</option></select>
+        <label>Order mode</label><select id="orderMode" onchange="openModeConfirm(this.value)"><option value="paper">Paper orders</option><option value="live">Live orders</option></select>
         <div class="actions">
           <button onclick="startAutomation()">Start</button><button class="danger" onclick="stopAutomation()">Stop</button>
           <button class="secondary" onclick="scanOnce()">Scan Once</button><button class="secondary" onclick="evaluateOpen()">Evaluate Open</button>
@@ -553,6 +590,31 @@ def command_center_dashboard() -> HTMLResponse:
       </div>
     </section>
   </main>
+  <div class="modal" id="modeConfirm">
+    <div class="modal-card">
+      <div class="modal-head">
+        <div>
+          <h2 id="modeConfirmTitle">Confirm Automation Mode</h2>
+          <div class="confirm-copy" id="modeConfirmCopy">Review what this will change for the running app session.</div>
+        </div>
+        <button class="secondary" onclick="closeModeConfirm()">Close</button>
+      </div>
+      <div class="warning" id="modeConfirmWarning"></div>
+      <h2>Required Settings</h2>
+      <div id="modeRequired"></div>
+      <h2>Optional Choices</h2>
+      <div id="modeOptional"></div>
+      <label class="check-row final">
+        <input type="checkbox" id="modeFinalAck">
+        <div><strong>I understand and confirm</strong><span>For live mode, this can place real Zerodha orders and square-off orders after existing risk checks pass.</span></div>
+      </label>
+      <div class="error" id="modeConfirmError"></div>
+      <div class="modal-actions">
+        <button onclick="applyModeConfirm()">Apply Mode</button>
+        <button class="secondary" onclick="closeModeConfirm()">Cancel</button>
+      </div>
+    </div>
+  </div>
 <script>
 async function getJson(path) {
   const res = await fetch(path);
@@ -564,6 +626,8 @@ async function postJson(path, body={}) {
   if (!res.ok) throw new Error(`${path}: ${res.status}`);
   return await res.json();
 }
+let pendingRuntimeMode = "paper";
+window.lastAppliedMode = "paper";
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 }
@@ -622,7 +686,7 @@ function renderLatestWatch(signal) {
     ${watchItem("Reason", t.entry_timing_reason || "Qualified signal")}
   </div>`;
 }
-function renderReady(h, d, k, au, a, m, c, ws, risk, latest, trades) {
+function renderReady(h, d, k, au, a, m, c, ws, risk, latest, trades, runtime) {
   const blockers = [];
   if (h.status !== "ok") blockers.push("API");
   if (d.status !== "ok") blockers.push("Database");
@@ -632,7 +696,7 @@ function renderReady(h, d, k, au, a, m, c, ws, risk, latest, trades) {
   if (!m.running) blockers.push("Exit monitor stopped");
   if ((ws.websocket_enabled || ws.enabled) && ws.websocket_connected === false) blockers.push("WebSocket");
   const panel = document.getElementById("readyPanel");
-  const mode = au.config?.order_mode || a.mode || "paper";
+  const mode = runtime?.mode || au.config?.order_mode || a.mode || "paper";
   const sig = latestSignal(latest);
   const active = firstOpenTrade(trades.trades || []);
   const state = timing(sig).entry_timing_state || sig?.setup_state || (sig ? "SIGNAL" : "NO_ACTIVE_SETUP");
@@ -670,6 +734,67 @@ function renderDecisionFeed(feed) {
     </div>`;
   }).join("");
 }
+function settingExplanation(key, value) {
+  const map = {
+    LIVE_TRADING_MODE: "Allows the app to submit real Zerodha orders when all live confirmations and risk checks pass.",
+    PAPER_TRADING_MODE: "Keeps orders simulated inside the app while still using real market data.",
+    ENABLE_AUTO_SQUAREOFF: "Allows the exit monitor to square off trades using SL, targets, trailing SL, time-stop, and invalidation logic.",
+    LIVE_AUTO_SQUAREOFF: "Allows live open trades to be exited by placing a real SELL order through Zerodha.",
+    ENABLE_KITE_WEBSOCKET: "Uses Kite WebSocket ticks for active trade monitoring and premium candle building.",
+    MAX_OPEN_TRADES: "Limits how many trades can remain open at the same time."
+  };
+  return map[key] || `Sets ${key} to ${value}.`;
+}
+async function openModeConfirm(mode) {
+  pendingRuntimeMode = mode || "paper";
+  const modal = document.getElementById("modeConfirm");
+  const error = document.getElementById("modeConfirmError");
+  error.textContent = "";
+  document.getElementById("modeFinalAck").checked = pendingRuntimeMode === "paper";
+  try {
+    const data = await getJson(`/runtime/trading-config/preview?mode=${encodeURIComponent(pendingRuntimeMode)}`);
+    document.getElementById("modeConfirmTitle").textContent = `${data.mode.toUpperCase()} Automation Mode`;
+    document.getElementById("modeConfirmCopy").textContent = data.required?.summary || "Review runtime settings before applying.";
+    document.getElementById("modeConfirmWarning").textContent = data.warning || "";
+    const required = data.required?.settings_overrides || {};
+    document.getElementById("modeRequired").innerHTML = Object.entries(required).map(([key, value]) =>
+      `<label class="check-row locked"><input type="checkbox" checked disabled><div><strong>${esc(key)} = ${esc(value)}</strong><span>${esc(settingExplanation(key, value))}</span></div></label>`
+    ).join("");
+    document.getElementById("modeOptional").innerHTML = (data.optional_choices || []).map(choice =>
+      `<label class="check-row ${choice.enabled ? "" : "disabled"}"><input type="checkbox" data-runtime-option="${esc(choice.key)}" ${choice.default ? "checked" : ""} ${choice.enabled ? "" : "disabled"}><div><strong>${esc(choice.label)}</strong><span>${esc(choice.description)}</span></div></label>`
+    ).join("");
+    modal.classList.add("open");
+  } catch (e) {
+    error.textContent = e.message;
+    modal.classList.add("open");
+  }
+}
+function closeModeConfirm() {
+  document.getElementById("modeConfirm").classList.remove("open");
+  document.getElementById("orderMode").value = window.lastAppliedMode || "paper";
+}
+async function applyModeConfirm() {
+  const error = document.getElementById("modeConfirmError");
+  const ack = document.getElementById("modeFinalAck").checked;
+  if (!ack) { error.textContent = "Please confirm that you understand this mode change."; return; }
+  const options = {};
+  document.querySelectorAll("[data-runtime-option]").forEach(input => { options[input.dataset.runtimeOption] = input.checked; });
+  try {
+    const applied = await postJson("/runtime/trading-config/apply", {
+      mode: pendingRuntimeMode,
+      options,
+      warning_acknowledged: ack,
+      confirmed_by: "dashboard"
+    });
+    window.lastAppliedMode = applied.mode || pendingRuntimeMode;
+    document.getElementById("orderMode").value = window.lastAppliedMode;
+    document.getElementById("modeConfirm").classList.remove("open");
+    document.getElementById("actionResult").textContent = JSON.stringify(applied, null, 2);
+    await refreshAll();
+  } catch (e) {
+    error.textContent = e.message;
+  }
+}
 function payload() {
   const orderMode = document.getElementById("orderMode").value;
   return {
@@ -692,6 +817,21 @@ async function showAction(fn) {
 function scanOnce(){ showAction(() => postJson("/auto-trader/scan-once", {...payload(), place_orders:false})); }
 function evaluateOpen(){ showAction(() => postJson("/opportunities/evaluate-open", {limit:100})); }
 function runAfterMarketResearch(){ showAction(() => postJson("/research/after-market/run", {force:false})); }
+const dashboardEndpointCache = {};
+async function getJsonCached(cacheKey, url, ttlMs) {
+  const now = Date.now();
+  const cached = dashboardEndpointCache[cacheKey];
+  if (cached && now - cached.at <= ttlMs) return cached.data;
+  const data = await getJson(url);
+  dashboardEndpointCache[cacheKey] = {at: now, data};
+  return data;
+}
+async function getReviewJsonCached(cacheKey, url, ttlMs) {
+  if (window.dashboardMarketOpen === true) {
+    return {status:"deferred", reason:"market_open", market_session:"REGULAR_MARKET", source:"dashboard_skip"};
+  }
+  return getJsonCached(cacheKey, url, ttlMs);
+}
 function automationPayload(){ return {
   order_mode: document.getElementById("orderMode").value,
   symbols: document.getElementById("symbols").value,
@@ -700,18 +840,24 @@ function automationPayload(){ return {
   snapshot_interval_seconds: 180,
   outcome_interval_seconds: Number(document.getElementById("outcomeInterval").value),
   checkpoint_overlap_minutes: 30,
-  intraday_candle_sync: true,
+  intraday_candle_sync: false,
   intraday_candle_sync_minutes: 5,
   scan_limit: Number(document.getElementById("limit").value),
   place_orders: true,
   confirm_live: document.getElementById("orderMode").value === "live"
 }; }
-function startAutomation(){ showAction(() => postJson("/automation/start", automationPayload())); }
+function startAutomation(){ showAction(async () => {
+  const cfg = await getJson("/runtime/trading-config");
+  const runtimeAutomation = cfg.effective?.automation || {};
+  return postJson("/automation/start", {...automationPayload(), ...runtimeAutomation});
+}); }
 function stopAutomation(){ showAction(() => postJson("/automation/stop")); }
-function loadControls(config) {
+function loadControls(config, runtime) {
   if (window.controlsLoaded || !config) return;
   document.getElementById("symbols").value = config.symbols || "";
-  document.getElementById("orderMode").value = config.order_mode || "paper";
+  const mode = runtime?.mode || config.order_mode || "paper";
+  document.getElementById("orderMode").value = mode;
+  window.lastAppliedMode = mode;
   document.getElementById("side").value = config.side || "BUY";
   document.getElementById("interval").value = config.scan_interval_seconds || 30;
   document.getElementById("outcomeInterval").value = config.outcome_interval_seconds || 30;
@@ -719,24 +865,26 @@ function loadControls(config) {
   window.controlsLoaded = true;
 }
 async function refreshAll() {
-  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, collector, ingest, websocket, cache, decisionFeed, afterMarketResearch] = await Promise.allSettled([
-    getJson("/health"), getJson("/db/health"), getJson("/kite/health"), getJson("/auto-trader/status"), getJson("/opportunity-monitor/status"),
-    getJson("/opportunities/performance"), getJson("/auto-trader/latest"), getJson("/opportunities?limit=50"), getJson("/opportunities/failure-analysis"),
-    getJson("/research/outcome-learning"), getJson("/auto-trader/executions"), getJson("/paper/trades"), getJson("/kite/margins"), getJson("/kite/positions"), getJson("/risk/status"), getJson("/trades?limit=50"),
-    getJson("/automation/status"), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30"), getJson("/research/after-market/status")
+  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, runtimeConfig, collector, ingest, websocket, cache, decisionFeed, afterMarketResearch] = await Promise.allSettled([
+    getJson("/health"), getJson("/db/health"), getJsonCached("kiteHealth", "/kite/health", DASHBOARD_BROKER_REFRESH_MS), getJson("/auto-trader/status"), getJson("/opportunity-monitor/status"),
+    getJson("/opportunities/performance"), getJson("/auto-trader/latest"), getJsonCached("journal", "/opportunities?limit=50", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("failures", "/opportunities/failure-analysis", DASHBOARD_SLOW_REFRESH_MS),
+    getReviewJsonCached("learning", "/research/outcome-learning", DASHBOARD_SLOW_REFRESH_MS), getJson("/auto-trader/executions"), getJson("/paper/trades"), getJsonCached("margins", "/kite/margins", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("positions", "/kite/positions", DASHBOARD_BROKER_REFRESH_MS), getJson("/risk/status"), getJson("/trades?limit=50"),
+    getJson("/automation/status"), getJsonCached("runtimeConfig", "/runtime/trading-config", DASHBOARD_SLOW_REFRESH_MS), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30"), getJsonCached("afterMarketResearch", "/research/after-market/status", DASHBOARD_SLOW_REFRESH_MS)
   ]);
   const val = r => r.status === "fulfilled" ? r.value : {error: r.reason.message};
-  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), c=val(collector), ing=val(ingest), ws=val(websocket), cacheStatus=val(cache), feed=val(decisionFeed), researchJob=val(afterMarketResearch);
-  loadControls(au.config);
+  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), runtime=val(runtimeConfig), c=val(collector), ing=val(ingest), ws=val(websocket), cacheStatus=val(cache), feed=val(decisionFeed), researchJob=val(afterMarketResearch);
+  window.dashboardMarketOpen = Boolean(au.market_open) || researchJob.market_session === "REGULAR_MARKET";
+  loadControls(au.config, runtime);
   document.getElementById("statusCards").innerHTML =
     pill("API", h.status === "ok" ? "ok" : "bad", h.status || h.error) + pill("Database", d.status === "ok" ? "ok" : "bad", d.status || d.error) +
+    pill("Runtime Mode", runtime.mode === "live" ? "bad" : "ok", (runtime.mode || "paper").toUpperCase()) +
     pill("Kite", k.status === "ok" ? "ok" : "bad", k.status || k.error || "check") + pill("WebSocket", ws.websocket_connected ? "ok" : "warn", ws.websocket_connected ? "connected" : (ws.websocket_enabled ? "not connected" : "disabled")) +
     pill("Automation", au.running ? "ok" : "bad", au.running ? (au.market_open ? "running, market open" : "running") : "stopped") +
     pill("Auto Trader", a.running ? "ok" : "bad", a.running ? "running" : "stopped") +
     pill("Collector", c.running ? "ok" : "warn", c.running ? "running" : "stopped") + pill("Exit Monitor", m.running ? "ok" : "bad", m.running ? "running" : "stopped") +
     pill("Research Job", researchJob.running ? "warn" : (researchJob.enabled ? "ok" : "warn"), researchJob.running ? "running" : (researchJob.last_run_date ? `last ${researchJob.last_run_date}` : researchJob.next_action || "idle")) +
     pill("Data Cache", cacheStatus.status === "ok" ? "ok" : "warn", cacheStatus.status || cacheStatus.error || "check");
-  renderReady(h, d, k, au, a, m, c, ws, r, l, t);
+  renderReady(h, d, k, au, a, m, c, ws, r, l, t, runtime);
   renderActiveTrade(firstOpenTrade(t.trades || []));
   renderLatestWatch(latestSignal(l));
   renderDecisionFeed(feed);
@@ -744,7 +892,7 @@ async function refreshAll() {
     metric("Last scan", a.last_scan_at || "-") + metric("Latest found", a.latest_count || 0) + metric("Executions", a.execution_count || 0) +
     metric("Open", p.open || 0) + metric("Closed", p.closed || 0) + metric("Win rate", p.closed ? `${Math.round((p.wins || 0) / p.closed * 100)}%` : "0%") +
     metric("P&L", p.pnl || 0) + metric("Risk", r.passed === false ? "Blocked" : "Allowed") + metric("Research", researchJob.last_run_date || researchJob.next_action || "-");
-  document.getElementById("activityJson").textContent = JSON.stringify({automation:au, auto_trader:a, collector:c, ingestion:ing, monitor:m, performance:p, risk:r, websocket:ws, cache:cacheStatus, after_market_research:researchJob, decision_feed:feed}, null, 2);
+  document.getElementById("activityJson").textContent = JSON.stringify({automation:au, runtime_config:runtime, auto_trader:a, collector:c, ingestion:ing, monitor:m, performance:p, risk:r, websocket:ws, cache:cacheStatus, after_market_research:researchJob, decision_feed:feed}, null, 2);
   table(document.getElementById("latestTable"), l.opportunities || [], ["symbol","action","tradingsymbol","entry_price","stop_loss","target_1","quantity","score"]);
   table(document.getElementById("journalTable"), j.opportunities || [], ["id","created_at","action","tradingsymbol","entry_price","stop_loss","target_1","score","status","outcome","pnl"]);
   document.getElementById("failureJson").textContent = JSON.stringify(f, null, 2);
@@ -758,8 +906,11 @@ async function refreshAll() {
   document.getElementById("accountJson").textContent = JSON.stringify({margins: val(margins), positions: val(positions)}, null, 2);
   document.getElementById("refreshText").textContent = `Last refreshed ${new Date().toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })} IST`;
 }
+const DASHBOARD_REFRESH_MS = 15000;
+const DASHBOARD_BROKER_REFRESH_MS = 60000;
+const DASHBOARD_SLOW_REFRESH_MS = 60000;
 refreshAll();
-setInterval(refreshAll, 5000);
+setInterval(refreshAll, DASHBOARD_REFRESH_MS);
 </script>
 </body>
 </html>
@@ -967,6 +1118,12 @@ def trade_record_to_dict(record) -> dict[str, object]:
         "exit_last_error": getattr(record, "exit_last_error", None),
         "exit_requested_at": format_ist(getattr(record, "exit_requested_at", None)),
         "exit_confirmed_at": format_ist(getattr(record, "exit_confirmed_at", None)),
+        "protective_order_id": getattr(record, "protective_order_id", None),
+        "protective_order_status": getattr(record, "protective_order_status", None),
+        "protective_trigger_price": getattr(record, "protective_trigger_price", None),
+        "protective_last_error": getattr(record, "protective_last_error", None),
+        "protective_requested_at": format_ist(getattr(record, "protective_requested_at", None)),
+        "protective_cancelled_at": format_ist(getattr(record, "protective_cancelled_at", None)),
         "price_source": getattr(record, "price_source", None),
         "price_timestamp": format_ist(getattr(record, "price_timestamp", None)),
         "price_age_seconds": getattr(record, "price_age_seconds", None),
@@ -1170,7 +1327,8 @@ async def start_automation(
         ],
     ),
 ) -> dict[str, object]:
-    return automation_supervisor_service.start(payload or {})
+    merged_payload = runtime_trading_config_service.automation_payload(payload or {})
+    return automation_supervisor_service.start(merged_payload)
 
 
 @app.post("/automation/stop", tags=["12 Automation"], summary="Stop automation supervisor and intraday collector/scanner")
@@ -1191,6 +1349,21 @@ def run_automation_once(payload: dict[str, object] | None = Body(default=None)) 
 @app.get("/automation/status", tags=["12 Automation"], summary="Get automation supervisor status")
 def get_automation_status() -> dict[str, object]:
     return automation_supervisor_service.status()
+
+
+@app.get("/runtime/trading-config", tags=["12 Automation"], summary="Inspect dashboard runtime trading mode config")
+def get_runtime_trading_config() -> dict[str, object]:
+    return runtime_trading_config_service.status()
+
+
+@app.get("/runtime/trading-config/preview", tags=["12 Automation"], summary="Preview paper/live dashboard mode changes")
+def preview_runtime_trading_config(mode: str = "paper") -> dict[str, object]:
+    return runtime_trading_config_service.preview(mode)
+
+
+@app.post("/runtime/trading-config/apply", tags=["12 Automation"], summary="Apply dashboard runtime trading mode config")
+def apply_runtime_trading_config(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
+    return runtime_trading_config_service.apply(payload or {})
 
 
 @app.post(
@@ -1361,7 +1534,8 @@ def get_research_settings() -> dict[str, object]:
             "premium_invalidation_exit": settings.enable_premium_invalidation_exit,
             "broker_emergency_sl": {
                 "enabled": settings.enable_broker_emergency_sl,
-                "status": "not_supported_by_current_order_service",
+                "status": "supported_when_enabled_for_live_filled_buy_trades",
+                "order_type": "SL-M",
                 "fallback": "startup broker sync plus software square-off",
             },
             "partial_booking": {
@@ -1483,6 +1657,8 @@ def get_market_insights(
     description="Shows which symbols, actions, setup types, day types, and time buckets have enough closed-trade evidence to trust or avoid.",
 )
 def get_outcome_learning() -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("outcome_learning"):
+        return deferred
     return {"status": "ok", "learning": outcome_learning_service.analyze()}
 
 
@@ -1493,6 +1669,8 @@ def get_outcome_learning() -> dict[str, object]:
     description="Studies saved opportunities by CE/PE, expiry day, time bucket, score bucket, setup type, and failure tags.",
 )
 def get_opportunity_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("opportunity_analytics"):
+        return deferred
     return opportunity_analytics_service.analyze(symbol=symbol, limit=limit)
 
 
@@ -1503,6 +1681,8 @@ def get_opportunity_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> d
     description="Separates execution quality from signal quality: fill rate, entry deviation, CE/PE results, time bucket, and P&L metrics.",
 )
 def get_execution_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("execution_analytics"):
+        return deferred
     return execution_analytics_service.analyze(symbol=symbol, limit=limit)
 
 
@@ -1513,6 +1693,8 @@ def get_execution_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dic
     description="Combines accepted vs rejected analysis, time buckets, DTE, factor attribution, exits, data quality, and shadow/live evidence.",
 )
 def get_professional_insights(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("professional_insights"):
+        return deferred
     return professional_insights_service.analyze(symbol=symbol, limit=limit)
 
 
@@ -1526,6 +1708,8 @@ def get_professional_insights(symbol: str = "BANKNIFTY", limit: int = 1000) -> d
     ),
 )
 def get_research_engine_report(symbol: str = "BANKNIFTY", limit: int = 2000) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("research_engine"):
+        return deferred
     return professional_insights_service.research_engine_report(symbol=symbol, limit=limit)
 
 
@@ -1546,6 +1730,8 @@ def get_threshold_validation_report(
     setup_family: str | None = None,
     mode: str = "all",
 ) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("threshold_validation"):
+        return deferred
     parsed_start = datetime.fromisoformat(start_date).date() if start_date else None
     parsed_end = datetime.fromisoformat(end_date).date() if end_date else None
     return professional_insights_service.threshold_validation_report(
@@ -1564,6 +1750,8 @@ def get_threshold_validation_report(
     summary="Inspect conservative paper/backtest fill realism and execution drag",
 )
 def get_execution_realism_report(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("execution_realism"):
+        return deferred
     return professional_insights_service.execution_realism_report(symbol=symbol, limit=limit)
 
 
@@ -1574,6 +1762,8 @@ def get_execution_realism_report(symbol: str = "BANKNIFTY", limit: int = 1000) -
     description="Shows the day's accepted setups, rejected setups, trades, outcomes, top rejection gates, and review timeline.",
 )
 def get_daily_review(symbol: str = "BANKNIFTY", review_date: str | None = None, limit: int = 1000) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("daily_review"):
+        return deferred
     parsed_date = datetime.fromisoformat(review_date).date() if review_date else None
     return professional_insights_service.daily_review(symbol=symbol, review_date=parsed_date, limit=limit)
 
@@ -1585,6 +1775,8 @@ def get_daily_review(symbol: str = "BANKNIFTY", review_date: str | None = None, 
     description="Small paper/live-shadow evidence summary for one Bank Nifty session. This does not replay rejected trades or change strategy.",
 )
 def get_daily_banknifty_summary(date: str | None = None) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("daily_banknifty_summary"):
+        return deferred
     parsed_date = datetime.fromisoformat(date).date() if date else None
     return professional_insights_service.daily_banknifty_summary(summary_date=parsed_date)
 
@@ -1624,6 +1816,8 @@ def run_after_market_research(
     summary="Unified opportunity, rejection, and trade timeline",
 )
 def get_trade_journal(symbol: str = "BANKNIFTY", limit: int = 200) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("trade_journal"):
+        return deferred
     return professional_insights_service.trade_journal(symbol=symbol, limit=limit)
 
 
@@ -1633,6 +1827,8 @@ def get_trade_journal(symbol: str = "BANKNIFTY", limit: int = 200) -> dict[str, 
     summary="Inspect stored candle and option snapshot completeness",
 )
 def get_data_completeness(symbol: str = "BANKNIFTY") -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("data_completeness"):
+        return deferred
     return professional_insights_service.data_completeness(symbol=symbol)
 
 
@@ -1642,6 +1838,8 @@ def get_data_completeness(symbol: str = "BANKNIFTY") -> dict[str, object]:
     summary="Compare shadow, paper, and live trade evidence",
 )
 def get_shadow_comparison(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("shadow_comparison"):
+        return deferred
     return professional_insights_service.analyze(symbol=symbol, limit=limit)["shadow_mode_comparison"]
 
 
@@ -1657,6 +1855,8 @@ def get_professional_readiness(
     direction: str = "BOTH",
     limit: int = 3000,
 ) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("professional_readiness"):
+        return deferred
     return professional_readiness_service.report(symbol=symbol, timeframe=timeframe, direction=direction, limit=limit)
 
 
@@ -1776,6 +1976,8 @@ def run_research_backtest(
         ]
     ),
 ) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("backtest"):
+        return deferred
     try:
         return backtest_service.run(
             symbol=str(payload.get("symbol") or "NIFTY"),
@@ -1809,6 +2011,8 @@ def run_option_premium_backtest(
         ]
     ),
 ) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("option_premium_backtest"):
+        return deferred
     try:
         return backtest_service.run_option_premium(
             symbol=str(payload.get("symbol") or "NIFTY"),
@@ -1841,6 +2045,8 @@ def run_ablation_backtest(
         ]
     ),
 ) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("ablation_backtest"):
+        return deferred
     try:
         return backtest_service.run_ablation(
             symbol=str(payload.get("symbol") or "BANKNIFTY"),
@@ -1873,6 +2079,8 @@ def run_walk_forward_validation(
         ]
     ),
 ) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("walk_forward"):
+        return deferred
     try:
         return backtest_service.run_walk_forward(
             symbol=str(payload.get("symbol") or "NIFTY"),
@@ -1904,6 +2112,8 @@ def validate_strategy_edge(
         ]
     ),
 ) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("strategy_edge_validation"):
+        return deferred
     try:
         return strategy_edge_service.validate(
             symbol=str(payload.get("symbol") or "NIFTY"),
@@ -1939,6 +2149,8 @@ def rank_strategy_edge(
         ]
     ),
 ) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("strategy_ranking"):
+        return deferred
     symbols = parse_symbol_list(payload.get("symbols"))
     direction_value = payload.get("directions") or "CALL,PUT"
     directions = [item.strip().upper() for item in str(direction_value).split(",") if item.strip()]
@@ -2003,6 +2215,8 @@ def import_option_history(
         ]
     ),
 ) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("option_history_import"):
+        return deferred
     try:
         rows = payload.get("snapshots")
         if not isinstance(rows, list):
@@ -2018,6 +2232,8 @@ def import_option_history(
     summary="List stored historical option quote snapshots",
 )
 def list_option_history(underlying: str | None = None, limit: int = 20) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("option_history"):
+        return deferred
     records = option_history_repository.latest_snapshots(underlying=underlying, limit=limit)
     return {
         "count": len(records),
@@ -2053,6 +2269,43 @@ def get_signals(side: str = "BUY", limit: int = 10) -> list[dict[str, object]]:
     description="Use this for manual Bank Nifty scanning. Example: `/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3`.",
 )
 def get_opportunities(side: str = "BUY", symbols: str | None = None, limit: int = 10, order_mode: str = "paper") -> dict[str, object]:
+    if not _scanner_market_is_open():
+        return {
+            "mode": order_mode.lower(),
+            "market_data": "not_requested",
+            "kite_access_token": bool(load_access_token()),
+            "side": side.upper(),
+            "count": 0,
+            "saved_ids": [],
+            "opportunities": [],
+            "market_open": False,
+            "reason": "market_closed",
+            "disclaimer": "Scanner opportunities are only evaluated during configured market hours.",
+        }
+    cache_key = _scanner_cache_key(side=side, symbols=symbols, limit=limit, order_mode=order_mode)
+    cached = _scanner_cached_response(cache_key)
+    if cached is not None:
+        if cached.get("refresh_due"):
+            _start_scanner_refresh(cache_key=cache_key, side=side, symbols=symbols, limit=limit, order_mode=order_mode)
+        return cached["payload"]  # type: ignore[return-value]
+
+    _start_scanner_refresh(cache_key=cache_key, side=side, symbols=symbols, limit=limit, order_mode=order_mode)
+    return {
+        "status": "warming",
+        "mode": order_mode.lower(),
+        "market_data": "refresh_in_progress",
+        "kite_access_token": bool(load_access_token()),
+        "side": side.upper(),
+        "count": 0,
+        "saved_ids": [],
+        "opportunities": [],
+        "market_open": True,
+        "reason": "scanner_refresh_started",
+        "disclaimer": "Scanner refresh is running in the background; retry shortly for the latest cached result.",
+    }
+
+
+def _build_scanner_opportunities_payload(side: str, symbols: str | None, limit: int, order_mode: str) -> dict[str, object]:
     scanner_service = get_scanner_service()
     symbol_list = [item.strip().upper() for item in symbols.split(",")] if symbols else None
     recommendations = scanner_service.scan_symbols(
@@ -2072,6 +2325,103 @@ def get_opportunities(side: str = "BUY", symbols: str | None = None, limit: int 
         "opportunities": [asdict(signal) for signal in recommendations[:limit]],
         "disclaimer": "Signals are probability-ranked trade setups with risk checks, not guaranteed profits.",
     }
+
+
+def _scanner_cache_key(*, side: str, symbols: str | None, limit: int, order_mode: str) -> str:
+    normalized_symbols = ",".join(item.strip().upper() for item in (symbols or "").split(",") if item.strip())
+    return "|".join([side.upper(), normalized_symbols or "DEFAULT", str(max(1, int(limit))), order_mode.lower()])
+
+
+def _scanner_cached_response(cache_key: str) -> dict[str, object] | None:
+    now = ist_now_naive()
+    fresh_ttl = max(1, int(settings.scanner_response_cache_ttl_seconds))
+    stale_ttl = max(fresh_ttl, int(settings.scanner_response_stale_ttl_seconds))
+    with scanner_response_cache_lock:
+        entry = scanner_response_cache.get(cache_key)
+        if not entry:
+            return None
+        payload = entry.get("payload")
+        cached_at = entry.get("cached_at")
+        if not isinstance(payload, dict) or not isinstance(cached_at, datetime):
+            return None
+        age = (now - cached_at).total_seconds()
+        if age > stale_ttl:
+            return None
+        response = {**payload, "cached": True, "cached_age_seconds": round(age, 3)}
+        return {"payload": response, "refresh_due": age > fresh_ttl}
+
+
+def _start_scanner_refresh(*, cache_key: str, side: str, symbols: str | None, limit: int, order_mode: str) -> None:
+    now = ist_now_naive()
+    stuck_after = max(5, int(settings.scanner_refresh_stuck_seconds))
+    with scanner_response_cache_lock:
+        entry = scanner_response_cache.setdefault(cache_key, {})
+        started_at = entry.get("refresh_started_at")
+        if entry.get("refreshing") and isinstance(started_at, datetime) and (now - started_at).total_seconds() < stuck_after:
+            return
+        entry["refreshing"] = True
+        entry["refresh_started_at"] = now
+
+    thread = threading.Thread(
+        target=_refresh_scanner_cache,
+        kwargs={"cache_key": cache_key, "side": side, "symbols": symbols, "limit": limit, "order_mode": order_mode},
+        name=f"scanner-refresh-{cache_key}",
+        daemon=True,
+    )
+    thread.start()
+
+
+def _refresh_scanner_cache(*, cache_key: str, side: str, symbols: str | None, limit: int, order_mode: str) -> None:
+    started = ist_now_naive()
+    try:
+        payload = _build_scanner_opportunities_payload(side=side, symbols=symbols, limit=limit, order_mode=order_mode)
+        payload = {**payload, "status": "ok", "cached": False, "refreshed_at": ist_now_naive().isoformat(sep=" ")}
+        with scanner_response_cache_lock:
+            scanner_response_cache[cache_key] = {
+                "payload": payload,
+                "cached_at": ist_now_naive(),
+                "refreshing": False,
+                "last_duration_seconds": round((ist_now_naive() - started).total_seconds(), 3),
+            }
+    except Exception as exc:
+        logger.exception("scanner refresh failed")
+        with scanner_response_cache_lock:
+            entry = scanner_response_cache.setdefault(cache_key, {})
+            entry["refreshing"] = False
+            entry["last_error"] = str(exc)
+
+
+def _scanner_market_is_open() -> bool:
+    return _current_market_session() == "REGULAR_MARKET"
+
+
+def _current_market_session() -> str:
+    now = ist_now_naive()
+    if now.weekday() >= 5:
+        return "WEEKEND"
+    market_open = _parse_market_time(settings.market_open_time)
+    market_close = _parse_market_time(settings.market_close_time)
+    if market_open <= now.time() <= market_close:
+        return "REGULAR_MARKET"
+    return "PRE_MARKET" if now.time() < market_open else "AFTER_MARKET"
+
+
+def _defer_review_analysis_during_market(report: str) -> dict[str, object] | None:
+    session = _current_market_session()
+    if session != "REGULAR_MARKET":
+        return None
+    return {
+        "status": "deferred",
+        "reason": "market_open",
+        "market_session": session,
+        "report": report,
+        "message": "Review and learning analysis is deferred until after market close to keep live trading responsive.",
+    }
+
+
+def _parse_market_time(value: str) -> time:
+    hour, minute = value.split(":", 1)
+    return time(int(hour), int(minute))
 
 
 @app.get(
@@ -2134,16 +2484,26 @@ def place_order(
             {
                 "confirm_live": False,
                 "signal": {
-                    "symbol": "NIFTY",
+                    "symbol": "BANKNIFTY",
                     "action": "BUY_CE",
                     "side": "BUY",
-                    "tradingsymbol": "NIFTY24JUN22000CE",
+                    "tradingsymbol": "BANKNIFTY26JUL58000CE",
                     "exchange": "NFO",
+                    "expiry": "2026-07-26",
+                    "strike": 58000,
                     "entry_price": 100,
                     "stop_loss": 78,
-                    "quantity": 50,
-                    "lot_size": 50,
+                    "target_1": 125,
+                    "quantity": 15,
+                    "lot_size": 15,
                     "score": 85,
+                    "factor_scores": {
+                        "strategy_metadata": {
+                            "strategy_name": "banknifty_option_buying",
+                            "strategy_version": "banknifty_option_buying_v1"
+                        },
+                        "contract": {"expiry": "2026-07-26"}
+                    },
                 },
             }
         ]
@@ -2174,8 +2534,8 @@ def get_risk_status() -> dict[str, object]:
 
 
 @app.get("/trades", tags=["04 Orders"], summary="List actual paper/live trade lifecycle records")
-def list_trades(status: str | None = None, limit: int = 100) -> dict[str, object]:
-    records = trade_repository.list_trades(status=status, limit=limit)
+def list_trades(status: str | None = None, limit: int = 100, include_artifacts: bool = False) -> dict[str, object]:
+    records = trade_repository.list_trades(status=status, limit=limit, include_artifacts=include_artifacts)
     return {"count": len(records), "trades": [trade_record_to_dict(record) for record in records]}
 
 
@@ -2187,6 +2547,20 @@ def trade_exit_alerts(limit: int = 100) -> dict[str, object]:
         "alerts": [trade_record_to_dict(record) for record in records],
         "broker_reconciliation": broker_sync_service.live_block_status(),
     }
+
+
+@app.get("/trades/test-artifacts", tags=["04 Orders"], summary="List suspected synthetic test rows in trades")
+def trade_test_artifacts(limit: int = 100) -> dict[str, object]:
+    return trade_repository.suspected_test_artifacts(limit=limit)
+
+
+@app.post("/trades/test-artifacts/quarantine", tags=["04 Orders"], summary="Quarantine suspected synthetic test rows in trades")
+def quarantine_trade_test_artifacts(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
+    payload = payload or {}
+    return trade_repository.quarantine_suspected_test_artifacts(
+        limit=int(payload.get("limit") or 100),
+        dry_run=bool(payload.get("dry_run", True)),
+    )
 
 
 @app.post("/trades/{trade_id}/close", tags=["04 Orders"], summary="Manually close a lifecycle trade")
@@ -2238,8 +2612,10 @@ def broker_reconciliation_status() -> dict[str, object]:
 def broker_emergency_protection_status() -> dict[str, object]:
     return {
         "enabled": settings.enable_broker_emergency_sl,
-        "supported": False,
-        "reason": "KiteProvider currently exposes regular market order placement only; trigger_price/GTT/OCO protective order APIs are not wrapped and validated for this flow.",
+        "supported": True,
+        "mechanism": "regular Kite SL-M protective SELL order after live entry fill confirmation",
+        "scope": "live BUY option trades only",
+        "disabled_by_default": not settings.enable_broker_emergency_sl,
         "fallback": "software exits via TradeExitService, active WebSocket/polling price checks, startup broker reconciliation, and exit-failure alerts",
     }
 
@@ -2433,6 +2809,8 @@ def get_opportunity_performance() -> dict[str, object]:
     description="Shows tags such as low premium noise, expiry-day risk, weak confirmation, and spread/slippage drag.",
 )
 def get_opportunity_failure_analysis() -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("opportunity_failure_analysis"):
+        return deferred
     return opportunity_repository.failure_analysis()
 
 
@@ -2447,6 +2825,8 @@ def get_rejected_opportunities(
     limit: int = 1000,
     learning_eligible: bool | None = None,
 ) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("rejected_opportunity_analysis"):
+        return deferred
     return rejected_opportunity_repository.analyze(symbol=symbol, limit=limit, learning_eligible=learning_eligible)
 
 
@@ -2644,9 +3024,7 @@ def kite_auth() -> RedirectResponse:
 @app.get("/kite/health", tags=["02 Kite Login"], summary="Verify Kite profile access")
 def kite_health() -> dict[str, object]:
     try:
-        kite_provider = get_kite_provider()
-        profile = kite_provider.profile()
-        return profile
+        return _cached_dashboard_broker_call("kite_health", lambda: get_kite_provider().profile())
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
 
@@ -2664,8 +3042,7 @@ def kite_websocket_status() -> dict[str, object]:
 @app.get("/kite/margins", tags=["02 Kite Login"], summary="Get Zerodha margins/funds")
 def kite_margins() -> dict[str, object]:
     try:
-        kite_provider = get_kite_provider()
-        return kite_provider.margins()
+        return _cached_dashboard_broker_call("kite_margins", lambda: get_kite_provider().margins())
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
 
@@ -2673,10 +3050,22 @@ def kite_margins() -> dict[str, object]:
 @app.get("/kite/positions", tags=["02 Kite Login"], summary="Get Zerodha positions")
 def kite_positions() -> dict[str, object]:
     try:
-        kite_provider = get_kite_provider()
-        return kite_provider.positions()
+        return _cached_dashboard_broker_call("kite_positions", lambda: get_kite_provider().positions())
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
+
+
+def _cached_dashboard_broker_call(cache_key: str, fetcher: Callable[[], dict[str, object]]) -> dict[str, object]:
+    now = ist_now_naive()
+    ttl = max(1, int(settings.dashboard_broker_cache_ttl_seconds))
+    cached = dashboard_broker_cache.get(cache_key)
+    if cached is not None:
+        cached_at, payload = cached
+        if (now - cached_at).total_seconds() <= ttl:
+            return {**payload, "cached": True, "cached_at": cached_at.isoformat(sep=" ")}
+    payload = fetcher()
+    dashboard_broker_cache[cache_key] = (now, payload)
+    return {**payload, "cached": False, "cached_at": now.isoformat(sep=" ")}
 
 
 @app.get("/kite/callback", response_class=HTMLResponse, tags=["02 Kite Login"], summary="Handle Kite redirect callback")

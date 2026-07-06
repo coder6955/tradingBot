@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
 
 from app.config import settings
 from app.services.database import OpportunityRecord, get_session
+from app.services.time_utils import ist_now_naive
 
 
 class OutcomeLearningService:
@@ -13,6 +15,11 @@ class OutcomeLearningService:
 
     WIN_OUTCOMES = {"target_1", "target_2", "target_3", "winner"}
     LOSS_OUTCOMES = {"stop_loss", "false_signal", "loser", "expired"}
+
+    def __init__(self, *, clock=None) -> None:
+        self.clock = clock or ist_now_naive
+        self._history_cache: list[dict[str, Any]] | None = None
+        self._history_cache_at: datetime | None = None
 
     def evaluate(self, *, symbol: str, action: str, factor_scores: dict[str, Any]) -> dict[str, Any]:
         if not settings.enable_outcome_learning_guard:
@@ -105,6 +112,11 @@ class OutcomeLearningService:
         }
 
     def _closed_history(self) -> list[dict[str, Any]]:
+        now = self.clock().replace(tzinfo=None)
+        ttl_seconds = max(1, int(settings.outcome_learning_cache_ttl_seconds))
+        if self._history_cache is not None and self._history_cache_at is not None:
+            if (now - self._history_cache_at).total_seconds() <= ttl_seconds:
+                return list(self._history_cache)
         session = get_session()
         try:
             records = (
@@ -114,7 +126,10 @@ class OutcomeLearningService:
                 .limit(settings.outcome_learning_lookback)
                 .all()
             )
-            return [self._history_item(record) for record in records if record.outcome in self.WIN_OUTCOMES | self.LOSS_OUTCOMES]
+            history = [self._history_item(record) for record in records if record.outcome in self.WIN_OUTCOMES | self.LOSS_OUTCOMES]
+            self._history_cache = list(history)
+            self._history_cache_at = now
+            return history
         finally:
             session.close()
 

@@ -130,8 +130,11 @@ class ApiIntegrationTests(unittest.TestCase):
         self.temp_db.close()
         init_db(f"sqlite:///{self.temp_db.name}")
         self.client = SimpleAsgiClient(api.app)
+        self.market_session_patcher = patch.object(api, "_current_market_session", return_value="AFTER_MARKET")
+        self.market_session_patcher.start()
 
     def tearDown(self) -> None:
+        self.market_session_patcher.stop()
         try:
             if os.path.exists(self.temp_db.name):
                 os.remove(self.temp_db.name)
@@ -160,6 +163,47 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("/research/after-market/status", html)
         self.assertIn("/research/research-engine", html)
         self.assertIn("/research/threshold-validation", html)
+        self.assertIn("Confirm Automation Mode", html)
+        self.assertIn("/runtime/trading-config", html)
+        self.assertIn("const DASHBOARD_REFRESH_MS = 15000;", html)
+        self.assertIn("const DASHBOARD_BROKER_REFRESH_MS = 60000;", html)
+        self.assertIn("getJsonCached(\"margins\", \"/kite/margins\", DASHBOARD_BROKER_REFRESH_MS)", html)
+        self.assertIn("getReviewJsonCached(\"learning\", \"/research/outcome-learning\"", html)
+        self.assertIn("dashboard_skip", html)
+
+    def test_runtime_trading_config_switches_live_and_paper_modes(self) -> None:
+        preview = self.client.get("/runtime/trading-config/preview?mode=live")
+        self.assertEqual(preview.status_code, 200)
+        live_preview = preview.json()
+        self.assertEqual(live_preview["mode"], "live")
+        self.assertTrue(live_preview["required"]["settings_overrides"]["LIVE_TRADING_MODE"])
+        self.assertIn("Broker emergency SL", [choice["label"] for choice in live_preview["optional_choices"]])
+
+        live = self.client.post(
+            "/runtime/trading-config/apply",
+            json={
+                "mode": "live",
+                "warning_acknowledged": True,
+                "options": {"broker_emergency_sl": True, "event_driven_live_entry": False},
+            },
+        )
+        self.assertEqual(live.status_code, 200)
+        live_payload = live.json()
+        self.assertEqual(live_payload["mode"], "live")
+        self.assertTrue(live_payload["effective"]["automation"]["confirm_live"])
+        self.assertTrue(live_payload["effective"]["runtime_options"]["broker_emergency_sl"])
+        self.assertEqual(live_payload["required"]["settings_overrides"]["MAX_OPEN_TRADES"], 1)
+
+        paper = self.client.post(
+            "/runtime/trading-config/apply",
+            json={"mode": "paper", "warning_acknowledged": True, "options": {"broker_emergency_sl": True}},
+        )
+        self.assertEqual(paper.status_code, 200)
+        paper_payload = paper.json()
+        self.assertEqual(paper_payload["mode"], "paper")
+        self.assertFalse(paper_payload["effective"]["automation"]["confirm_live"])
+        self.assertFalse(paper_payload["effective"]["runtime_options"]["broker_emergency_sl"])
+        self.assertFalse(paper_payload["required"]["settings_overrides"]["LIVE_TRADING_MODE"])
 
     def test_dashboard_decision_feed_shows_rejected_setup(self) -> None:
         RejectedOpportunityRepository().save_rejection(
@@ -187,6 +231,53 @@ class ApiIntegrationTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["count"], 1)
         self.assertIn("websocket", payload)
+
+    def test_scanner_opportunities_returns_fast_when_market_closed(self) -> None:
+        with patch.object(api, "_scanner_market_is_open", return_value=False), patch.object(api, "get_scanner_service", side_effect=AssertionError("scanner should not be built")):
+            response = self.client.get("/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["count"], 0)
+        self.assertFalse(payload["market_open"])
+        self.assertEqual(payload["reason"], "market_closed")
+        self.assertEqual(payload["market_data"], "not_requested")
+
+    def test_review_analysis_endpoints_defer_during_market(self) -> None:
+        with (
+            patch.object(api, "_current_market_session", return_value="REGULAR_MARKET"),
+            patch.object(api.outcome_learning_service, "analyze", side_effect=AssertionError("learning should be deferred")),
+            patch.object(api.opportunity_repository, "failure_analysis", side_effect=AssertionError("failure analysis should be deferred")),
+        ):
+            learning = self.client.get("/research/outcome-learning")
+            failures = self.client.get("/opportunities/failure-analysis")
+
+        self.assertEqual(learning.status_code, 200)
+        self.assertEqual(failures.status_code, 200)
+        self.assertEqual(learning.json()["status"], "deferred")
+        self.assertEqual(learning.json()["reason"], "market_open")
+        self.assertEqual(failures.json()["status"], "deferred")
+        self.assertEqual(failures.json()["report"], "opportunity_failure_analysis")
+
+    def test_scanner_opportunities_starts_background_refresh_when_cache_empty(self) -> None:
+        api.scanner_response_cache.clear()
+        started: list[str] = []
+
+        def fake_start(**kwargs):
+            started.append(kwargs["cache_key"])
+
+        with (
+            patch.object(api, "_scanner_market_is_open", return_value=True),
+            patch.object(api, "_start_scanner_refresh", side_effect=fake_start),
+            patch.object(api, "get_scanner_service", side_effect=AssertionError("scanner should not run in request thread")),
+        ):
+            response = self.client.get("/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "warming")
+        self.assertEqual(payload["reason"], "scanner_refresh_started")
+        self.assertEqual(started, ["BUY|BANKNIFTY|3|paper"])
 
     def test_scanner_armed_entries_endpoint(self) -> None:
         response = self.client.get("/scanner/armed-entries")
@@ -269,6 +360,43 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload["sample"]["total_rejected"], 1)
+
+    def test_trade_test_artifacts_can_be_quarantined(self) -> None:
+        trade_repo = TradeRepository()
+        trade_repo.create_trade(
+            Signal(
+                symbol="NIFTY",
+                action="BUY_CE",
+                side="BUY",
+                tradingsymbol="NIFTY24JUN22000CE",
+                exchange="NFO",
+                entry_price=100,
+                stop_loss=80,
+                quantity=50,
+                score=85,
+            ),
+            mode="paper",
+            status="filled",
+            requested_quantity=50,
+            placed_quantity=50,
+        )
+
+        report = self.client.get("/trades/test-artifacts")
+        self.assertEqual(report.status_code, 200)
+        self.assertEqual(report.json()["count"], 1)
+        self.assertEqual(report.json()["artifacts"][0]["tradingsymbol"], "NIFTY24JUN22000CE")
+
+        dry_run = self.client.post("/trades/test-artifacts/quarantine", json={"dry_run": True})
+        self.assertEqual(dry_run.status_code, 200)
+        self.assertTrue(dry_run.json()["dry_run"])
+        self.assertEqual(self.client.get("/trades/test-artifacts").json()["count"], 1)
+
+        quarantine = self.client.post("/trades/test-artifacts/quarantine", json={"dry_run": False})
+        self.assertEqual(quarantine.status_code, 200)
+        self.assertFalse(quarantine.json()["dry_run"])
+        self.assertEqual(self.client.get("/trades/test-artifacts").json()["count"], 0)
+        self.assertEqual(self.client.get("/trades").json()["count"], 0)
+        self.assertEqual(self.client.get("/trades?include_artifacts=true").json()["count"], 1)
 
     def test_daily_banknifty_summary_endpoint(self) -> None:
         trade_repo = TradeRepository()

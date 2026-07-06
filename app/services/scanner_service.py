@@ -145,7 +145,7 @@ class ScannerService:
         market_contexts = market_contexts or {}
         option_instruments = self._get_option_instruments()
         symbols = self._focus_symbols(symbols or self._derive_scan_universe(option_instruments))
-        market_snapshots = self._market_snapshots()
+        market_snapshots = self._market_snapshots(symbols)
         enforce_budget = str(order_mode).lower() == "live"
 
         for symbol in symbols:
@@ -635,23 +635,17 @@ class ScannerService:
         except Exception as exc:
             return {"prewarm_enabled": settings.enable_banknifty_option_prewarm, "prewarm_reason": "prewarm_error", "message": str(exc)}
 
-    def _market_snapshots(self) -> dict[str, dict[str, object]]:
+    def _market_snapshots(self, symbols: List[str] | None = None) -> dict[str, dict[str, object]]:
         if not settings.use_kite_market_data:
             return {}
-        return {
-            "NIFTY": self.feed.get_snapshot("NIFTY"),
-            "BANKNIFTY": self.feed.get_snapshot("BANKNIFTY"),
-            "INDIAVIX": self.feed.get_snapshot("INDIAVIX"),
-            "HDFCBANK": self.feed.get_snapshot("HDFCBANK"),
-            "ICICIBANK": self.feed.get_snapshot("ICICIBANK"),
-            "SBIN": self.feed.get_snapshot("SBIN"),
-            "AXISBANK": self.feed.get_snapshot("AXISBANK"),
-            "KOTAKBANK": self.feed.get_snapshot("KOTAKBANK"),
-            "INDUSINDBK": self.feed.get_snapshot("INDUSINDBK"),
-            "BANKBARODA": self.feed.get_snapshot("BANKBARODA"),
-            "PNB": self.feed.get_snapshot("PNB"),
-            "CANBK": self.feed.get_snapshot("CANBK"),
-        }
+        requested = {symbol.upper() for symbol in symbols or []}
+        context_symbols = {"NIFTY", "BANKNIFTY", "INDIAVIX", *requested}
+        if "BANKNIFTY" in requested:
+            context_symbols.update({"HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "INDUSINDBK", "BANKBARODA", "PNB", "CANBK"})
+        ordered = [symbol for symbol in ["NIFTY", "BANKNIFTY", "INDIAVIX", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "INDUSINDBK", "BANKBARODA", "PNB", "CANBK"] if symbol in context_symbols]
+        if hasattr(self.feed, "get_snapshots"):
+            return self.feed.get_snapshots(ordered)  # type: ignore[no-any-return]
+        return {symbol: self.feed.get_snapshot(symbol) for symbol in ordered}
 
     def _quote_chain_options(
         self,
@@ -661,16 +655,27 @@ class ScannerService:
     ) -> dict[str, object]:
         if not hasattr(self.feed, "get_quotes") or not option_instruments:
             return {}
+        nearest_expiry = self.trade_setup_service.nearest_expiry(option_instruments, symbol)
+        candidate_rows = [
+            item
+            for item in option_instruments
+            if self._instrument_matches(item, symbol)
+            and str(item.get("instrument_type")) in {"CE", "PE"}
+            and (nearest_expiry is None or self._instrument_expiry_iso(item) == nearest_expiry)
+        ]
+        strikes = sorted({self._instrument_strike(item) for item in candidate_rows if self._instrument_strike(item) > 0})
+        interval = self._strike_interval_from_values(strikes)
+        radius = max(1, int(settings.kite_option_chain_strike_radius))
+        lower = spot_price - (interval * radius)
+        upper = spot_price + (interval * radius)
         nearby = sorted(
             [
                 item
-                for item in option_instruments
-                if self._instrument_matches(item, symbol)
-                and str(item.get("instrument_type")) in {"CE", "PE"}
-                and abs(float(item.get("strike") or 0.0) - spot_price) <= max(spot_price * 0.04, 300)
+                for item in candidate_rows
+                if lower <= self._instrument_strike(item) <= upper
             ],
-            key=lambda item: abs(float(item.get("strike") or 0.0) - spot_price),
-        )[:120]
+            key=lambda item: abs(self._instrument_strike(item) - spot_price),
+        )[: max(1, int(settings.kite_option_chain_quote_limit))]
         instruments = [f"{settings.option_exchange}:{item['tradingsymbol']}" for item in nearby if item.get("tradingsymbol")]
         return self.feed.get_quotes(instruments)  # type: ignore
 
@@ -700,6 +705,23 @@ class ScannerService:
         name = str(item.get("name") or "").upper().replace(" ", "")
         tradingsymbol = str(item.get("tradingsymbol") or "").upper().replace(" ", "")
         return name == target or tradingsymbol.startswith(target)
+
+    def _instrument_expiry_iso(self, item: dict[str, object]) -> str | None:
+        value = item.get("expiry")
+        if value is None:
+            return None
+        text = str(value)
+        return text[:10] if len(text) >= 10 else text
+
+    def _strike_interval_from_values(self, strikes: list[float]) -> float:
+        diffs = [strikes[idx] - strikes[idx - 1] for idx in range(1, len(strikes)) if strikes[idx] > strikes[idx - 1]]
+        return min(diffs) if diffs else 100.0
+
+    def _instrument_strike(self, item: dict[str, object]) -> float:
+        try:
+            return float(item.get("strike") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
 
     def _score_breakdown(
         self,

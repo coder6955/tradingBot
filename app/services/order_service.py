@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, datetime
 from typing import Any, Callable, Dict
 
 from app.config import settings
@@ -8,6 +9,7 @@ from app.providers.kite_provider import KiteProvider
 from app.services.active_price_feed import ActiveTradePriceFeed
 from app.services.paper_trading_service import PaperTradingService
 from app.services.risk_management_service import RiskManagementService
+from app.services.time_utils import ist_today
 from app.services.trade_repository import TradeRepository
 from app.services.trade_setup_service import TradeSetupService
 from app.services.market_data_coordinator import MarketDataCoordinator
@@ -108,6 +110,7 @@ class OrderService:
             broker_order_id=str(order_id) if order_id else None,
             opportunity_id=opportunity_id,
         )
+        broker_emergency_sl = self._broker_emergency_protection(signal, record=record, quantity=quantity, entry_order_id=str(order_id) if order_id else None)
         self._subscribe_active_trade_tokens(signal)
         return {
             "status": "live",
@@ -116,20 +119,58 @@ class OrderService:
             "placed_quantity": quantity,
             "trade_id": record.id,
             "execution_quality": quality,
-            "broker_emergency_sl": self._broker_emergency_protection(signal),
+            "broker_emergency_sl": broker_emergency_sl,
         }
 
     def _validate_signal(self, signal: Signal) -> None:
         if not signal.tradingsymbol:
             raise ValueError("signal does not include an option tradingsymbol")
+        symbol = str(signal.symbol or "").upper()
+        tradingsymbol = str(signal.tradingsymbol or "").upper()
+        if symbol != "BANKNIFTY" or not tradingsymbol.startswith("BANKNIFTY"):
+            raise ValueError("only BANKNIFTY option-buying signals can be ordered")
+        if str(signal.exchange or "").upper() != settings.option_exchange.upper():
+            raise ValueError(f"signal exchange must be {settings.option_exchange}")
+        if signal.side.upper() != "BUY":
+            raise ValueError("only option buying entries are supported")
+        if signal.action.upper() not in {"BUY_CE", "BUY_PE"}:
+            raise ValueError("only BUY_CE and BUY_PE actions are supported")
         if signal.quantity <= 0:
             raise ValueError("signal quantity must be positive")
         if not signal.entry_price or signal.entry_price <= 0:
             raise ValueError("signal entry price must be positive")
         if not signal.stop_loss or signal.stop_loss <= 0:
             raise ValueError("signal stop loss must be positive")
+        if not signal.target_1 or signal.target_1 <= signal.entry_price:
+            raise ValueError("signal target_1 must be above entry price")
         if signal.score < settings.min_signal_score:
             raise ValueError("signal score is below threshold")
+        expiry = self._signal_expiry_date(signal)
+        if expiry is None:
+            raise ValueError("signal expiry is required for order placement")
+        today = ist_today()
+        if expiry < today:
+            raise ValueError("signal option contract is expired")
+        if settings.block_expiry_day_option_buying and expiry <= today:
+            raise ValueError("expiry-day option buying is blocked")
+        factors = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+        if not factors or "strategy_metadata" not in factors:
+            raise ValueError("order signal must come from scanner diagnostics/opportunity with strategy metadata")
+
+    def _signal_expiry_date(self, signal: Signal) -> date | None:
+        raw_expiry: Any = signal.expiry
+        if raw_expiry is None and isinstance(signal.factor_scores, dict):
+            contract = signal.factor_scores.get("contract")
+            if isinstance(contract, dict):
+                raw_expiry = contract.get("expiry")
+        if raw_expiry is None:
+            return None
+        if isinstance(raw_expiry, date) and not isinstance(raw_expiry, datetime):
+            return raw_expiry
+        try:
+            return datetime.fromisoformat(str(raw_expiry).replace("Z", "+00:00")).date()
+        except ValueError:
+            return None
 
     def _live_affordable_quantity(self, signal: Signal) -> int:
         if signal.side.upper() == "SELL":
@@ -206,15 +247,98 @@ class OrderService:
             },
         }
 
-    def _broker_emergency_protection(self, signal: Signal) -> dict[str, Any]:
+    def _broker_emergency_protection(self, signal: Signal, *, record: Any, quantity: int, entry_order_id: str | None) -> dict[str, Any]:
         if not settings.enable_broker_emergency_sl:
             return {"enabled": False}
+        if signal.side.upper() != "BUY":
+            return {"enabled": True, "submitted": False, "reason": "broker emergency SL is only supported for option BUY trades"}
+        trigger_price = float(signal.stop_loss or 0.0)
+        if trigger_price <= 0:
+            self.trade_repository.update_protective_order(
+                int(record.id),
+                status="failed",
+                broker_payload={"reason": "stop loss is missing"},
+                error="stop loss is missing",
+            )
+            return {"enabled": True, "submitted": False, "reason": "stop loss is missing"}
+        entry_confirmation = self._confirm_entry_fill(entry_order_id)
+        if not entry_confirmation["complete"]:
+            self.trade_repository.update_protective_order(
+                int(record.id),
+                status="pending_entry_confirmation",
+                broker_payload={"entry_confirmation": entry_confirmation},
+                trigger_price=trigger_price,
+            )
+            return {
+                "enabled": True,
+                "submitted": False,
+                "reason": "entry order is not confirmed filled yet",
+                "entry_confirmation": entry_confirmation,
+                "trigger_price": trigger_price,
+            }
+        filled_quantity = int(entry_confirmation.get("filled_quantity") or quantity)
+        average_price = self._float(entry_confirmation.get("average_price"))
+        self.trade_repository.update_broker_status(
+            int(record.id),
+            status="filled",
+            broker_payload={"entry_confirmation": entry_confirmation},
+            filled_quantity=filled_quantity,
+            average_price=average_price if average_price > 0 else None,
+        )
+        try:
+            response = self.kite_provider.place_order(
+                tradingsymbol=str(signal.tradingsymbol),
+                exchange=signal.exchange,
+                transaction_type="SELL",
+                quantity=filled_quantity,
+                order_type="SL-M",
+                product=settings.default_product,
+                trigger_price=trigger_price,
+            )
+        except Exception as exc:
+            self.trade_repository.update_protective_order(
+                int(record.id),
+                status="failed",
+                broker_payload={"reason": str(exc), "entry_confirmation": entry_confirmation},
+                trigger_price=trigger_price,
+                error=str(exc),
+            )
+            return {"enabled": True, "submitted": False, "reason": str(exc), "trigger_price": trigger_price}
+        protective_order_id = str(response.get("order_id")) if isinstance(response, dict) and response.get("order_id") else None
+        self.trade_repository.update_protective_order(
+            int(record.id),
+            status=str(response.get("status") or "submitted") if isinstance(response, dict) else "submitted",
+            protective_order_id=protective_order_id,
+            trigger_price=trigger_price,
+            broker_payload={"protective_order": response, "entry_confirmation": entry_confirmation},
+        )
         return {
             "enabled": True,
-            "submitted": False,
-            "reason": "current KiteProvider wrapper does not support trigger_price/GTT protective orders",
-            "software_stop_loss": signal.stop_loss,
-            "fallback": "TradeExitService software square-off and startup broker reconciliation",
+            "submitted": True,
+            "order_type": "SL-M",
+            "transaction_type": "SELL",
+            "trigger_price": trigger_price,
+            "quantity": filled_quantity,
+            "protective_order_id": protective_order_id,
+        }
+
+    def _confirm_entry_fill(self, entry_order_id: str | None) -> dict[str, Any]:
+        if not entry_order_id:
+            return {"complete": False, "reason": "entry_order_id_missing"}
+        try:
+            history = self.kite_provider.order_history(entry_order_id)
+        except Exception as exc:
+            return {"complete": False, "reason": "entry_order_history_unavailable", "message": str(exc)}
+        latest = history[-1] if history else {}
+        status = str(latest.get("status") or "").lower()
+        filled_quantity = self._int(latest.get("filled_quantity")) or self._int(latest.get("quantity")) or 0
+        average_price = self._float(latest.get("average_price"))
+        return {
+            "complete": status in {"complete", "filled"} and filled_quantity > 0 and average_price > 0,
+            "status": status or "unknown",
+            "filled_quantity": filled_quantity,
+            "average_price": average_price,
+            "latest": latest,
         }
 
     def _subscribe_active_trade_tokens(self, signal: Signal) -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Any, Callable
 
 from app.config import settings
@@ -28,12 +28,14 @@ class OpportunityOutcomeService:
         trade_exit_service: TradeExitService | None = None,
         rejected_outcome_service: RejectedOpportunityOutcomeService | None = None,
         market_data_coordinator: MarketDataCoordinator | None = None,
+        market_session_provider: Callable[[], str] | None = None,
     ) -> None:
         self.repository = repository
         self.kite_provider_factory = kite_provider_factory
         self.trade_exit_service = trade_exit_service
         self.rejected_outcome_service = rejected_outcome_service
         self.market_data_coordinator = market_data_coordinator
+        self.market_session_provider = market_session_provider
         self.task: asyncio.Task[None] | None = None
         self.running = False
         self.interval_seconds = 30
@@ -63,9 +65,12 @@ class OpportunityOutcomeService:
         return self.status()
 
     def status(self) -> dict[str, Any]:
+        market_session = self._market_session()
         return {
             "running": self.running,
             "interval_seconds": self.interval_seconds,
+            "market_session": market_session,
+            "review_analysis_deferred": market_session == "REGULAR_MARKET",
             "last_run_at": self.last_run_at,
             "last_result_count": len(self.last_results),
             "last_trade_exit_result": self.last_trade_exit_result,
@@ -75,23 +80,31 @@ class OpportunityOutcomeService:
     async def _run(self) -> None:
         while self.running:
             try:
-                self.evaluate_once()
+                await asyncio.to_thread(self.evaluate_once)
             except Exception as exc:
                 self.errors.append({"time": ist_now_naive().isoformat(), "error": str(exc)})
             await asyncio.sleep(float(self.interval_seconds))
 
     def evaluate_once(self, limit: int = 100) -> dict[str, Any]:
-        provider = self.kite_provider_factory()
-        open_records = self.repository.list_opportunities(status="open", limit=limit)
         results: list[dict[str, Any]] = []
-        for record in open_records:
-            results.append(self._evaluate_record(provider, record))
+        market_session = self._market_session()
+        review_deferred = market_session == "REGULAR_MARKET"
+        if not review_deferred:
+            provider = self.kite_provider_factory()
+            open_records = self.repository.list_opportunities(status="open", limit=limit)
+            for record in open_records:
+                results.append(self._evaluate_record(provider, record))
         trade_exit_result = self.trade_exit_service.evaluate_once(limit=limit) if self.trade_exit_service else None
         self.last_run_at = ist_now_naive().isoformat()
         self.last_results = results
         self.last_trade_exit_result = trade_exit_result
-        rejected_result = self.rejected_outcome_service.evaluate_once(limit=limit) if self.rejected_outcome_service else None
+        rejected_result = None
+        if not review_deferred and self.rejected_outcome_service:
+            rejected_result = self.rejected_outcome_service.evaluate_once(limit=limit)
         return {
+            "market_session": market_session,
+            "review_analysis_deferred": review_deferred,
+            "deferred_reason": "market_open" if review_deferred else None,
             "evaluated": len(results),
             "closed": len([item for item in results if item.get("closed")]),
             "results": results,
@@ -278,3 +291,22 @@ class OpportunityOutcomeService:
             return datetime.fromisoformat(str(value)).date()
         except ValueError:
             return None
+
+    def _market_session(self) -> str:
+        if self.market_session_provider is not None:
+            try:
+                return str(self.market_session_provider())
+            except TypeError:
+                return str(self.market_session_provider(ist_now_naive()))  # type: ignore[misc]
+        now = ist_now_naive()
+        if now.weekday() >= 5:
+            return "WEEKEND"
+        market_open = self._parse_time(settings.market_open_time)
+        market_close = self._parse_time(settings.market_close_time)
+        if market_open <= now.time() <= market_close:
+            return "REGULAR_MARKET"
+        return "PRE_MARKET" if now.time() < market_open else "AFTER_MARKET"
+
+    def _parse_time(self, value: str) -> time:
+        hour, minute = value.split(":", 1)
+        return time(int(hour), int(minute))

@@ -149,6 +149,11 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
             "exit_open_trades_before_close_minutes": settings.exit_open_trades_before_close_minutes,
             "enable_websocket_candle_persistence": settings.enable_websocket_candle_persistence,
             "enable_websocket_candle_daily_cleanup": settings.enable_websocket_candle_daily_cleanup,
+            "websocket_reconnect_min_gap_seconds": settings.websocket_reconnect_min_gap_seconds,
+            "websocket_reconnect_window_seconds": settings.websocket_reconnect_window_seconds,
+            "websocket_reconnect_max_attempts_per_window": settings.websocket_reconnect_max_attempts_per_window,
+            "websocket_event_queue_size": settings.websocket_event_queue_size,
+            "websocket_candle_persist_queue_size": settings.websocket_candle_persist_queue_size,
             "enable_market_data_gap_detection": settings.enable_market_data_gap_detection,
             "max_websocket_gap_seconds": settings.max_websocket_gap_seconds,
             "websocket_live_gap_polling_fallback": settings.websocket_live_gap_polling_fallback,
@@ -158,6 +163,9 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         object.__setattr__(settings, "websocket_live_stale_blocks", True)
         object.__setattr__(settings, "enable_websocket_candle_persistence", True)
         object.__setattr__(settings, "enable_websocket_candle_daily_cleanup", True)
+        object.__setattr__(settings, "websocket_reconnect_min_gap_seconds", 5)
+        object.__setattr__(settings, "websocket_reconnect_window_seconds", 60)
+        object.__setattr__(settings, "websocket_reconnect_max_attempts_per_window", 5)
         object.__setattr__(settings, "enable_market_data_gap_detection", True)
         object.__setattr__(settings, "max_websocket_gap_seconds", 10)
         object.__setattr__(settings, "websocket_live_gap_polling_fallback", True)
@@ -177,14 +185,17 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
 
     def test_websocket_feed_stores_latest_tick(self) -> None:
         feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=regular_market_now)
-        feed.start()
-        feed._on_ticks(None, [{"instrument_token": 123, "last_price": 88.5, "volume_traded": 900}])
+        try:
+            feed.start()
+            feed._on_ticks(None, [{"instrument_token": 123, "last_price": 88.5, "volume_traded": 900}])
 
-        tick = feed.get_latest_tick(123)
+            tick = feed.get_latest_tick(123)
 
-        self.assertIsNotNone(tick)
-        self.assertEqual(tick.price, 88.5)
-        self.assertEqual(feed.get_latest_price(123), 88.5)
+            self.assertIsNotNone(tick)
+            self.assertEqual(tick.price, 88.5)
+            self.assertEqual(feed.get_latest_price(123), 88.5)
+        finally:
+            feed.stop()
 
     def test_websocket_feed_dispatches_tick_handler(self) -> None:
         seen = []
@@ -261,6 +272,7 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertEqual(candles[0].close_price, 104)
         self.assertEqual(candles[0].source, "websocket_builder_rehydrated")
         self.assertEqual(status["candle_persistence"]["rehydrated_candle_count"], 1)
+        rehydrated.stop()
 
     def test_old_websocket_one_minute_candles_are_cleaned_without_touching_history(self) -> None:
         now = regular_market_now().replace(second=0, microsecond=0)
@@ -394,24 +406,51 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
 
     def test_reconnect_resubscribes_active_tokens(self) -> None:
         feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=regular_market_now)
-        feed.start()
-        feed.subscribe({111, 222})
-        ticker = feed._ticker
-        ticker.subscribed.clear()
+        try:
+            feed.start()
+            feed.subscribe({111, 222})
+            ticker = feed._ticker
+            ticker.subscribed.clear()
 
-        feed._on_reconnect(ticker, 1)
+            feed._on_reconnect(ticker, 1)
 
-        self.assertEqual(feed.reconnect_count, 1)
-        self.assertIn([111, 222], [sorted(item) for item in ticker.subscribed])
+            self.assertEqual(feed.reconnect_count, 1)
+            self.assertIn([111, 222], [sorted(item) for item in ticker.subscribed])
+        finally:
+            feed.stop()
 
     def test_subscribe_starts_websocket_during_regular_market(self) -> None:
         feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=regular_market_now)
 
-        result = feed.subscribe({111, 222})
+        try:
+            result = feed.subscribe({111, 222})
 
-        self.assertTrue(feed.running)
-        self.assertTrue(feed.connected)
-        self.assertEqual(result["subscribed"], [111, 222])
+            self.assertTrue(feed.running)
+            self.assertTrue(feed.connected)
+            self.assertEqual(result["subscribed"], [111, 222])
+        finally:
+            feed.stop()
+
+    def test_duplicate_start_is_prevented(self) -> None:
+        created: list[FakeTicker] = []
+
+        class CountingTicker(FakeTicker):
+            def __init__(self, api_key: str, access_token: str) -> None:
+                super().__init__(api_key, access_token)
+                created.append(self)
+
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=CountingTicker, clock=regular_market_now)
+        try:
+            first = feed.start()
+            second = feed.start()
+            status = feed.status()
+
+            self.assertTrue(first["started"])
+            self.assertTrue(second["already_running"])
+            self.assertEqual(len(created), 1)
+            self.assertEqual(status["duplicate_start_prevented_count"], 1)
+        finally:
+            feed.stop()
 
     def test_subscribe_queues_without_connecting_on_weekend(self) -> None:
         feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=weekend_now)
@@ -459,6 +498,74 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertEqual(status["websocket_status"], "MARKET_CLOSED")
         self.assertEqual(status["reconnect_skipped_reason"], "market_closed")
         self.assertIsNone(status["last_error"])
+
+    def test_websocket_error_after_market_is_not_reported_as_failure(self) -> None:
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=after_market_now)
+
+        feed._on_error(FakeTicker("k", "t"), 1006, "connection was closed uncleanly (None)")
+        status = feed.status()
+
+        self.assertEqual(status["market_session"], "AFTER_MARKET")
+        self.assertEqual(status["websocket_status"], "MARKET_CLOSED")
+        self.assertEqual(status["reconnect_skipped_reason"], "market_closed")
+        self.assertIsNone(status["last_error"])
+        self.assertFalse(status["websocket_connected"])
+
+    def test_websocket_error_during_market_requests_reconnect(self) -> None:
+        reconnect_calls: list[bool] = []
+
+        class ErrorTicker(FakeTicker):
+            def reconnect(self) -> None:
+                reconnect_calls.append(True)
+
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=ErrorTicker, clock=regular_market_now)
+
+        feed._on_error(ErrorTicker("k", "t"), 1006, "connection was closed uncleanly (None)")
+        status = feed.status()
+
+        self.assertEqual(reconnect_calls, [True])
+        self.assertEqual(status["market_session"], "REGULAR_MARKET")
+        self.assertEqual(status["websocket_status"], "RECONNECTING")
+        self.assertEqual(status["last_error"], "connection was closed uncleanly (None)")
+        self.assertTrue(status["data_gap"]["data_gap_detected"])
+        self.assertFalse(status["websocket_connected"])
+
+    def test_websocket_auth_failure_does_not_reconnect(self) -> None:
+        reconnect_calls: list[bool] = []
+
+        class ErrorTicker(FakeTicker):
+            def reconnect(self) -> None:
+                reconnect_calls.append(True)
+
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=ErrorTicker, clock=regular_market_now)
+
+        feed._on_error(ErrorTicker("k", "t"), 403, "Forbidden invalid token")
+        status = feed.status()
+
+        self.assertEqual(reconnect_calls, [])
+        self.assertEqual(status["websocket_status"], "AUTH_FAILED")
+        self.assertEqual(status["reconnect_skipped_reason"], "auth_failed")
+        self.assertEqual(status["last_error_code"], 403)
+        self.assertFalse(status["running"])
+
+    def test_websocket_reconnect_uses_local_backoff(self) -> None:
+        reconnect_calls: list[bool] = []
+
+        class ErrorTicker(FakeTicker):
+            def reconnect(self) -> None:
+                reconnect_calls.append(True)
+
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=ErrorTicker, clock=regular_market_now)
+        ticker = ErrorTicker("k", "t")
+
+        feed._on_error(ticker, 1006, "connection was closed uncleanly (None)")
+        feed._on_error(ticker, 1006, "connection was closed uncleanly (None)")
+        status = feed.status()
+
+        self.assertEqual(reconnect_calls, [True])
+        self.assertEqual(status["reconnect_request_count"], 1)
+        self.assertEqual(status["reconnect_skipped_reason"], "reconnect_backoff")
+        self.assertEqual(status["websocket_status"], "RECONNECT_COOLDOWN")
 
     def test_noreconnect_does_not_mark_exhausted_outside_market(self) -> None:
         feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=weekend_now)

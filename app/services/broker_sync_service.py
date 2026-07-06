@@ -90,12 +90,14 @@ class BrokerSyncService:
             filled_quantity=filled_quantity,
             average_price=average_price,
         )
+        protective = self._maybe_place_pending_protective_sl(updated, provider, status=status, filled_quantity=filled_quantity)
         return {
             "trade_id": updated.id,
             "broker_order_id": updated.broker_order_id,
             "status": updated.status,
             "filled_quantity": updated.filled_quantity,
             "average_price": updated.average_price,
+            "broker_emergency_sl": protective,
         }
 
     def reconcile_startup_positions(self) -> dict[str, Any]:
@@ -149,6 +151,55 @@ class BrokerSyncService:
             self._alert(f"CRITICAL: live trading blocked by startup reconciliation mismatch count={len(mismatches)}")
         return self.last_reconciliation
 
+    def _maybe_place_pending_protective_sl(self, trade: Any, provider: KiteProvider, *, status: str, filled_quantity: int | None) -> dict[str, Any]:
+        if not settings.enable_broker_emergency_sl:
+            return {"enabled": False}
+        if str(getattr(trade, "mode", "")).lower() != "live" or str(getattr(trade, "side", "")).upper() != "BUY":
+            return {"enabled": True, "submitted": False, "reason": "not a live BUY trade"}
+        if str(getattr(trade, "protective_order_status", "") or "").lower() not in {"pending_entry_confirmation", "failed", ""}:
+            return {"enabled": True, "submitted": False, "reason": "protective order already handled", "status": trade.protective_order_status}
+        if status not in {"complete", "filled"}:
+            return {"enabled": True, "submitted": False, "reason": "entry order is not complete", "entry_status": status}
+        quantity = int(filled_quantity or trade.filled_quantity or trade.placed_quantity or trade.requested_quantity or 0)
+        trigger_price = float(trade.stop_loss or 0.0)
+        if quantity <= 0 or trigger_price <= 0:
+            self.trade_repository.update_protective_order(
+                int(trade.id),
+                status="failed",
+                broker_payload={"reason": "quantity or stop loss missing", "quantity": quantity, "trigger_price": trigger_price},
+                error="quantity or stop loss missing",
+            )
+            return {"enabled": True, "submitted": False, "reason": "quantity or stop loss missing"}
+        try:
+            response = provider.place_order(
+                tradingsymbol=str(trade.tradingsymbol),
+                exchange=str(trade.exchange or settings.option_exchange),
+                transaction_type="SELL",
+                quantity=quantity,
+                order_type="SL-M",
+                product=settings.default_product,
+                trigger_price=trigger_price,
+            )
+        except Exception as exc:
+            self.trade_repository.update_protective_order(
+                int(trade.id),
+                status="failed",
+                broker_payload={"reason": str(exc), "quantity": quantity, "trigger_price": trigger_price},
+                trigger_price=trigger_price,
+                error=str(exc),
+            )
+            self._alert(f"CRITICAL: broker emergency SL placement failed for {trade.tradingsymbol} trade_id={trade.id}: {exc}")
+            return {"enabled": True, "submitted": False, "reason": str(exc)}
+        protective_order_id = str(response.get("order_id")) if isinstance(response, dict) and response.get("order_id") else None
+        self.trade_repository.update_protective_order(
+            int(trade.id),
+            status=str(response.get("status") or "submitted") if isinstance(response, dict) else "submitted",
+            protective_order_id=protective_order_id,
+            trigger_price=trigger_price,
+            broker_payload={"protective_order": response, "source": "broker_sync"},
+        )
+        return {"enabled": True, "submitted": True, "protective_order_id": protective_order_id, "trigger_price": trigger_price}
+
     def live_block_status(self) -> dict[str, Any]:
         return {
             "blocked": self.live_trading_blocked,
@@ -178,11 +229,45 @@ class BrokerSyncService:
         provider = self.kite_provider_factory()
         for trade in trades:
             try:
-                results.append(self.sync_trade(int(trade.id), provider=provider))
+                if str(getattr(trade, "protective_order_id", "") or "") == order_id:
+                    results.append(self._handle_protective_order_postback(trade, data, provider))
+                else:
+                    results.append(self.sync_trade(int(trade.id), provider=provider))
             except Exception as exc:
                 logger.exception("Broker postback sync failed for order %s", order_id)
                 results.append({"trade_id": trade.id, "status": "error", "message": str(exc)})
         return {"handled": bool(trades), "order_id": order_id, "status": status, "synced": results}
+
+    def _handle_protective_order_postback(self, trade: Any, data: dict[str, Any], provider: KiteProvider) -> dict[str, Any]:
+        status = str(data.get("status") or data.get("order_status") or "").lower()
+        protective_order_id = str(getattr(trade, "protective_order_id", "") or "")
+        self.trade_repository.update_protective_order(
+            int(trade.id),
+            status=status or "unknown",
+            protective_order_id=protective_order_id,
+            broker_payload={"postback": data},
+        )
+        if status not in {"complete", "filled"}:
+            return {"trade_id": trade.id, "protective_order_id": protective_order_id, "status": status or "unknown"}
+        exit_price = self._float(data.get("average_price")) or float(trade.stop_loss or 0.0)
+        claimed = self.trade_repository.try_mark_closing(
+            int(trade.id),
+            outcome="stop_loss",
+            exit_price=exit_price,
+            notes="Broker protective SL postback complete; confirming broker position",
+        )
+        if claimed is None:
+            return {"trade_id": trade.id, "protective_order_id": protective_order_id, "status": status, "reason": "trade_already_closing_or_closed"}
+        self.trade_repository.update_exit_order_status(
+            int(trade.id),
+            status=status,
+            exit_order_id=protective_order_id,
+            broker_payload={"protective_postback": data},
+        )
+        if self.exit_confirmation_callback is not None:
+            return self.exit_confirmation_callback(int(trade.id))
+        history = provider.order_history(protective_order_id)
+        return {"trade_id": trade.id, "protective_order_id": protective_order_id, "status": status, "history": history}
 
     def _broker_open_positions(self, provider: KiteProvider) -> list[dict[str, Any]]:
         positions = provider.positions()
