@@ -63,6 +63,11 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
             "min_remaining_risk_reward": settings.min_remaining_risk_reward,
             "min_target1_room_pct": settings.min_target1_room_pct,
             "cancel_armed_entries_on_data_gap": settings.cancel_armed_entries_on_data_gap,
+            "enable_tick_quality_confirmation": settings.enable_tick_quality_confirmation,
+            "tick_quality_min_ticks_above_trigger": settings.tick_quality_min_ticks_above_trigger,
+            "tick_quality_hold_seconds": settings.tick_quality_hold_seconds,
+            "tick_quality_require_bid_progress": settings.tick_quality_require_bid_progress,
+            "tick_quality_max_spread_multiplier": settings.tick_quality_max_spread_multiplier,
         }
         object.__setattr__(settings, "enable_event_driven_paper_entry", True)
         object.__setattr__(settings, "enable_event_driven_live_entry", False)
@@ -72,6 +77,11 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
         object.__setattr__(settings, "min_remaining_risk_reward", 1.3)
         object.__setattr__(settings, "min_target1_room_pct", 8.0)
         object.__setattr__(settings, "cancel_armed_entries_on_data_gap", True)
+        object.__setattr__(settings, "enable_tick_quality_confirmation", True)
+        object.__setattr__(settings, "tick_quality_min_ticks_above_trigger", 2)
+        object.__setattr__(settings, "tick_quality_hold_seconds", 1.0)
+        object.__setattr__(settings, "tick_quality_require_bid_progress", True)
+        object.__setattr__(settings, "tick_quality_max_spread_multiplier", 1.5)
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.temp_db.close()
         init_db(f"sqlite:///{self.temp_db.name}")
@@ -163,11 +173,16 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
         self.assertEqual(result["latest_state"], EntryTimingService.ARMED_FOR_ENTRY)
         self.assertEqual(len(self.order_service.calls), 0)
 
-    def test_websocket_tick_crossing_trigger_creates_paper_order(self) -> None:
+    def test_websocket_tick_crossing_trigger_waits_for_tick_quality_then_creates_paper_order(self) -> None:
         setup_id = self._register()
 
-        result = self.tracker.evaluate_tick(setup_id, self._tick(105, ask=105))
+        first = self.tracker.evaluate_tick(setup_id, self._tick(105, bid=104.0, ask=105))
+        self.clock.now = self.clock.now + timedelta(seconds=1.1)
+        result = self.tracker.evaluate_tick(setup_id, self._tick(105.1, bid=104.2, ask=105.1))
 
+        self.assertEqual(first["latest_state"], EntryTimingService.ARMED_FOR_ENTRY)
+        self.assertIn("tick_quality", first)
+        self.assertFalse(first["tick_quality"]["passed"])
         self.assertEqual(result["latest_state"], "ENTERED_PAPER")
         self.assertEqual(len(self.order_service.calls), 1)
         call = self.order_service.calls[0]
@@ -175,12 +190,29 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
         self.assertEqual(call["order_mode"], "paper")
         self.assertEqual(call["metadata"]["entry_source"], "event_driven_websocket")
         self.assertEqual(call["metadata"]["armed_setup_id"], setup_id)
-        self.assertEqual(call["signal"].entry_price, 105)
+        self.assertTrue(call["metadata"]["tick_quality"]["confirmed"])
+        self.assertEqual(call["signal"].entry_price, 105.1)
+
+    def test_tick_quality_requires_bid_progress_before_entry(self) -> None:
+        setup_id = self._register()
+
+        self.tracker.evaluate_tick(setup_id, self._tick(105, bid=104.0, ask=105))
+        self.clock.now = self.clock.now + timedelta(seconds=1.1)
+        waiting = self.tracker.evaluate_tick(setup_id, self._tick(105.1, bid=103.9, ask=105.1))
+        self.clock.now = self.clock.now + timedelta(seconds=0.2)
+        entered = self.tracker.evaluate_tick(setup_id, self._tick(105.2, bid=104.2, ask=105.2))
+
+        self.assertEqual(waiting["latest_state"], EntryTimingService.ARMED_FOR_ENTRY)
+        self.assertIn("tick_quality_bid_not_rising", waiting["latest_reason"])
+        self.assertEqual(len(self.order_service.calls), 1)
+        self.assertEqual(entered["latest_state"], "ENTERED_PAPER")
 
     def test_live_mode_does_not_place_event_driven_order(self) -> None:
         setup_id = self._register(order_mode="live")
 
-        result = self.tracker.evaluate_tick(setup_id, self._tick(105, ask=105))
+        self.tracker.evaluate_tick(setup_id, self._tick(105, bid=104.0, ask=105))
+        self.clock.now = self.clock.now + timedelta(seconds=1.1)
+        result = self.tracker.evaluate_tick(setup_id, self._tick(105.1, bid=104.2, ask=105.1))
 
         self.assertTrue(result["live_event_entry_blocked"])
         self.assertEqual(result["reason"], "live_trading_not_enabled_for_event_entry")

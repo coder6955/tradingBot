@@ -63,6 +63,13 @@ class ArmedEntrySetup:
     latest_bid: float | None = None
     latest_ask: float | None = None
     latest_spread_pct: float | None = None
+    tick_quality_count: int = 0
+    tick_quality_started_at: datetime | None = None
+    tick_quality_last_at: datetime | None = None
+    tick_quality_last_bid: float | None = None
+    tick_quality_last_ask: float | None = None
+    tick_quality_confirmed: bool = False
+    tick_quality_reason: str = ""
     entered_trade: dict[str, Any] | None = None
     entered_at: datetime | None = None
     cancelled_at: datetime | None = None
@@ -228,11 +235,26 @@ class ArmedEntryTrackerService:
             with self._lock:
                 setup.latest_state = EntryTimingService.ARMED_FOR_ENTRY
                 setup.latest_reason = "waiting_for_entry_trigger"
+                self._reset_tick_quality_locked(setup)
             return self._to_dict(setup)
 
         checks = self._entry_checks(setup, executable_price=executable, spread_pct=spread_pct)
         if checks:
             return self._mark_rejected(setup.setup_id, "TOO_LATE", checks)
+
+        tick_quality = self._tick_quality_confirmation(
+            setup,
+            tick=tick,
+            executable_price=executable,
+            spread_pct=spread_pct,
+            now=now,
+        )
+        if not tick_quality["passed"]:
+            with self._lock:
+                setup.latest_state = EntryTimingService.ARMED_FOR_ENTRY
+                setup.latest_reason = str(tick_quality["reason"])
+                self.last_reason = setup.latest_reason
+            return {**self._to_dict(setup), "tick_quality": tick_quality}
 
         session = self._market_session()
         if session != "REGULAR_MARKET":
@@ -402,6 +424,7 @@ class ArmedEntryTrackerService:
             contract = SimpleNamespace(
                 tradingsymbol=setup.tradingsymbol,
                 exchange=setup.exchange,
+                instrument_token=setup.instrument_token,
                 expiry=setup.expiry,
                 strike=setup.strike,
                 option_type=setup.option_type,
@@ -472,7 +495,103 @@ class ArmedEntryTrackerService:
             "chase_pct": round(chase_pct, 3),
             "premium_move_from_base_pct": round(move_from_base_pct, 3),
             "spread_pct": round(spread_pct, 3),
+            "tick_quality": self._tick_quality_metadata(setup),
         }
+
+    def _tick_quality_confirmation(
+        self,
+        setup: ArmedEntrySetup,
+        *,
+        tick: WebSocketTick,
+        executable_price: float,
+        spread_pct: float,
+        now: datetime,
+    ) -> dict[str, Any]:
+        if not settings.enable_tick_quality_confirmation:
+            with self._lock:
+                setup.tick_quality_confirmed = True
+                setup.tick_quality_reason = "tick_quality_disabled"
+            return {"passed": True, "reason": "tick_quality_disabled", "details": self._tick_quality_metadata(setup)}
+
+        bid = self._float(tick.bid)
+        ask = self._float(tick.ask)
+        with self._lock:
+            previous_bid = setup.tick_quality_last_bid
+            if setup.tick_quality_started_at is None:
+                setup.tick_quality_started_at = now
+                setup.tick_quality_count = 0
+            setup.tick_quality_count += 1
+            setup.tick_quality_last_at = now
+            setup.tick_quality_last_bid = bid if bid > 0 else None
+            setup.tick_quality_last_ask = ask if ask > 0 else None
+            count = setup.tick_quality_count
+            started_at = setup.tick_quality_started_at
+
+        min_ticks = max(1, int(settings.tick_quality_min_ticks_above_trigger))
+        hold_seconds = max(0.0, float(settings.tick_quality_hold_seconds))
+        hold_elapsed = max(0.0, (now - started_at).total_seconds()) if started_at else 0.0
+        reasons: list[str] = []
+        if count < min_ticks:
+            reasons.append("tick_quality_waiting_for_more_ticks")
+        if hold_elapsed < hold_seconds:
+            reasons.append("tick_quality_hold_time_pending")
+        if settings.tick_quality_require_bid_progress:
+            if bid <= 0 or previous_bid is None:
+                reasons.append("tick_quality_bid_progress_pending")
+            elif bid < previous_bid:
+                reasons.append("tick_quality_bid_not_rising")
+        baseline_spread = setup.cached_spread_pct if setup.cached_spread_pct > 0 else settings.max_bid_ask_spread_pct
+        max_multiplier = max(1.0, float(settings.tick_quality_max_spread_multiplier))
+        if baseline_spread > 0 and spread_pct > baseline_spread * max_multiplier:
+            reasons.append("tick_quality_spread_unstable")
+
+        passed = not reasons
+        reason = "tick_quality_confirmed" if passed else "; ".join(dict.fromkeys(reasons))
+        with self._lock:
+            setup.tick_quality_confirmed = passed
+            setup.tick_quality_reason = reason
+        return {
+            "passed": passed,
+            "reason": reason,
+            "details": {
+                **self._tick_quality_metadata(setup),
+                "executable_price": round(executable_price, 2),
+                "spread_pct": round(spread_pct, 3),
+                "previous_bid": previous_bid,
+                "bid": bid if bid > 0 else None,
+                "ask": ask if ask > 0 else None,
+                "required_ticks": min_ticks,
+                "hold_seconds_required": hold_seconds,
+                "hold_seconds_elapsed": round(hold_elapsed, 3),
+            },
+        }
+
+    def _tick_quality_metadata(self, setup: ArmedEntrySetup) -> dict[str, Any]:
+        started_at = setup.tick_quality_started_at
+        last_at = setup.tick_quality_last_at
+        return {
+            "enabled": settings.enable_tick_quality_confirmation,
+            "confirmed": setup.tick_quality_confirmed,
+            "reason": setup.tick_quality_reason,
+            "ticks_above_trigger": setup.tick_quality_count,
+            "started_at": started_at.isoformat(sep=" ") if started_at else None,
+            "last_at": last_at.isoformat(sep=" ") if last_at else None,
+            "last_bid": setup.tick_quality_last_bid,
+            "last_ask": setup.tick_quality_last_ask,
+            "min_ticks_above_trigger": settings.tick_quality_min_ticks_above_trigger,
+            "hold_seconds": settings.tick_quality_hold_seconds,
+            "require_bid_progress": settings.tick_quality_require_bid_progress,
+            "max_spread_multiplier": settings.tick_quality_max_spread_multiplier,
+        }
+
+    def _reset_tick_quality_locked(self, setup: ArmedEntrySetup) -> None:
+        setup.tick_quality_count = 0
+        setup.tick_quality_started_at = None
+        setup.tick_quality_last_at = None
+        setup.tick_quality_last_bid = None
+        setup.tick_quality_last_ask = None
+        setup.tick_quality_confirmed = False
+        setup.tick_quality_reason = ""
 
     def _subscribe_token(self, token: int) -> dict[str, Any]:
         if self.websocket_price_feed is None:
@@ -514,6 +633,7 @@ class ArmedEntryTrackerService:
             "expiry": setup.expiry,
         }
         payload["current_premium"] = setup.latest_premium
+        payload["tick_quality"] = self._tick_quality_metadata(setup)
         payload["distance_to_trigger_pct"] = (
             round(((setup.entry_trigger_price - float(setup.latest_premium or 0.0)) / max(setup.entry_trigger_price, 0.01)) * 100, 3)
             if setup.latest_premium

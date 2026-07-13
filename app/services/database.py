@@ -130,8 +130,13 @@ class RejectedOpportunityRecord(Base):
     premium_state_json = Column(Text, nullable=True)
     score_breakdown_json = Column(Text, nullable=True)
     factor_scores_json = Column(Text, nullable=True)
-    later_outcome = Column(String(30), nullable=True, index=True)
+    later_outcome = Column(String(80), nullable=True, index=True)
     later_exit_price = Column(Float, nullable=True)
+    later_outcome_at = Column(DateTime, nullable=True, index=True)
+    later_outcome_minutes = Column(Float, nullable=True)
+    later_outcome_source = Column(String(50), nullable=True, index=True)
+    later_outcome_timeframe = Column(String(20), nullable=True, index=True)
+    later_outcome_ambiguous = Column(Integer, nullable=False, default=0, index=True)
     later_evaluated_at = Column(DateTime, nullable=True)
     later_notes = Column(Text, nullable=True)
 
@@ -351,18 +356,28 @@ def _ensure_rejected_opportunity_columns() -> None:
     inspector = inspect(engine)
     if "rejected_opportunities" not in inspector.get_table_names():
         return
-    existing = {column["name"] for column in inspector.get_columns("rejected_opportunities")}
+    columns = inspector.get_columns("rejected_opportunities")
+    existing = {column["name"] for column in columns}
     required = {
         "rejection_source": "VARCHAR(50)",
         "rejection_context": "VARCHAR(50)",
         "market_session": "VARCHAR(30)",
         "learning_eligible": "INTEGER DEFAULT 0",
         "learning_exclusion_reason": "VARCHAR(150)",
+        "later_outcome_at": "DATETIME",
+        "later_outcome_minutes": "FLOAT",
+        "later_outcome_source": "VARCHAR(50)",
+        "later_outcome_timeframe": "VARCHAR(20)",
+        "later_outcome_ambiguous": "INTEGER DEFAULT 0",
     }
     with engine.begin() as connection:
         for column, column_type in required.items():
             if column not in existing:
                 connection.execute(text(f"ALTER TABLE rejected_opportunities ADD COLUMN {column} {column_type}"))
+        later_outcome_column = next((column for column in columns if column["name"] == "later_outcome"), None)
+        later_outcome_type = str(later_outcome_column.get("type", "") if later_outcome_column else "").lower()
+        if engine.dialect.name.startswith("mysql") and "80" not in later_outcome_type:
+            connection.execute(text("ALTER TABLE rejected_opportunities MODIFY COLUMN later_outcome VARCHAR(80)"))
 
 
 def _ensure_strategy_validation_columns() -> None:

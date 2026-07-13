@@ -170,6 +170,31 @@ class Settings:
     min_outcome_learning_win_rate_pct: float = float(os.getenv("MIN_OUTCOME_LEARNING_WIN_RATE_PCT", "35.0"))
     outcome_learning_lookback: int = int(os.getenv("OUTCOME_LEARNING_LOOKBACK", "500"))
     outcome_learning_cache_ttl_seconds: int = int(os.getenv("OUTCOME_LEARNING_CACHE_TTL_SECONDS", "900"))
+    enable_rejected_outcome_candle_replay: bool = os.getenv("ENABLE_REJECTED_OUTCOME_CANDLE_REPLAY", "true").lower() == "true"
+    rejected_outcome_replay_timeframes: str = os.getenv("REJECTED_OUTCOME_REPLAY_TIMEFRAMES", "1minute,5minute")
+    rejected_outcome_replay_max_candles: int = int(os.getenv("REJECTED_OUTCOME_REPLAY_MAX_CANDLES", "500"))
+    rejected_outcome_use_ws_token_candles: bool = os.getenv("REJECTED_OUTCOME_USE_WS_TOKEN_CANDLES", "true").lower() == "true"
+    rejected_outcome_ambiguous_candle_policy: str = os.getenv("REJECTED_OUTCOME_AMBIGUOUS_CANDLE_POLICY", "label_ambiguous")
+    rejected_outcome_batch_limit: int = int(os.getenv("REJECTED_OUTCOME_BATCH_LIMIT", "100"))
+    rejected_outcome_max_batches: int = int(os.getenv("REJECTED_OUTCOME_MAX_BATCHES", "20"))
+    rejected_outcome_batch_delay_seconds: float = float(os.getenv("REJECTED_OUTCOME_BATCH_DELAY_SECONDS", "0.5"))
+    automation_exhaust_rejected_outcomes_after_close: bool = os.getenv("AUTOMATION_EXHAUST_REJECTED_OUTCOMES_AFTER_CLOSE", "true").lower() == "true"
+    enable_targeted_option_candle_backfill: bool = os.getenv("ENABLE_TARGETED_OPTION_CANDLE_BACKFILL", "true").lower() == "true"
+    targeted_option_candle_backfill_timeframes: str = os.getenv("TARGETED_OPTION_CANDLE_BACKFILL_TIMEFRAMES", "1minute,5minute")
+    targeted_option_candle_backfill_batch_limit: int = int(os.getenv("TARGETED_OPTION_CANDLE_BACKFILL_BATCH_LIMIT", "25"))
+    targeted_option_candle_backfill_max_contracts: int = int(os.getenv("TARGETED_OPTION_CANDLE_BACKFILL_MAX_CONTRACTS", "120"))
+    targeted_option_candle_backfill_delay_seconds: float = float(os.getenv("TARGETED_OPTION_CANDLE_BACKFILL_DELAY_SECONDS", "0.5"))
+    min_targeted_option_candle_coverage_pct: float = float(os.getenv("MIN_TARGETED_OPTION_CANDLE_COVERAGE_PCT", "80.0"))
+    enable_live_option_candle_gap_backfill: bool = os.getenv("ENABLE_LIVE_OPTION_CANDLE_GAP_BACKFILL", "true").lower() == "true"
+    live_option_candle_backfill_timeframes: str = os.getenv("LIVE_OPTION_CANDLE_BACKFILL_TIMEFRAMES", "1minute")
+    live_option_candle_backfill_lookback_minutes: int = int(os.getenv("LIVE_OPTION_CANDLE_BACKFILL_LOOKBACK_MINUTES", "30"))
+    live_option_candle_backfill_interval_seconds: int = int(os.getenv("LIVE_OPTION_CANDLE_BACKFILL_INTERVAL_SECONDS", "120"))
+    live_option_candle_backfill_min_gap_seconds: int = int(os.getenv("LIVE_OPTION_CANDLE_BACKFILL_MIN_GAP_SECONDS", "90"))
+    live_option_candle_backfill_max_contracts: int = int(os.getenv("LIVE_OPTION_CANDLE_BACKFILL_MAX_CONTRACTS", "20"))
+    live_option_candle_backfill_batch_limit: int = int(os.getenv("LIVE_OPTION_CANDLE_BACKFILL_BATCH_LIMIT", "10"))
+    live_option_candle_backfill_delay_seconds: float = float(os.getenv("LIVE_OPTION_CANDLE_BACKFILL_DELAY_SECONDS", "0.2"))
+    enable_on_demand_premium_candle_backfill: bool = os.getenv("ENABLE_ON_DEMAND_PREMIUM_CANDLE_BACKFILL", "true").lower() == "true"
+    on_demand_premium_candle_backfill_cooldown_seconds: int = int(os.getenv("ON_DEMAND_PREMIUM_CANDLE_BACKFILL_COOLDOWN_SECONDS", "120"))
     enforce_execution_quality: bool = os.getenv("ENFORCE_EXECUTION_QUALITY", "true").lower() == "true"
     max_execution_spread_pct: float = float(os.getenv("MAX_EXECUTION_SPREAD_PCT", "3.0"))
     max_entry_price_deviation_pct: float = float(os.getenv("MAX_ENTRY_PRICE_DEVIATION_PCT", "8.0"))
@@ -257,6 +282,16 @@ class Settings:
     enable_event_driven_paper_entry: bool = os.getenv("ENABLE_EVENT_DRIVEN_PAPER_ENTRY", "true").lower() == "true"
     enable_event_driven_live_entry: bool = os.getenv("ENABLE_EVENT_DRIVEN_LIVE_ENTRY", "false").lower() == "true"
     armed_entry_valid_seconds: int = int(os.getenv("ARMED_ENTRY_VALID_SECONDS", "60"))
+    enable_early_armed_entry: bool = os.getenv("ENABLE_EARLY_ARMED_ENTRY", "true").lower() == "true"
+    early_armed_entry_paper_only: bool = os.getenv("EARLY_ARMED_ENTRY_PAPER_ONLY", "true").lower() == "true"
+    early_arm_min_score: int = int(os.getenv("EARLY_ARM_MIN_SCORE", "75"))
+    early_arm_trigger_buffer_pct: float = float(os.getenv("EARLY_ARM_TRIGGER_BUFFER_PCT", "0.25"))
+    early_arm_allow_premium_pending: bool = os.getenv("EARLY_ARM_ALLOW_PREMIUM_PENDING", "true").lower() == "true"
+    enable_tick_quality_confirmation: bool = os.getenv("ENABLE_TICK_QUALITY_CONFIRMATION", "true").lower() == "true"
+    tick_quality_min_ticks_above_trigger: int = int(os.getenv("TICK_QUALITY_MIN_TICKS_ABOVE_TRIGGER", "2"))
+    tick_quality_hold_seconds: float = float(os.getenv("TICK_QUALITY_HOLD_SECONDS", "1.0"))
+    tick_quality_require_bid_progress: bool = os.getenv("TICK_QUALITY_REQUIRE_BID_PROGRESS", "true").lower() == "true"
+    tick_quality_max_spread_multiplier: float = float(os.getenv("TICK_QUALITY_MAX_SPREAD_MULTIPLIER", "1.5"))
     live_exit_max_retry_count: int = int(os.getenv("LIVE_EXIT_MAX_RETRY_COUNT", "2"))
     live_reconciliation_blocks_automation: bool = os.getenv("LIVE_RECONCILIATION_BLOCKS_AUTOMATION", "true").lower() == "true"
     enable_underlying_invalidation_exit: bool = os.getenv("ENABLE_UNDERLYING_INVALIDATION_EXIT", "true").lower() == "true"

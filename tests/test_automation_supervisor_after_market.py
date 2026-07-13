@@ -6,8 +6,15 @@ from app.services.automation_supervisor_service import AutomationSupervisorServi
 
 
 class FakeDataIngestionService:
+    def __init__(self) -> None:
+        self.live_gap_calls: list[dict[str, object]] = []
+
     def ingest_candles(self, **kwargs):
         return {"status": "ok", "kwargs": kwargs}
+
+    def backfill_live_relevant_option_candle_gaps(self, **kwargs):
+        self.live_gap_calls.append(kwargs)
+        return {"status": "ok", "inserted": 3, "kwargs": kwargs}
 
 
 class FakeSnapshotCollectorService:
@@ -49,9 +56,9 @@ class FakeOutcomeService:
         self.running = True
         return {"running": True, "interval_seconds": interval_seconds}
 
-    def evaluate_once(self, limit=100):
+    def evaluate_once(self, limit=100, **kwargs):
         self.evaluate_calls += 1
-        return {"evaluated": 0, "limit": limit}
+        return {"evaluated": 0, "limit": limit, **kwargs}
 
 
 class FakeRiskManagementService:
@@ -105,10 +112,19 @@ class FixedClockAutomationSupervisor(AutomationSupervisorService):
 class AutomationSupervisorAfterMarketTests(unittest.TestCase):
     def setUp(self) -> None:
         self.original_stop_after_complete = settings.automation_stop_after_after_market_complete
+        self.original_enable_live_gap_backfill = settings.enable_live_option_candle_gap_backfill
+        self.original_live_gap_interval = settings.live_option_candle_backfill_interval_seconds
+        self.original_live_gap_timeframes = settings.live_option_candle_backfill_timeframes
         object.__setattr__(settings, "automation_stop_after_after_market_complete", True)
+        object.__setattr__(settings, "enable_live_option_candle_gap_backfill", True)
+        object.__setattr__(settings, "live_option_candle_backfill_interval_seconds", 120)
+        object.__setattr__(settings, "live_option_candle_backfill_timeframes", "1minute")
 
     def tearDown(self) -> None:
         object.__setattr__(settings, "automation_stop_after_after_market_complete", self.original_stop_after_complete)
+        object.__setattr__(settings, "enable_live_option_candle_gap_backfill", self.original_enable_live_gap_backfill)
+        object.__setattr__(settings, "live_option_candle_backfill_interval_seconds", self.original_live_gap_interval)
+        object.__setattr__(settings, "live_option_candle_backfill_timeframes", self.original_live_gap_timeframes)
 
     def test_supervisor_runs_research_in_market_closed_branch(self) -> None:
         research = FakeAfterMarketResearchService()
@@ -194,6 +210,18 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(research.calls, [])
         self.assertFalse(any(action.get("action") == "after_market_research" for action in result["actions"]))
+
+    def test_supervisor_runs_live_option_candle_gap_catchup_during_market_hours(self) -> None:
+        research = FakeAfterMarketResearchService()
+        supervisor = FixedClockAutomationSupervisor(now=datetime(2026, 7, 3, 10, 30), after_market_research_service=research)
+
+        result = supervisor.run_once({"symbols": "BANKNIFTY"})
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(len(supervisor.data_ingestion_service.live_gap_calls), 1)
+        self.assertEqual(supervisor.data_ingestion_service.live_gap_calls[0]["symbols"], ["BANKNIFTY"])
+        self.assertEqual(supervisor.data_ingestion_service.live_gap_calls[0]["timeframes"], ["1minute"])
+        self.assertTrue(any(action.get("action") == "live_option_candle_gap_catchup" for action in result["actions"]))
 
     def test_running_supervisor_stops_after_after_market_pipeline_completes(self) -> None:
         research = FakeAfterMarketResearchService()

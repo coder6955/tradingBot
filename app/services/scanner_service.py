@@ -473,6 +473,15 @@ class ScannerService:
             if armed_entry_eval:
                 factor_scores = dict(factor_scores)
                 factor_scores["armed_entry"] = armed_entry_eval
+                if armed_entry_eval.get("early_arm"):
+                    early_timing = self._early_entry_timing_payload(
+                        contract=contract,
+                        prices=prices,
+                        entry_timing_eval=entry_timing_eval,
+                        factor_scores=factor_scores,
+                    )
+                    factor_scores["entry_timing"] = early_timing
+                    entry_timing_eval = early_timing
             risk_failures = list(gate_failures)
             risk_failures.extend(self._entry_timing_failures(entry_timing_eval))
             if risk_failures:
@@ -985,11 +994,30 @@ class ScannerService:
         gate_failures: list[str],
     ) -> dict[str, object] | None:
         state = str(entry_timing_eval.get("entry_timing_state") or entry_timing_eval.get("state") or "")
+        early_arm = False
+        effective_entry_timing = dict(entry_timing_eval)
         if state != EntryTimingService.ARMED_FOR_ENTRY:
-            return None
+            early = self._early_armed_entry_eval(
+                symbol=symbol,
+                side=side,
+                contract=contract,
+                prices=prices,
+                entry_timing_eval=entry_timing_eval,
+                score=score,
+                order_mode=order_mode,
+                gate_failures=gate_failures,
+                factor_scores=factor_scores,
+            )
+            if not early.get("eligible"):
+                if early.get("reason"):
+                    return {"registered": False, "reason": early.get("reason"), "early_arm": early}
+                return None
+            early_arm = True
+            effective_entry_timing = dict(early["entry_timing"])
         if self.armed_entry_tracker is None:
             return {"registered": False, "reason": "armed_entry_tracker_unavailable"}
-        if gate_failures:
+        blocking_gate_failures = self._blocking_gate_failures_for_arming(gate_failures) if early_arm else list(gate_failures)
+        if blocking_gate_failures:
             return {"registered": False, "reason": "hard_gate_failed_before_arming", "gate_failures": list(gate_failures)}
         if score < settings.min_signal_score:
             return {"registered": False, "reason": "final weighted score is below threshold"}
@@ -997,21 +1025,185 @@ class ScannerService:
             return {"registered": False, "reason": "selected_option_token_missing"}
         if not settings.enable_kite_websocket:
             return {"registered": False, "reason": "websocket_disabled_for_event_entry"}
-        return self.armed_entry_tracker.register_from_scan(
+        result = self.armed_entry_tracker.register_from_scan(
             symbol=symbol,
             action=self._action(side, trend),
             side=side,
             contract=contract,
             prices=prices,
-            entry_timing=entry_timing_eval,
+            entry_timing=effective_entry_timing,
             score=score,
             probability=probability,
             confidence=confidence,
             quantity=quantity,
             factor_scores=dict(factor_scores),
             order_mode=order_mode,
-            reasons=[str(reason) for reason in entry_timing_eval.get("reasons", [])],
+            reasons=[str(reason) for reason in effective_entry_timing.get("reasons", [])],
         )
+        result["early_arm"] = early_arm
+        if early_arm:
+            result["reason"] = result.get("reason") or "early_setup_armed_waiting_for_websocket_trigger"
+            result["early_arm_policy"] = {
+                "min_score": settings.early_arm_min_score,
+                "trigger_buffer_pct": settings.early_arm_trigger_buffer_pct,
+                "paper_only": settings.early_armed_entry_paper_only,
+                "premium_pending_allowed": settings.early_arm_allow_premium_pending,
+            }
+        return result
+
+    def _early_armed_entry_eval(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        contract: OptionContract,
+        prices: dict[str, float],
+        entry_timing_eval: dict[str, object],
+        score: int,
+        order_mode: str,
+        gate_failures: list[str],
+        factor_scores: dict[str, object],
+    ) -> dict[str, object]:
+        if not settings.enable_early_armed_entry:
+            return {}
+        if side.upper() != "BUY" or symbol.upper() != "BANKNIFTY":
+            return {"eligible": False, "reason": "early_arming_only_supports_banknifty_option_buying"}
+        if settings.early_armed_entry_paper_only and str(order_mode).lower() != "paper":
+            return {"eligible": False, "reason": "early_arming_paper_only"}
+        if not settings.early_arm_allow_premium_pending:
+            return {"eligible": False, "reason": "early_arming_premium_pending_not_allowed"}
+        if score < settings.early_arm_min_score:
+            return {"eligible": False, "reason": "early_arming_score_below_threshold"}
+        if not contract.instrument_token:
+            return {"eligible": False, "reason": "selected_option_token_missing"}
+        if not settings.enable_kite_websocket:
+            return {"eligible": False, "reason": "websocket_disabled_for_event_entry"}
+        if self._blocking_gate_failures_for_arming(gate_failures):
+            return {"eligible": False, "reason": "hard_gate_failed_before_early_arming"}
+        if self._current_entry_premium(contract, prices, factor_scores) <= 0:
+            return {"eligible": False, "reason": "early_arming_current_premium_missing"}
+        if float(prices.get("stop_loss") or 0.0) <= 0 or float(prices.get("target_1") or 0.0) <= 0:
+            return {"eligible": False, "reason": "early_arming_price_plan_missing"}
+        if not self._setup_strong_enough_for_early_arm(factor_scores):
+            return {"eligible": False, "reason": "early_arming_setup_not_strong_enough"}
+
+        return {
+            "eligible": True,
+            "entry_timing": self._early_entry_timing_payload(
+                contract=contract,
+                prices=prices,
+                entry_timing_eval=entry_timing_eval,
+                factor_scores=factor_scores,
+            ),
+        }
+
+    def _blocking_gate_failures_for_arming(self, gate_failures: list[str]) -> list[str]:
+        return [reason for reason in gate_failures if not self._early_arm_allowed_failure(str(reason))]
+
+    def _early_arm_allowed_failure(self, reason: str) -> bool:
+        text = str(reason or "").lower()
+        allowed = {
+            "selected_option_not_subscribed_for_candles",
+            "websocket_ticks_available_but_no_candles_built",
+            "premium_candle_builder_warming_up",
+            "insufficient_current_session_premium_candles",
+            "premium_candles_stale_or_missing",
+            "option premium has not broken recent high",
+            "option premium momentum is weak",
+            "option premium volume expansion is weak",
+            "option_premium_confirmation_score_below_threshold",
+            "option premium confirmation failed",
+        }
+        if text in allowed:
+            return True
+        return "premium_candle" in text or "premium confirmation" in text
+
+    def _setup_strong_enough_for_early_arm(self, factor_scores: dict[str, object]) -> bool:
+        required = ["data_quality", "data_freshness", "option_quality", "market_regime", "price_action"]
+        if settings.enable_banknifty_intelligence:
+            required.append("banknifty_intelligence")
+        for key in required:
+            value = factor_scores.get(key, {})
+            if isinstance(value, dict) and not value.get("passed", True):
+                return False
+        return True
+
+    def _early_entry_timing_payload(
+        self,
+        *,
+        contract: OptionContract,
+        prices: dict[str, float],
+        entry_timing_eval: dict[str, object],
+        factor_scores: dict[str, object],
+    ) -> dict[str, object]:
+        current = self._current_entry_premium(contract, prices, factor_scores)
+        trigger = self._early_entry_trigger(current=current, entry_timing_eval=entry_timing_eval, factor_scores=factor_scores)
+        target = float(prices.get("target_1") or 0.0)
+        stop = float(prices.get("stop_loss") or 0.0)
+        remaining_rr = (target - current) / (current - stop) if current > stop and target > current else 0.0
+        target_room_pct = ((target - current) / max(current, 0.01)) * 100 if target > current else 0.0
+        distance_to_trigger_pct = ((trigger - current) / max(trigger, 0.01)) * 100 if trigger > current else 0.0
+        reasons = ["early_setup_armed_waiting_for_websocket_trigger", "premium_confirmation_pending"]
+        return {
+            "enabled": True,
+            "state": EntryTimingService.ARMED_FOR_ENTRY,
+            "entry_timing_state": EntryTimingService.ARMED_FOR_ENTRY,
+            "passed": False,
+            "reasons": reasons,
+            "entry_timing_reason": "; ".join(reasons),
+            "entry_trigger_price": round(trigger, 2),
+            "current_premium": round(current, 2),
+            "premium_distance_to_trigger_pct": round(distance_to_trigger_pct, 3),
+            "premium_move_from_base_pct": 0.0,
+            "chase_risk": "normal",
+            "remaining_risk_reward": round(remaining_rr, 3),
+            "target1_room_pct": round(target_room_pct, 3),
+            "entry_valid_until": entry_timing_eval.get("entry_valid_until"),
+            "entry_should_wait": True,
+            "entry_should_reject_as_late": False,
+            "breakout": False,
+            "setup_forming": True,
+            "spread_pct": round(self._contract_spread_pct(contract), 3),
+            "early_arm": True,
+        }
+
+    def _current_entry_premium(self, contract: OptionContract, prices: dict[str, float], factor_scores: dict[str, object]) -> float:
+        premium_eval = factor_scores.get("option_premium_confirmation", {})
+        details = premium_eval.get("details", {}) if isinstance(premium_eval, dict) and isinstance(premium_eval.get("details"), dict) else {}
+        for value in (contract.ask, contract.last_price, prices.get("entry_price"), details.get("last_close"), details.get("last_price")):
+            try:
+                current = float(value or 0.0)
+                if current > 0:
+                    return current
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    def _early_entry_trigger(self, *, current: float, entry_timing_eval: dict[str, object], factor_scores: dict[str, object]) -> float:
+        premium_eval = factor_scores.get("option_premium_confirmation", {})
+        details = premium_eval.get("details", {}) if isinstance(premium_eval, dict) and isinstance(premium_eval.get("details"), dict) else {}
+        candidates: list[float] = []
+        for value in (
+            entry_timing_eval.get("entry_trigger_price"),
+            details.get("recent_high"),
+            details.get("trigger_price"),
+            details.get("last_close"),
+            details.get("last_price"),
+        ):
+            try:
+                parsed = float(value or 0.0)
+                if parsed > 0:
+                    candidates.append(parsed)
+            except (TypeError, ValueError):
+                continue
+        minimum_trigger = current * (1 + max(0.0, settings.early_arm_trigger_buffer_pct) / 100)
+        candidates.append(minimum_trigger)
+        return max(candidates)
+
+    def _contract_spread_pct(self, contract: OptionContract) -> float:
+        if contract.bid > 0 and contract.ask > 0 and contract.last_price > 0:
+            return ((contract.ask - contract.bid) / max(contract.last_price, 0.01)) * 100
+        return 100.0
 
     def _log_decision(
         self,
@@ -1095,7 +1287,17 @@ class ScannerService:
     ) -> None:
         try:
             action = self._action(side, trend) if str(trend).lower() in {"bullish", "bearish"} else None
-            factor_scores = self._with_strategy_metadata(factor_scores or {}, "unknown")
+            factor_scores = self._with_rejection_snapshot(
+                factor_scores=factor_scores or {},
+                symbol=symbol,
+                side=side,
+                trend=trend,
+                score=score,
+                reasons=reasons,
+                snapshot=snapshot,
+                contract=contract,
+            )
+            factor_scores = self._with_strategy_metadata(factor_scores, "unknown")
             self.rejected_opportunity_repository.save_rejection(
                 symbol=symbol,
                 side=side,
@@ -1110,6 +1312,64 @@ class ScannerService:
             )
         except Exception as exc:
             logger.warning("failed_to_save_rejected_opportunity symbol=%s error=%s", symbol, exc)
+
+    def _with_rejection_snapshot(
+        self,
+        *,
+        factor_scores: dict[str, object],
+        symbol: str,
+        side: str,
+        trend: str,
+        score: int,
+        reasons: list[str],
+        snapshot: dict[str, object] | None,
+        contract: OptionContract | None,
+    ) -> dict[str, object]:
+        enriched = dict(factor_scores)
+        if "rejection_snapshot" in enriched:
+            return enriched
+        prices = enriched.get("prices", {}) if isinstance(enriched.get("prices"), dict) else {}
+        timing = enriched.get("entry_timing", {}) if isinstance(enriched.get("entry_timing"), dict) else {}
+        contract_payload = self._contract_payload(contract) if contract is not None else {}
+        spot_price = (snapshot or {}).get("price") if isinstance(snapshot, dict) else None
+        option_ltp = contract.last_price if contract is not None else None
+        option_bid = contract.bid if contract is not None else None
+        option_ask = contract.ask if contract is not None else None
+        spread_pct = self._contract_spread_pct(contract) if contract is not None else None
+        enriched["rejection_snapshot"] = {
+            "symbol": symbol.upper(),
+            "side": side.upper(),
+            "trend": trend,
+            "action": self._action(side, trend) if str(trend).lower() in {"bullish", "bearish"} else None,
+            "score": int(score or 0),
+            "primary_gate": reasons[0] if reasons else None,
+            "reasons": list(reasons),
+            "spot_price": spot_price,
+            "spot_source": (snapshot or {}).get("source") if isinstance(snapshot, dict) else None,
+            "is_real_data": (snapshot or {}).get("is_real_data") if isinstance(snapshot, dict) else None,
+            "tradingsymbol": contract_payload.get("tradingsymbol"),
+            "exchange": contract_payload.get("exchange"),
+            "instrument_token": contract_payload.get("instrument_token"),
+            "option_type": contract_payload.get("option_type"),
+            "strike": contract_payload.get("strike"),
+            "expiry": contract_payload.get("expiry"),
+            "option_ltp": option_ltp,
+            "option_bid": option_bid,
+            "option_ask": option_ask,
+            "spread_pct": spread_pct,
+            "entry_price": prices.get("entry_price"),
+            "stop_loss": prices.get("stop_loss"),
+            "target_1": prices.get("target_1"),
+            "target_2": prices.get("target_2"),
+            "target_3": prices.get("target_3"),
+            "risk_reward": prices.get("risk_reward"),
+            "entry_trigger_price": timing.get("entry_trigger_price"),
+            "current_premium": timing.get("current_premium") or option_ask or option_ltp,
+            "entry_timing_state": timing.get("entry_timing_state") or timing.get("state"),
+            "market_session": self.rejected_opportunity_repository._market_session(),
+            "recorded_at": self._decision_timestamp(),
+        }
+        return enriched
 
     def _feed_call_counts(self) -> dict[str, object]:
         if hasattr(self.feed, "call_counts"):
@@ -1171,6 +1431,16 @@ class ScannerService:
             },
             "event_entry_policy": {
                 "armed_entry_valid_seconds": settings.armed_entry_valid_seconds,
+                "enable_early_armed_entry": settings.enable_early_armed_entry,
+                "early_armed_entry_paper_only": settings.early_armed_entry_paper_only,
+                "early_arm_min_score": settings.early_arm_min_score,
+                "early_arm_trigger_buffer_pct": settings.early_arm_trigger_buffer_pct,
+                "early_arm_allow_premium_pending": settings.early_arm_allow_premium_pending,
+                "enable_tick_quality_confirmation": settings.enable_tick_quality_confirmation,
+                "tick_quality_min_ticks_above_trigger": settings.tick_quality_min_ticks_above_trigger,
+                "tick_quality_hold_seconds": settings.tick_quality_hold_seconds,
+                "tick_quality_require_bid_progress": settings.tick_quality_require_bid_progress,
+                "tick_quality_max_spread_multiplier": settings.tick_quality_max_spread_multiplier,
                 "max_entry_chase_pct": settings.max_entry_chase_pct,
                 "max_premium_move_from_base_pct": settings.max_premium_move_from_base_pct,
                 "min_remaining_risk_reward": settings.min_remaining_risk_reward,
@@ -1265,6 +1535,7 @@ class ScannerService:
         return {
             "tradingsymbol": contract.tradingsymbol,
             "exchange": contract.exchange,
+            "instrument_token": contract.instrument_token,
             "strike": contract.strike,
             "expiry": contract.expiry,
             "option_type": contract.option_type,

@@ -116,9 +116,11 @@ class KiteWebSocketPriceFeed:
         self._event_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=max(1, settings.websocket_event_queue_size))
         self._event_worker: Thread | None = None
         self._event_stop = Event()
-        self._candle_persist_queue: queue.Queue[WebSocketPremiumCandle] = queue.Queue(maxsize=max(1, settings.websocket_candle_persist_queue_size))
+        self._candle_persist_queue: queue.Queue[tuple[int, str, datetime]] = queue.Queue(maxsize=max(1, settings.websocket_candle_persist_queue_size))
         self._candle_persist_worker: Thread | None = None
         self._candle_persist_stop = Event()
+        self._pending_candle_persist: dict[tuple[int, str, datetime], WebSocketPremiumCandle] = {}
+        self._queued_candle_persist_keys: set[tuple[int, str, datetime]] = set()
         self.event_queue_dropped_count = 0
         self.candle_persist_queue_dropped_count = 0
         self.duplicate_start_prevented_count = 0
@@ -126,6 +128,8 @@ class KiteWebSocketPriceFeed:
         self.last_error_code: int | None = None
         self.last_error_reason: str | None = None
         self.last_disconnect_reason: str | None = None
+        self._last_auth_failed_access_token: str | None = None
+        self._last_auth_failed_api_key: str | None = None
         self._reconnect_attempt_times: list[datetime] = []
 
     def start(self) -> dict[str, Any]:
@@ -185,7 +189,7 @@ class KiteWebSocketPriceFeed:
                 self.websocket_status = "AUTH_FAILED" if self._is_auth_failure(None, str(exc), exc=exc) else "ERROR"
                 self.reconnect_skipped_reason = "auth_failed" if self.websocket_status == "AUTH_FAILED" else None
                 if self.websocket_status == "AUTH_FAILED":
-                    kite_auth_state.mark_auth_failed(str(exc))
+                    self._mark_auth_failed(str(exc))
                 self._stop_workers()
                 logger.exception("Kite WebSocket connect failed")
                 return {"started": False, "reason": self.last_error}
@@ -196,15 +200,21 @@ class KiteWebSocketPriceFeed:
         """Refresh credentials from the token store before creating a ticker."""
         self.api_key = settings.kite_api_key
         latest_token = access_token or load_access_token() or settings.kite_access_token
-        if latest_token and latest_token != self.access_token:
+        token_changed = bool(latest_token and latest_token != self.access_token)
+        api_key_changed = bool(self.api_key and self.api_key != self._last_auth_failed_api_key)
+        if token_changed:
             logger.info("Kite WebSocket access token refreshed")
         self.access_token = latest_token
-        if latest_token and self.websocket_status == "AUTH_FAILED":
+        if latest_token and self.websocket_status == "AUTH_FAILED" and (
+            token_changed or api_key_changed or latest_token != self._last_auth_failed_access_token
+        ):
             kite_auth_state.clear()
             self.websocket_status = "DISCONNECTED"
             self.last_error = None
             self.last_error_reason = None
             self.reconnect_skipped_reason = None
+            self._last_auth_failed_access_token = None
+            self._last_auth_failed_api_key = None
 
     def stop(self) -> dict[str, Any]:
         with self._start_stop_lock:
@@ -331,6 +341,8 @@ class KiteWebSocketPriceFeed:
                     "rehydrated_tokens": sorted(self._rehydrated_tokens),
                     "rehydrated_candle_count": self._rehydrated_candle_count,
                     "daily_cleanup_enabled": settings.enable_websocket_candle_daily_cleanup,
+                    "pending_coalesced_writes": len(self._pending_candle_persist),
+                    "queued_coalesced_keys": len(self._queued_candle_persist_keys),
                     "last_cleanup_date": self._last_candle_cleanup_date.isoformat() if self._last_candle_cleanup_date else None,
                     "last_cleanup_at": self._last_candle_cleanup_at.isoformat(sep=" ") if self._last_candle_cleanup_at else None,
                     "last_cleanup_deleted": self._last_candle_cleanup_deleted,
@@ -346,6 +358,13 @@ class KiteWebSocketPriceFeed:
                 "last_error_code": self.last_error_code,
                 "last_error_reason": self.last_error_reason,
                 "last_disconnect_reason": self.last_disconnect_reason,
+                "access_token_present": bool(self.access_token),
+                "auth_failure_token_still_loaded": bool(
+                    self._last_auth_failed_access_token
+                    and self.access_token == self._last_auth_failed_access_token
+                    and self.api_key == self._last_auth_failed_api_key
+                ),
+                "auth_recovery_hint": self._auth_recovery_hint(),
                 "reconnect_request_count": self.reconnect_request_count,
                 "reconnect_skipped_reason": self.reconnect_skipped_reason,
                 "duplicate_start_prevented_count": self.duplicate_start_prevented_count,
@@ -427,7 +446,7 @@ class KiteWebSocketPriceFeed:
             self.websocket_status = "AUTH_FAILED"
             self.reconnect_skipped_reason = "auth_failed"
             self.last_error = reason or f"closed:{code}"
-            kite_auth_state.mark_auth_failed(self.last_error)
+            self._mark_auth_failed(self.last_error)
             self._signal_workers_to_stop()
             logger.error("Kite WebSocket authentication failed; Kite re-login required: code=%s reason=%s", code, reason)
             return
@@ -463,7 +482,7 @@ class KiteWebSocketPriceFeed:
             self.running = False
             self.websocket_status = "AUTH_FAILED"
             self.reconnect_skipped_reason = "auth_failed"
-            kite_auth_state.mark_auth_failed(self.last_error)
+            self._mark_auth_failed(self.last_error)
             self._signal_workers_to_stop()
             logger.error("Kite WebSocket authentication failed; Kite re-login required: code=%s reason=%s", code, reason)
             return
@@ -647,11 +666,15 @@ class KiteWebSocketPriceFeed:
     def _candle_persist_loop(self) -> None:
         while not self._candle_persist_stop.is_set() or not self._candle_persist_queue.empty():
             try:
-                candle = self._candle_persist_queue.get(timeout=0.2)
+                key = self._candle_persist_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
             try:
-                self._persist_premium_candle(candle)
+                with self._lock:
+                    candle = self._pending_candle_persist.pop(key, None)
+                    self._queued_candle_persist_keys.discard(key)
+                if candle is not None:
+                    self._persist_premium_candle(candle)
             finally:
                 self._candle_persist_queue.task_done()
 
@@ -747,6 +770,24 @@ class KiteWebSocketPriceFeed:
                 "authentication",
             )
         )
+
+    def _mark_auth_failed(self, message: str | None = None) -> None:
+        self._last_auth_failed_access_token = self.access_token
+        self._last_auth_failed_api_key = self.api_key
+        kite_auth_state.mark_auth_failed(message)
+
+    def _auth_recovery_hint(self) -> str | None:
+        if self.websocket_status != "AUTH_FAILED" and not kite_auth_state.relogin_required:
+            return None
+        if not self.api_key or not self.access_token:
+            return "Configure KITE_API_KEY and complete Kite login to create today's KITE_ACCESS_TOKEN."
+        if (
+            self._last_auth_failed_access_token
+            and self.access_token == self._last_auth_failed_access_token
+            and self.api_key == self._last_auth_failed_api_key
+        ):
+            return "The currently loaded Kite access token was rejected by WebSocket. Open /kite/auth or POST /kite/session with today's request_token; restarting is not required after a new token is saved."
+        return "Kite login is required. Open /kite/auth or POST /kite/session with today's request_token."
 
     def _is_rate_limited(self, code: int | None, reason: str | None) -> bool:
         if code == 429:
@@ -901,14 +942,32 @@ class KiteWebSocketPriceFeed:
             self._persist_premium_candle(candle)
             return
         self._ensure_candle_persist_worker()
+        key = self._candle_persist_key(candle)
+        should_enqueue = False
+        with self._lock:
+            self._pending_candle_persist[key] = candle
+            if key not in self._queued_candle_persist_keys:
+                self._queued_candle_persist_keys.add(key)
+                should_enqueue = True
+        if not should_enqueue:
+            return
         try:
-            self._candle_persist_queue.put_nowait(candle)
+            self._candle_persist_queue.put_nowait(key)
         except queue.Full:
+            with self._lock:
+                self._queued_candle_persist_keys.discard(key)
             self.candle_persist_queue_dropped_count += 1
             logger.warning("Kite WebSocket candle persistence queue full; dropped token=%s", candle.instrument_token)
 
     def _storage_symbol(self, token: int) -> str:
         return f"{settings.websocket_candle_storage_prefix}:{int(token)}".upper()
+
+    def _candle_persist_key(self, candle: WebSocketPremiumCandle) -> tuple[int, str, datetime]:
+        return (
+            int(candle.instrument_token),
+            str(candle.timeframe),
+            candle.timestamp.replace(tzinfo=None),
+        )
 
     def _persist_premium_candle(self, candle: WebSocketPremiumCandle) -> None:
         if not settings.enable_websocket_candle_persistence:

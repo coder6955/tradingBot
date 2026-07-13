@@ -85,7 +85,7 @@ class OpportunityOutcomeService:
                 self.errors.append({"time": ist_now_naive().isoformat(), "error": str(exc)})
             await asyncio.sleep(float(self.interval_seconds))
 
-    def evaluate_once(self, limit: int = 100) -> dict[str, Any]:
+    def evaluate_once(self, limit: int = 100, *, exhaust_rejected: bool = False) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
         market_session = self._market_session()
         review_deferred = market_session == "REGULAR_MARKET"
@@ -100,7 +100,10 @@ class OpportunityOutcomeService:
         self.last_trade_exit_result = trade_exit_result
         rejected_result = None
         if not review_deferred and self.rejected_outcome_service:
-            rejected_result = self.rejected_outcome_service.evaluate_once(limit=limit)
+            if exhaust_rejected:
+                rejected_result = self.rejected_outcome_service.evaluate_batches(batch_limit=limit)
+            else:
+                rejected_result = self.rejected_outcome_service.evaluate_once(limit=limit)
         return {
             "market_session": market_session,
             "review_analysis_deferred": review_deferred,

@@ -50,6 +50,12 @@ class FakeInsightsService:
     def research_engine_report(self, *, symbol="BANKNIFTY", limit=3000):
         return {"status": "ok", "symbol": symbol, "limit": limit}
 
+    def gate_effectiveness_report(self, *, symbol="BANKNIFTY", limit=3000):
+        return {"status": "ok", "symbol": symbol, "limit": limit}
+
+    def rejected_opportunity_quality_report(self, *, symbol="BANKNIFTY", limit=3000):
+        return {"status": "ok", "symbol": symbol, "limit": limit}
+
     def threshold_validation_report(self, *, symbol="BANKNIFTY", limit=3000):
         return {"status": "ok", "symbol": symbol, "limit": limit}
 
@@ -58,6 +64,29 @@ class FakeInsightsService:
 
     def daily_review(self, *, symbol="BANKNIFTY", review_date=None, limit=3000):
         return {"status": "ok", "symbol": symbol, "date": review_date.isoformat(), "limit": limit}
+
+
+class FakeDataIngestionService:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def backfill_relevant_option_candles(self, **kwargs):
+        self.calls.append("targeted_backfill")
+        return {"status": "ok", "kwargs": kwargs, "coverage_after": {"summary": {"data_quality": "high_confidence"}}}
+
+    def option_candle_coverage_report(self, **kwargs):
+        self.calls.append("coverage")
+        return {"status": "ok", "summary": {"data_quality": "high_confidence"}, "kwargs": kwargs}
+
+
+class FakeRejectedOutcomeService:
+    def __init__(self, data_ingestion: FakeDataIngestionService) -> None:
+        self.calls: list[str] = []
+        self.data_ingestion = data_ingestion
+
+    def evaluate_batches(self, **kwargs):
+        self.calls.append("replay")
+        return {"status": "ok", "data_ingestion_calls_before_replay": list(self.data_ingestion.calls), "kwargs": kwargs}
 
 
 class FakeJobRepository:
@@ -108,10 +137,12 @@ class AfterMarketResearchServiceTests(unittest.TestCase):
             "enable_after_market_research_job": settings.enable_after_market_research_job,
             "after_market_research_time": settings.after_market_research_time,
             "after_market_research_step_delay_seconds": settings.after_market_research_step_delay_seconds,
+            "enable_targeted_option_candle_backfill": settings.enable_targeted_option_candle_backfill,
         }
         object.__setattr__(settings, "enable_after_market_research_job", True)
         object.__setattr__(settings, "after_market_research_time", "15:45")
         object.__setattr__(settings, "after_market_research_step_delay_seconds", 0.0)
+        object.__setattr__(settings, "enable_targeted_option_candle_backfill", True)
 
     def tearDown(self) -> None:
         for key, value in self.originals.items():
@@ -160,6 +191,27 @@ class AfterMarketResearchServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["force"], True)
         self.assertEqual(len(backtest.calls), 3)
+
+    def test_targeted_option_backfill_runs_before_rejected_replay(self) -> None:
+        backtest = FakeBacktestService()
+        data_ingestion = FakeDataIngestionService()
+        rejected = FakeRejectedOutcomeService(data_ingestion)
+        service = AfterMarketResearchService(
+            backtest_service=backtest,
+            professional_insights_service=FakeInsightsService(),
+            data_ingestion_service=data_ingestion,
+            rejected_outcome_service=rejected,
+            clock=lambda: datetime(2026, 7, 3, 16, 0),
+            job_repository=FakeJobRepository(),
+        )
+
+        result = service.maybe_run_after_market()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(data_ingestion.calls, ["targeted_backfill", "coverage"])
+        self.assertEqual(rejected.calls, ["replay"])
+        replay = result["reports"]["rejected_outcome_replay"]["result"]
+        self.assertEqual(replay["data_ingestion_calls_before_replay"], ["targeted_backfill", "coverage"])
 
     def _service(self, backtest: FakeBacktestService, now: datetime) -> AfterMarketResearchService:
         return AfterMarketResearchService(

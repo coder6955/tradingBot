@@ -44,8 +44,10 @@ class AutomationSupervisorService:
         self.last_cycle_at: str | None = None
         self.last_bootstrap_date: str | None = None
         self.last_intraday_candle_sync_at: datetime | None = None
+        self.last_live_option_candle_catchup_at: datetime | None = None
         self.last_market_closed_evaluation_date: str | None = None
         self.last_intraday_candle_sync_result: dict[str, Any] = {}
+        self.last_live_option_candle_catchup_result: dict[str, Any] = {}
         self.last_bootstrap_result: dict[str, Any] = {}
         self.last_actions: list[dict[str, Any]] = []
         self.errors: list[dict[str, Any]] = []
@@ -87,6 +89,8 @@ class AutomationSupervisorService:
             "last_bootstrap_date": self.last_bootstrap_date,
             "last_intraday_candle_sync_at": self._format_dt(self.last_intraday_candle_sync_at) if self.last_intraday_candle_sync_at else None,
             "last_intraday_candle_sync_result": self.last_intraday_candle_sync_result,
+            "last_live_option_candle_catchup_at": self._format_dt(self.last_live_option_candle_catchup_at) if self.last_live_option_candle_catchup_at else None,
+            "last_live_option_candle_catchup_result": self.last_live_option_candle_catchup_result,
             "last_bootstrap_result": self.last_bootstrap_result,
             "last_actions": self.last_actions[-20:],
             "error_count": len(self.errors),
@@ -113,6 +117,7 @@ class AutomationSupervisorService:
                 actions.append(self._bootstrap_daily_data())
             if self._market_is_open(now):
                 self._sync_intraday_candles_if_due(now, actions)
+                self._live_option_candle_catchup_if_due(now, actions)
                 actions.extend(self._ensure_intraday_services())
             else:
                 actions.extend(self._stop_intraday_services_now())
@@ -175,6 +180,28 @@ class AutomationSupervisorService:
         self.last_intraday_candle_sync_result = result
         actions.append({"action": "intraday_candle_checkpoint_sync", "status": "ok", "result": result})
 
+    def _live_option_candle_catchup_if_due(self, now: datetime, actions: list[dict[str, Any]]) -> None:
+        if not settings.enable_live_option_candle_gap_backfill:
+            return
+        interval_seconds = max(1, int(settings.live_option_candle_backfill_interval_seconds))
+        if self.last_live_option_candle_catchup_at is not None:
+            elapsed = (now - self.last_live_option_candle_catchup_at).total_seconds()
+            if elapsed < interval_seconds:
+                return
+        timeframes = [item.strip() for item in str(settings.live_option_candle_backfill_timeframes or "1minute").split(",") if item.strip()]
+        result = self.data_ingestion_service.backfill_live_relevant_option_candle_gaps(
+            symbols=self._symbols(),
+            now=now,
+            timeframes=timeframes,
+            max_contracts=settings.live_option_candle_backfill_max_contracts,
+            lookback_minutes=settings.live_option_candle_backfill_lookback_minutes,
+            batch_limit=settings.live_option_candle_backfill_batch_limit,
+            delay_seconds=settings.live_option_candle_backfill_delay_seconds,
+        )
+        self.last_live_option_candle_catchup_at = now
+        self.last_live_option_candle_catchup_result = result
+        actions.append({"action": "live_option_candle_gap_catchup", "status": result.get("status", "ok"), "result": result})
+
     def _ensure_intraday_services(self) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
         symbols = self._symbols()
@@ -206,7 +233,10 @@ class AutomationSupervisorService:
 
     def _evaluate_open_once(self, actions: list[dict[str, Any]]) -> None:
         try:
-            result = self.outcome_service.evaluate_once(limit=100)
+            result = self.outcome_service.evaluate_once(
+                limit=int(settings.rejected_outcome_batch_limit),
+                exhaust_rejected=bool(settings.automation_exhaust_rejected_outcomes_after_close),
+            )
             actions.append({"action": "evaluate_open_opportunities", "status": "ok", "result": result})
         except Exception as exc:
             actions.append({"action": "evaluate_open_opportunities", "status": "error", "message": str(exc)})

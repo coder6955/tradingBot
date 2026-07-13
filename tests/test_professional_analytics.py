@@ -105,6 +105,77 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
         self.assertIn("rejection_gate:entry_too_late", result["factor_attribution"])
         self.assertIn("test_strategy", result["strategy_versions"]["versions"])
 
+    def test_gate_effectiveness_report_separates_missed_saved_unresolved_and_ambiguous(self) -> None:
+        rejected_repo = RejectedOpportunityRepository()
+        missed = rejected_repo.save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=78,
+            reasons=["premium confirmation failed"],
+            contract=SimpleNamespace(tradingsymbol="BANKNIFTY26JUL58000CE", exchange="NFO", expiry="2026-07-26", strike=58000, option_type="CE"),
+            factor_scores={"prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}},
+            market_session="REGULAR_MARKET",
+            learning_eligible=True,
+        )
+        saved = rejected_repo.save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_PE",
+            score=75,
+            reasons=["premium confirmation failed"],
+            contract=SimpleNamespace(tradingsymbol="BANKNIFTY26JUL57000PE", exchange="NFO", expiry="2026-07-26", strike=57000, option_type="PE"),
+            factor_scores={"prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}},
+            market_session="REGULAR_MARKET",
+            learning_eligible=True,
+        )
+        ambiguous = rejected_repo.save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=74,
+            reasons=["premium confirmation failed"],
+            contract=SimpleNamespace(tradingsymbol="BANKNIFTY26JUL58100CE", exchange="NFO", expiry="2026-07-26", strike=58100, option_type="CE"),
+            factor_scores={"prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}},
+            market_session="REGULAR_MARKET",
+            learning_eligible=True,
+        )
+        rejected_repo.save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=73,
+            reasons=["premium confirmation failed"],
+            contract=SimpleNamespace(tradingsymbol="BANKNIFTY26JUL58200CE", exchange="NFO", expiry="2026-07-26", strike=58200, option_type="CE"),
+            factor_scores={"prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}},
+            market_session="REGULAR_MARKET",
+            learning_eligible=True,
+        )
+        rejected_repo.mark_later_outcome(missed.id, outcome="would_have_hit_target_1", exit_price=130, outcome_minutes=3, outcome_source="candle_replay", outcome_timeframe="1minute")
+        rejected_repo.mark_later_outcome(saved.id, outcome="would_have_hit_stop_loss", exit_price=80, outcome_minutes=5, outcome_source="candle_replay", outcome_timeframe="1minute")
+        rejected_repo.mark_later_outcome(
+            ambiguous.id,
+            outcome="ambiguous_stop_and_target_same_candle",
+            exit_price=101,
+            outcome_minutes=2,
+            outcome_source="candle_replay",
+            outcome_timeframe="1minute",
+            ambiguous=True,
+        )
+
+        result = ProfessionalInsightsService().gate_effectiveness_report(symbol="BANKNIFTY", limit=100)
+        gate = {row["gate_or_reason"]: row for row in result["gates"]}["premium_confirmation_failed"]
+
+        self.assertEqual(result["rejected_summary"]["missed_winners"], 1)
+        self.assertEqual(result["rejected_summary"]["saved_losers"], 1)
+        self.assertEqual(result["rejected_summary"]["ambiguous"], 1)
+        self.assertEqual(result["rejected_summary"]["unresolved"], 1)
+        self.assertEqual(gate["missed_winners"], 1)
+        self.assertEqual(gate["saved_losers"], 1)
+        self.assertEqual(gate["ambiguous"], 1)
+        self.assertEqual(gate["unresolved"], 1)
+        self.assertEqual(gate["avg_minutes_to_outcome"], 3.33)
+
     def test_research_engine_report_ranks_filters_and_segments_expectancy(self) -> None:
         opportunity_repo = OpportunityRepository()
         rejected_repo = RejectedOpportunityRepository()

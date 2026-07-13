@@ -12,8 +12,9 @@ from app.services.trade_setup_service import OptionContract
 class OptionPremiumConfirmationService:
     """Confirm that the selected option premium itself is participating in the move."""
 
-    def __init__(self, websocket_price_feed: Any | None = None) -> None:
+    def __init__(self, websocket_price_feed: Any | None = None, live_gap_backfill_service: Any | None = None) -> None:
         self.websocket_price_feed = websocket_price_feed
+        self.live_gap_backfill_service = live_gap_backfill_service
 
     def evaluate(self, *, contract: OptionContract, side: str = "BUY", timeframe: str = "5minute") -> dict[str, Any]:
         if not settings.enable_option_premium_confirmation or side.upper() != "BUY":
@@ -41,6 +42,25 @@ class OptionPremiumConfirmationService:
                 freshness={**stored_freshness, **websocket_state, "websocket_fallback": websocket_freshness},
             )
 
+        live_backfill = self._maybe_live_gap_backfill(contract, timeframe=timeframe)
+        if live_backfill is not None:
+            for replay_timeframe in self._post_backfill_timeframes(timeframe):
+                catchup_candles = self._recent_candles(contract.tradingsymbol, replay_timeframe, settings.option_premium_lookback_candles + 1)
+                catchup_freshness = self._candle_freshness(catchup_candles, source="stored_candles", symbol=contract.tradingsymbol)
+                if len(catchup_candles) >= minimum and catchup_freshness["premium_candle_freshness_passed"]:
+                    return self._evaluate_candles(
+                        contract=contract,
+                        candles=catchup_candles,
+                        source="stored_candles",
+                        freshness={
+                            **catchup_freshness,
+                            **websocket_state,
+                            "websocket_fallback": websocket_freshness,
+                            "live_candle_gap_backfill": live_backfill,
+                            "live_candle_gap_backfill_timeframe": replay_timeframe,
+                        },
+                    )
+
         snapshot_eval = self._evaluate_snapshots(contract, candle_count=len(candles), fallback_freshness=websocket_freshness)
         block_reason = self._premium_block_reason(contract, websocket_candles, websocket_state, websocket_freshness, stored_freshness, minimum)
         return self._stale_result(
@@ -60,6 +80,7 @@ class OptionPremiumConfirmationService:
                 "premium_confirmation_block_reason": block_reason,
                 "websocket_fallback": websocket_freshness,
                 "snapshot_diagnostics": snapshot_eval,
+                "live_candle_gap_backfill": live_backfill,
             },
         )
 
@@ -463,6 +484,39 @@ class OptionPremiumConfirmationService:
         if not websocket_freshness.get("premium_candle_freshness_passed") or not stored_freshness.get("premium_candle_freshness_passed"):
             return "premium_candles_stale_or_missing"
         return "premium_candles_stale_or_missing"
+
+    def _maybe_live_gap_backfill(self, contract: OptionContract, *, timeframe: str) -> dict[str, Any] | None:
+        if not settings.enable_on_demand_premium_candle_backfill:
+            return None
+        if self.live_gap_backfill_service is None or not contract.instrument_token:
+            return None
+        backfill = getattr(self.live_gap_backfill_service, "backfill_option_contract_live_gap", None)
+        if not callable(backfill):
+            return None
+        try:
+            return dict(
+                backfill(
+                    contract,
+                    timeframes=self._live_backfill_timeframes(),
+                    reason="on_demand_premium_confirmation",
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "reason": "live_candle_gap_backfill_failed", "message": str(exc)}
+
+    def _live_backfill_timeframes(self) -> list[str]:
+        raw = str(settings.live_option_candle_backfill_timeframes or settings.websocket_premium_candle_timeframe or "1minute")
+        values = [item.strip() for item in raw.split(",") if item.strip()]
+        return values or [settings.websocket_premium_candle_timeframe or "1minute"]
+
+    def _post_backfill_timeframes(self, timeframe: str) -> list[str]:
+        values = [*self._live_backfill_timeframes(), settings.websocket_premium_candle_timeframe, timeframe]
+        unique: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in unique:
+                unique.append(text)
+        return unique or [timeframe]
 
     def _warmup_seconds(self, current_count: int) -> int:
         missing = max(0, self._minimum_required() - int(current_count or 0))

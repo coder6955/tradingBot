@@ -23,7 +23,9 @@ class AfterMarketResearchService:
         *,
         backtest_service: BacktestService,
         professional_insights_service: ProfessionalInsightsService,
+        data_ingestion_service: Any | None = None,
         outcome_learning_service: Any | None = None,
+        rejected_outcome_service: Any | None = None,
         opportunity_analytics_service: Any | None = None,
         execution_analytics_service: Any | None = None,
         professional_readiness_service: Any | None = None,
@@ -34,7 +36,9 @@ class AfterMarketResearchService:
     ) -> None:
         self.backtest_service = backtest_service
         self.professional_insights_service = professional_insights_service
+        self.data_ingestion_service = data_ingestion_service
         self.outcome_learning_service = outcome_learning_service
+        self.rejected_outcome_service = rejected_outcome_service
         self.opportunity_analytics_service = opportunity_analytics_service
         self.execution_analytics_service = execution_analytics_service
         self.professional_readiness_service = professional_readiness_service
@@ -167,6 +171,50 @@ class AfterMarketResearchService:
         decision_mode = settings.after_market_research_decision_mode
 
         reports: dict[str, dict[str, Any]] = {}
+        if self.data_ingestion_service is not None and settings.enable_targeted_option_candle_backfill:
+            self._run_stage(
+                reports,
+                "targeted_option_candle_backfill",
+                lambda: self.data_ingestion_service.backfill_relevant_option_candles(
+                    symbols=[symbol],
+                    trading_date=now.date(),
+                    timeframes=[
+                        item.strip()
+                        for item in str(settings.targeted_option_candle_backfill_timeframes or "1minute,5minute").split(",")
+                        if item.strip()
+                    ],
+                    max_contracts=settings.targeted_option_candle_backfill_max_contracts,
+                    batch_limit=settings.targeted_option_candle_backfill_batch_limit,
+                    delay_seconds=settings.targeted_option_candle_backfill_delay_seconds,
+                ),
+            )
+        if self.data_ingestion_service is not None:
+            self._run_stage(
+                reports,
+                "option_candle_coverage",
+                lambda: self.data_ingestion_service.option_candle_coverage_report(
+                    symbols=[symbol],
+                    trading_date=now.date(),
+                    timeframes=[
+                        item.strip()
+                        for item in str(settings.targeted_option_candle_backfill_timeframes or "1minute,5minute").split(",")
+                        if item.strip()
+                    ],
+                    max_contracts=settings.targeted_option_candle_backfill_max_contracts,
+                ),
+            )
+        if self.rejected_outcome_service is not None:
+            self._run_stage(
+                reports,
+                "rejected_outcome_replay",
+                lambda: self.rejected_outcome_service.evaluate_batches(
+                    symbol=symbol,
+                    batch_limit=settings.rejected_outcome_batch_limit,
+                    max_batches=settings.rejected_outcome_max_batches,
+                    learning_only=True,
+                    delay_seconds=settings.rejected_outcome_batch_delay_seconds,
+                ),
+            )
         self._run_stage(
             reports,
             "daily_summary",
@@ -181,6 +229,8 @@ class AfterMarketResearchService:
             self._run_stage(reports, "execution_analytics", lambda: self.execution_analytics_service.analyze(symbol=symbol, limit=limit))
         self._run_stage(reports, "professional_insights", lambda: self.professional_insights_service.analyze(symbol=symbol, limit=limit))
         self._run_stage(reports, "research_engine", lambda: self.professional_insights_service.research_engine_report(symbol=symbol, limit=limit))
+        self._run_stage(reports, "gate_effectiveness", lambda: self.professional_insights_service.gate_effectiveness_report(symbol=symbol, limit=limit))
+        self._run_stage(reports, "rejected_opportunity_quality", lambda: self.professional_insights_service.rejected_opportunity_quality_report(symbol=symbol, limit=limit))
         self._run_stage(
             reports,
             "threshold_validation",
@@ -299,10 +349,15 @@ class AfterMarketResearchService:
 
     def _pipeline_names(self) -> list[str]:
         names = [
+            "targeted_option_candle_backfill",
+            "option_candle_coverage",
+            "rejected_outcome_replay",
             "daily_summary",
             "data_completeness",
             "professional_insights",
             "research_engine",
+            "gate_effectiveness",
+            "rejected_opportunity_quality",
             "threshold_validation",
             "execution_realism",
             "daily_review",
@@ -310,6 +365,13 @@ class AfterMarketResearchService:
             "ablation",
             "walk_forward",
         ]
+        if self.rejected_outcome_service is None:
+            names.remove("rejected_outcome_replay")
+        if self.data_ingestion_service is None:
+            names.remove("targeted_option_candle_backfill")
+            names.remove("option_candle_coverage")
+        elif not settings.enable_targeted_option_candle_backfill:
+            names.remove("targeted_option_candle_backfill")
         if self.outcome_learning_service is not None:
             names.insert(2, "outcome_learning")
         if self.opportunity_analytics_service is not None:

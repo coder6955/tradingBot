@@ -59,7 +59,22 @@ class RejectedOpportunityRepository:
         market_session: str | None = None,
         learning_eligible: bool | None = None,
     ) -> RejectedOpportunityRecord:
-        factors = factor_scores or {}
+        factors = dict(factor_scores or {})
+        if contract is not None and "contract" not in factors:
+            factors["contract"] = {
+                "tradingsymbol": getattr(contract, "tradingsymbol", None),
+                "exchange": getattr(contract, "exchange", None),
+                "instrument_token": getattr(contract, "instrument_token", None),
+                "expiry": getattr(contract, "expiry", None),
+                "strike": getattr(contract, "strike", None),
+                "option_type": getattr(contract, "option_type", None),
+                "lot_size": getattr(contract, "lot_size", None),
+                "last_price": getattr(contract, "last_price", None),
+                "bid": getattr(contract, "bid", None),
+                "ask": getattr(contract, "ask", None),
+                "open_interest": getattr(contract, "open_interest", None),
+                "volume": getattr(contract, "volume", None),
+            }
         quality = factors.get("option_quality", {}) if isinstance(factors.get("option_quality"), dict) else {}
         premium = factors.get("option_premium_confirmation", {}) if isinstance(factors.get("option_premium_confirmation"), dict) else {}
         session_label = str(market_session or self._market_session())
@@ -128,6 +143,7 @@ class RejectedOpportunityRepository:
         symbol: str | None = "BANKNIFTY",
         limit: int = 100,
         learning_only: bool = True,
+        after_id: int | None = None,
     ) -> list[RejectedOpportunityRecord]:
         session = get_session()
         try:
@@ -141,6 +157,8 @@ class RejectedOpportunityRepository:
                 query = query.filter(RejectedOpportunityRecord.symbol == symbol.upper())
             if learning_only:
                 query = query.filter(RejectedOpportunityRecord.learning_eligible == 1)
+            if after_id is not None:
+                query = query.filter(RejectedOpportunityRecord.id > int(after_id))
             return query.limit(limit).all()
         finally:
             session.close()
@@ -152,6 +170,11 @@ class RejectedOpportunityRepository:
         outcome: str,
         exit_price: float | None = None,
         notes: str | None = None,
+        outcome_at: Any | None = None,
+        outcome_minutes: float | None = None,
+        outcome_source: str | None = None,
+        outcome_timeframe: str | None = None,
+        ambiguous: bool = False,
     ) -> RejectedOpportunityRecord:
         session = get_session()
         try:
@@ -160,6 +183,11 @@ class RejectedOpportunityRepository:
                 raise ValueError(f"rejected opportunity {rejection_id} was not found")
             record.later_outcome = outcome
             record.later_exit_price = exit_price
+            record.later_outcome_at = outcome_at
+            record.later_outcome_minutes = outcome_minutes
+            record.later_outcome_source = outcome_source
+            record.later_outcome_timeframe = outcome_timeframe
+            record.later_outcome_ambiguous = 1 if ambiguous else 0
             record.later_notes = notes
             record.later_evaluated_at = ist_now_naive()
             session.commit()
@@ -235,6 +263,12 @@ class RejectedOpportunityRepository:
             "reasons": self._json_list(record.reasons_json),
             "later_outcome": record.later_outcome,
             "later_exit_price": record.later_exit_price,
+            "later_outcome_at": record.later_outcome_at.isoformat(sep=" ") if record.later_outcome_at else None,
+            "later_outcome_minutes": record.later_outcome_minutes,
+            "later_outcome_source": record.later_outcome_source,
+            "later_outcome_timeframe": record.later_outcome_timeframe,
+            "later_outcome_ambiguous": bool(record.later_outcome_ambiguous),
+            "later_notes": record.later_notes,
         }
 
     def _classify_learning(

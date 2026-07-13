@@ -47,6 +47,7 @@ class ProfessionalInsightsService:
             "limit": limit,
             "rejection_learning_filter": self._rejection_learning_filter_summary(rejections),
             "accepted_vs_rejected": self._accepted_vs_rejected(opportunities, eligible_rejections),
+            "rejected_opportunity_quality": self.rejected_opportunity_quality_report(symbol=symbol, limit=limit),
             "time_bucket_edge": self._time_bucket_edge(opportunities, eligible_rejections, trades),
             "expiry_dte_segmentation": self._dte_segmentation(opportunities, eligible_rejections, trades),
             "factor_attribution": self._factor_attribution(opportunities, eligible_rejections),
@@ -83,6 +84,7 @@ class ProfessionalInsightsService:
                 "reviewed_rejections_with_later_outcome": len(reviewed_rejections),
             },
             "filter_rejection_quality": self._filter_rejection_quality(eligible_rejections),
+            "gate_effectiveness": self.gate_effectiveness_report(symbol=symbol, limit=limit),
             "accepted_trade_loss_impact": self._accepted_loss_impact(closed_trades, closed_opportunities),
             "mfe_mae": self._mfe_mae_summary(closed_trades),
             "segment_expectancy": {
@@ -249,6 +251,8 @@ class ProfessionalInsightsService:
             ),
             "rejection_reasons_count": reason_counts,
             "learning_eligible_rejection_reasons_count": eligible_reason_counts,
+            "rejected_opportunity_quality": self._rejected_quality_summary(eligible_rejections),
+            "gate_effectiveness_top": self._gate_effectiveness_rows(eligible_rejections)[:10],
             "top_5_rejection_reasons": [
                 {"reason": reason, "count": count}
                 for reason, count in Counter(reason_counts).most_common(5)
@@ -289,11 +293,49 @@ class ProfessionalInsightsService:
             "trade_performance": self._trade_summary(trades),
             "top_rejection_gates": dict(Counter(str(row.primary_gate or "unknown") for row in eligible_rejections).most_common(20)),
             "top_rejection_reasons": dict(self._reason_counter(eligible_rejections).most_common(25)),
+            "rejected_opportunity_quality": self._rejected_quality_summary(eligible_rejections),
+            "gate_effectiveness_top": self._gate_effectiveness_rows(eligible_rejections)[:15],
             "learning_exclusion_reasons": dict(
                 Counter(str(row.learning_exclusion_reason or "unknown") for row in rejections if not bool(row.learning_eligible)).most_common(15)
             ),
             "exit_outcomes": dict(Counter(str(row.outcome or "open") for row in trades).most_common()),
             "timeline": self._timeline(opportunities, rejections, trades, limit=100),
+        }
+
+    def rejected_opportunity_quality_report(self, *, symbol: str | None = "BANKNIFTY", limit: int = 3000) -> dict[str, Any]:
+        _, rejections, _ = self._load(symbol=symbol, limit=limit)
+        eligible = self._learning_eligible_rejections(rejections)
+        return {
+            "status": "ok",
+            "symbol": symbol.upper() if symbol else "ALL",
+            "limit": limit,
+            "summary": self._rejected_quality_summary(eligible),
+            "gate_effectiveness": self._gate_effectiveness_rows(eligible),
+            "top_missed_winner_gates": self._top_gates(eligible, outcome_group="missed_winner"),
+            "top_saved_loser_gates": self._top_gates(eligible, outcome_group="saved_loser"),
+            "top_unresolved_gates": self._top_gates(eligible, outcome_group="unresolved"),
+            "notes": [
+                "Missed winners are rejected rows whose later_outcome hit a target.",
+                "Saved losers are rejected rows whose later_outcome hit stop loss.",
+                "Ambiguous rows touched stop and target inside the same candle and are not counted as wins or losses.",
+            ],
+        }
+
+    def gate_effectiveness_report(self, *, symbol: str | None = "BANKNIFTY", limit: int = 3000) -> dict[str, Any]:
+        opportunities, rejections, trades = self._load(symbol=symbol, limit=limit)
+        eligible = self._learning_eligible_rejections(rejections)
+        accepted_rows: list[Any] = [row for row in trades if str(row.status or "").lower() == "closed"]
+        if not accepted_rows:
+            accepted_rows = [row for row in opportunities if str(row.status or "").lower() == "closed"]
+        return {
+            "status": "ok",
+            "symbol": symbol.upper() if symbol else "ALL",
+            "limit": limit,
+            "accepted_summary": self._summary_for_rows(accepted_rows),
+            "rejected_summary": self._rejected_quality_summary(eligible),
+            "gates": self._gate_effectiveness_rows(eligible),
+            "accepted_vs_rejected": self._accepted_vs_rejected(opportunities, eligible),
+            "comparison": self._accepted_rejected_comparison(accepted_rows, eligible),
         }
 
     def trade_journal(self, *, symbol: str | None = "BANKNIFTY", limit: int = 200) -> dict[str, Any]:
@@ -1149,6 +1191,134 @@ class ProfessionalInsightsService:
             ][:10],
         }
 
+    def _rejected_quality_summary(self, rejections: list[RejectedOpportunityRecord]) -> dict[str, Any]:
+        reviewed = [row for row in rejections if row.later_outcome]
+        missed = [row for row in reviewed if self._is_win(row.later_outcome)]
+        saved = [row for row in reviewed if self._is_loss(row.later_outcome)]
+        ambiguous = [row for row in reviewed if self._is_ambiguous(row)]
+        unresolved = [row for row in rejections if not row.later_outcome]
+        outcome_minutes = [float(row.later_outcome_minutes) for row in reviewed if row.later_outcome_minutes is not None]
+        return {
+            "total_rejected": len(rejections),
+            "reviewed": len(reviewed),
+            "unresolved": len(unresolved),
+            "missed_winners": len(missed),
+            "saved_losers": len(saved),
+            "ambiguous": len(ambiguous),
+            "review_coverage_pct": round((len(reviewed) / len(rejections)) * 100, 2) if rejections else 0.0,
+            "missed_winner_rate_pct": round((len(missed) / len(reviewed)) * 100, 2) if reviewed else 0.0,
+            "saved_loser_rate_pct": round((len(saved) / len(reviewed)) * 100, 2) if reviewed else 0.0,
+            "ambiguous_rate_pct": round((len(ambiguous) / len(reviewed)) * 100, 2) if reviewed else 0.0,
+            "avg_minutes_to_outcome": round(sum(outcome_minutes) / len(outcome_minutes), 2) if outcome_minutes else None,
+            "outcomes": dict(Counter(str(row.later_outcome or "unresolved") for row in rejections).most_common()),
+            "sources": dict(Counter(str(row.later_outcome_source or "unknown") for row in reviewed).most_common()),
+            "timeframes": dict(Counter(str(row.later_outcome_timeframe or "unknown") for row in reviewed).most_common()),
+        }
+
+    def _gate_effectiveness_rows(self, rejections: list[RejectedOpportunityRecord]) -> list[dict[str, Any]]:
+        groups: dict[str, list[RejectedOpportunityRecord]] = defaultdict(list)
+        for row in rejections:
+            labels = [str(row.primary_gate or "unknown_gate")]
+            labels.extend(self._json_list(row.reasons_json))
+            for label in list(dict.fromkeys(self._clean_label(item) for item in labels if item)):
+                groups[label].append(row)
+        rows: list[dict[str, Any]] = []
+        for gate, items in groups.items():
+            reviewed = [row for row in items if row.later_outcome]
+            missed = [row for row in reviewed if self._is_win(row.later_outcome)]
+            saved = [row for row in reviewed if self._is_loss(row.later_outcome)]
+            ambiguous = [row for row in reviewed if self._is_ambiguous(row)]
+            unresolved = [row for row in items if not row.later_outcome]
+            moves = [self._rejected_move_value(row) for row in reviewed if not self._is_ambiguous(row)]
+            minutes = [float(row.later_outcome_minutes) for row in reviewed if row.later_outcome_minutes is not None]
+            rows.append(
+                {
+                    "gate_or_reason": gate,
+                    "count": len(items),
+                    "reviewed": len(reviewed),
+                    "missed_winners": len(missed),
+                    "saved_losers": len(saved),
+                    "ambiguous": len(ambiguous),
+                    "unresolved": len(unresolved),
+                    "missed_winner_rate_pct": round((len(missed) / len(reviewed)) * 100, 2) if reviewed else 0.0,
+                    "saved_loser_rate_pct": round((len(saved) / len(reviewed)) * 100, 2) if reviewed else 0.0,
+                    "unresolved_rate_pct": round((len(unresolved) / len(items)) * 100, 2) if items else 0.0,
+                    "ambiguous_rate_pct": round((len(ambiguous) / len(reviewed)) * 100, 2) if reviewed else 0.0,
+                    "avg_move_after_rejection": round(sum(moves) / len(moves), 2) if moves else 0.0,
+                    "avg_minutes_to_outcome": round(sum(minutes) / len(minutes), 2) if minutes else None,
+                    "evidence_quality": self._gate_evidence_quality(len(items), len(reviewed), len(ambiguous)),
+                    "interpretation": self._gate_effectiveness_interpretation(len(reviewed), len(missed), len(saved), len(ambiguous)),
+                }
+            )
+        return sorted(
+            rows,
+            key=lambda item: (
+                -int(item["count"]),
+                -float(item["saved_loser_rate_pct"]),
+                float(item["missed_winner_rate_pct"]),
+                str(item["gate_or_reason"]),
+            ),
+        )
+
+    def _top_gates(self, rejections: list[RejectedOpportunityRecord], *, outcome_group: str) -> dict[str, int]:
+        if outcome_group == "missed_winner":
+            rows = [row for row in rejections if self._is_win(row.later_outcome)]
+        elif outcome_group == "saved_loser":
+            rows = [row for row in rejections if self._is_loss(row.later_outcome)]
+        elif outcome_group == "unresolved":
+            rows = [row for row in rejections if not row.later_outcome]
+        else:
+            rows = []
+        return dict(Counter(str(row.primary_gate or "unknown") for row in rows).most_common(15))
+
+    def _accepted_rejected_comparison(self, accepted_rows: list[Any], rejections: list[RejectedOpportunityRecord]) -> dict[str, Any]:
+        reviewed = [row for row in rejections if row.later_outcome and not self._is_ambiguous(row)]
+        accepted = self._summary_for_rows(accepted_rows)
+        rejected_values = [self._rejected_move_value(row) for row in reviewed]
+        rejected = self._summary_from_values(rejected_values, [row.later_outcome for row in reviewed])
+        return {
+            "accepted_closed_count": accepted.get("trades", 0),
+            "rejected_reviewed_count": len(reviewed),
+            "accepted_expectancy": accepted.get("expectancy"),
+            "rejected_if_taken_expectancy": rejected.get("expectancy"),
+            "rejected_win_rate_pct": rejected.get("win_rate_pct"),
+            "interpretation": self._accepted_rejected_interpretation(accepted, rejected),
+        }
+
+    def _gate_evidence_quality(self, total: int, reviewed: int, ambiguous: int) -> str:
+        if total < 10 or reviewed < 5:
+            return "LOW_SAMPLE"
+        if ambiguous / max(reviewed, 1) > 0.25:
+            return "AMBIGUOUS"
+        if reviewed / max(total, 1) < 0.5:
+            return "PARTIAL_REVIEW"
+        return "USABLE"
+
+    def _gate_effectiveness_interpretation(self, reviewed: int, missed: int, saved: int, ambiguous: int) -> str:
+        if reviewed < 5:
+            return "needs_more_review"
+        if ambiguous / max(reviewed, 1) > 0.25:
+            return "ambiguous_intracandle_path"
+        missed_rate = missed / max(reviewed, 1)
+        saved_rate = saved / max(reviewed, 1)
+        if saved_rate >= 0.6 and missed_rate <= 0.2:
+            return "useful_filter"
+        if missed_rate >= 0.4:
+            return "possible_overfilter"
+        return "mixed_or_inconclusive"
+
+    def _accepted_rejected_interpretation(self, accepted: dict[str, Any], rejected: dict[str, Any]) -> str:
+        accepted_expectancy = float(accepted.get("expectancy") or 0.0)
+        rejected_expectancy = float(rejected.get("expectancy") or 0.0)
+        rejected_trades = int(rejected.get("trades") or 0)
+        if rejected_trades < 10:
+            return "not_enough_rejected_outcomes"
+        if rejected_expectancy > accepted_expectancy and rejected_expectancy > 0:
+            return "rejected_setups_need_review"
+        if rejected_expectancy < 0 <= accepted_expectancy:
+            return "filters_currently_helpful"
+        return "mixed_or_inconclusive"
+
     def _accepted_loss_impact(
         self,
         trades: list[TradeRecord],
@@ -1603,6 +1773,11 @@ class ProfessionalInsightsService:
             "primary_gate": row.primary_gate,
             "later_outcome": row.later_outcome,
             "later_exit_price": row.later_exit_price,
+            "later_outcome_at": self._dt(row.later_outcome_at),
+            "later_outcome_minutes": row.later_outcome_minutes,
+            "later_outcome_source": row.later_outcome_source,
+            "later_outcome_timeframe": row.later_outcome_timeframe,
+            "later_outcome_ambiguous": bool(row.later_outcome_ambiguous),
         }
 
     def _trade_event(self, row: TradeRecord) -> dict[str, Any]:
@@ -1647,11 +1822,21 @@ class ProfessionalInsightsService:
 
     def _is_win(self, outcome: str | None) -> bool:
         normalized = str(outcome or "").lower()
+        if normalized.startswith("ambiguous_"):
+            return False
         return normalized in WIN_OUTCOMES or "target" in normalized or normalized.startswith("would_have_hit_target")
 
     def _is_loss(self, outcome: str | None) -> bool:
         normalized = str(outcome or "").lower()
+        if normalized.startswith("ambiguous_"):
+            return False
         return normalized in LOSS_OUTCOMES or "stop" in normalized or normalized.startswith("would_have_hit_stop")
+
+    def _is_ambiguous(self, row_or_outcome: Any) -> bool:
+        if hasattr(row_or_outcome, "later_outcome_ambiguous") and bool(getattr(row_or_outcome, "later_outcome_ambiguous")):
+            return True
+        outcome = getattr(row_or_outcome, "later_outcome", row_or_outcome)
+        return str(outcome or "").lower().startswith("ambiguous_")
 
     def _json(self, value: str | None) -> dict[str, Any]:
         if not value:

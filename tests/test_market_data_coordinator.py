@@ -134,6 +134,7 @@ class MarketDataCoordinatorTests(unittest.TestCase):
             kite_provider_factory=lambda: provider,
             rejected_outcome_service=rejected_service,
             market_data_coordinator=coordinator,
+            market_session_provider=lambda: "AFTER_MARKET",
         )
 
         result = service.evaluate_once()

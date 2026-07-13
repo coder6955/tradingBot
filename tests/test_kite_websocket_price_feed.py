@@ -295,6 +295,35 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertEqual(status["candle_persistence"]["rehydrated_candle_count"], 1)
         rehydrated.stop()
 
+    def test_running_feed_coalesces_candle_persistence_for_same_minute(self) -> None:
+        base = regular_market_now().replace(second=10, microsecond=0)
+        original_queue_size = settings.websocket_candle_persist_queue_size
+        object.__setattr__(settings, "websocket_candle_persist_queue_size", 1)
+        try:
+            feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=lambda: base)
+            feed.running = True
+            feed._ensure_candle_persist_worker = lambda: None
+
+            feed._on_ticks(None, [{"instrument_token": 123, "last_price": 100, "exchange_timestamp": base}])
+            feed._on_ticks(None, [{"instrument_token": 123, "last_price": 104, "exchange_timestamp": base + timedelta(seconds=20)}])
+            feed._on_ticks(None, [{"instrument_token": 123, "last_price": 102, "exchange_timestamp": base + timedelta(seconds=40)}])
+
+            status = feed.status()
+            queued_key = feed._candle_persist_queue.get_nowait()
+            latest = feed._pending_candle_persist[queued_key]
+
+            self.assertEqual(feed._candle_persist_queue.qsize(), 0)
+            self.assertEqual(status["candle_persist_queue_size"], 1)
+            self.assertEqual(status["candle_persistence"]["pending_coalesced_writes"], 1)
+            self.assertEqual(status["candle_persist_queue_dropped_count"], 0)
+            self.assertEqual(latest.open_price, 100)
+            self.assertEqual(latest.high_price, 104)
+            self.assertEqual(latest.low_price, 100)
+            self.assertEqual(latest.close_price, 102)
+            self.assertEqual(latest.tick_count, 3)
+        finally:
+            object.__setattr__(settings, "websocket_candle_persist_queue_size", original_queue_size)
+
     def test_old_websocket_one_minute_candles_are_cleaned_without_touching_history(self) -> None:
         now = regular_market_now().replace(second=0, microsecond=0)
         yesterday = now - timedelta(days=1)
@@ -569,6 +598,46 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertEqual(status["reconnect_skipped_reason"], "auth_failed")
         self.assertEqual(status["last_error_code"], 403)
         self.assertFalse(status["running"])
+        self.assertTrue(status["auth_failure_token_still_loaded"])
+        self.assertIn("currently loaded Kite access token was rejected", status["auth_recovery_hint"])
+
+    def test_same_rejected_token_does_not_clear_auth_failure_on_restart(self) -> None:
+        original_api_key = settings.kite_api_key
+        object.__setattr__(settings, "kite_api_key", "k")
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="bad-token", ticker_factory=FakeTicker, clock=regular_market_now)
+
+        try:
+            feed._on_error(FakeTicker("k", "bad-token"), 403, "Forbidden invalid token")
+            with patch("app.services.kite_websocket_price_feed.load_access_token", return_value="bad-token"):
+                result = feed.start()
+        finally:
+            object.__setattr__(settings, "kite_api_key", original_api_key)
+
+        self.assertFalse(result["started"])
+        self.assertEqual(result["reason"], "kite_relogin_required")
+        status = feed.status()
+        self.assertEqual(status["websocket_status"], "AUTH_FAILED")
+        self.assertTrue(status["relogin_required"])
+        self.assertTrue(status["auth_failure_token_still_loaded"])
+
+    def test_new_token_clears_auth_failure_and_restarts(self) -> None:
+        original_api_key = settings.kite_api_key
+        object.__setattr__(settings, "kite_api_key", "k")
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="bad-token", ticker_factory=FakeTicker, clock=regular_market_now)
+
+        try:
+            feed._on_error(FakeTicker("k", "bad-token"), 403, "Forbidden invalid token")
+            with patch("app.services.kite_websocket_price_feed.load_access_token", return_value="fresh-token"):
+                result = feed.start()
+        finally:
+            object.__setattr__(settings, "kite_api_key", original_api_key)
+
+        self.assertTrue(result["started"])
+        self.assertEqual(feed.access_token, "fresh-token")
+        status = feed.status()
+        self.assertEqual(status["websocket_status"], "CONNECTED")
+        self.assertFalse(status["relogin_required"])
+        self.assertFalse(status["auth_failure_token_still_loaded"])
 
     def test_websocket_reconnect_uses_local_backoff(self) -> None:
         reconnect_calls: list[bool] = []

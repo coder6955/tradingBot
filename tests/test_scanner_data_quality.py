@@ -123,6 +123,72 @@ class FakeArmedEntryTimingService:
         }
 
 
+class FakeNoTradeEntryTimingService:
+    def evaluate(self, **kwargs):
+        return {
+            "enabled": True,
+            "state": "NO_TRADE",
+            "entry_timing_state": "NO_TRADE",
+            "passed": False,
+            "reasons": ["entry_timing_price_inputs_missing"],
+            "entry_timing_reason": "entry_timing_price_inputs_missing",
+            "entry_trigger_price": None,
+            "current_premium": kwargs["contract"].ask,
+            "entry_should_wait": False,
+            "entry_should_reject_as_late": False,
+            "spread_pct": 0.1,
+        }
+
+
+class FakePendingPremiumConfirmationService:
+    def evaluate(self, **kwargs):
+        contract = kwargs["contract"]
+        return {
+            "enabled": True,
+            "score": 0,
+            "passed": False,
+            "reasons": ["premium_candles_stale_or_missing"],
+            "details": {
+                "source": "unavailable",
+                "premium_candle_source": "unavailable",
+                "tradingsymbol": contract.tradingsymbol,
+                "minimum_required_premium_candles": 3,
+                "current_session_candle_count": 0,
+                "premium_confirmation_ready": False,
+                "premium_confirmation_block_reason": "premium_candles_stale_or_missing",
+            },
+        }
+
+
+class FakeLiveGapBackfillService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def backfill_option_contract_live_gap(self, contract: OptionContract, **kwargs):
+        self.calls.append({"contract": contract, "kwargs": kwargs})
+        now = datetime.now().replace(second=0, microsecond=0)
+        closes = [100, 102, 104, 106, 108, 110, 116]
+        session = get_session()
+        try:
+            for idx, close in enumerate(closes):
+                session.add(
+                    Candle(
+                        symbol=contract.tradingsymbol,
+                        timeframe="1minute",
+                        timestamp=now - timedelta(minutes=(len(closes) - idx)),
+                        open_price=close - 1,
+                        high_price=close + 2,
+                        low_price=close - 2,
+                        close_price=close,
+                        volume=2000 if idx == len(closes) - 1 else 1000,
+                    )
+                )
+            session.commit()
+        finally:
+            session.close()
+        return {"status": "ok", "reason": kwargs.get("reason"), "historical_calls": 1, "inserted": len(closes)}
+
+
 class FakeArmedEntryTracker:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -175,6 +241,14 @@ class ScannerDataQualityTests(unittest.TestCase):
             "enable_volatility_edge_hard_gate": settings.enable_volatility_edge_hard_gate,
             "enable_banknifty_regime_filter": settings.enable_banknifty_regime_filter,
             "enable_kite_websocket": settings.enable_kite_websocket,
+            "enable_early_armed_entry": settings.enable_early_armed_entry,
+            "early_armed_entry_paper_only": settings.early_armed_entry_paper_only,
+            "early_arm_min_score": settings.early_arm_min_score,
+            "early_arm_trigger_buffer_pct": settings.early_arm_trigger_buffer_pct,
+            "early_arm_allow_premium_pending": settings.early_arm_allow_premium_pending,
+            "enable_live_option_candle_gap_backfill": settings.enable_live_option_candle_gap_backfill,
+            "enable_on_demand_premium_candle_backfill": settings.enable_on_demand_premium_candle_backfill,
+            "live_option_candle_backfill_timeframes": settings.live_option_candle_backfill_timeframes,
         }
         object.__setattr__(settings, "use_kite_market_data", True)
         object.__setattr__(settings, "enable_day_type_filter", False)
@@ -184,6 +258,14 @@ class ScannerDataQualityTests(unittest.TestCase):
         object.__setattr__(settings, "enable_volatility_edge_hard_gate", False)
         object.__setattr__(settings, "enable_banknifty_regime_filter", False)
         object.__setattr__(settings, "enable_kite_websocket", False)
+        object.__setattr__(settings, "enable_early_armed_entry", True)
+        object.__setattr__(settings, "early_armed_entry_paper_only", True)
+        object.__setattr__(settings, "early_arm_min_score", 75)
+        object.__setattr__(settings, "early_arm_trigger_buffer_pct", 0.25)
+        object.__setattr__(settings, "early_arm_allow_premium_pending", True)
+        object.__setattr__(settings, "enable_live_option_candle_gap_backfill", True)
+        object.__setattr__(settings, "enable_on_demand_premium_candle_backfill", True)
+        object.__setattr__(settings, "live_option_candle_backfill_timeframes", "1minute")
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.temp_db.close()
         init_db(f"sqlite:///{self.temp_db.name}")
@@ -441,6 +523,147 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.assertEqual(len(tracker.calls), 1)
         self.assertEqual(tracker.calls[0]["contract"].instrument_token, 580001)
 
+    def test_scanner_early_arms_when_only_premium_confirmation_is_pending(self) -> None:
+        originals = {
+            "enable_option_premium_confirmation": settings.enable_option_premium_confirmation,
+            "enable_banknifty_intelligence": settings.enable_banknifty_intelligence,
+            "enable_kite_websocket": settings.enable_kite_websocket,
+            "min_signal_score": settings.min_signal_score,
+            "early_arm_min_score": settings.early_arm_min_score,
+            "min_market_regime_score": settings.min_market_regime_score,
+            "min_price_action_score": settings.min_price_action_score,
+            "min_option_chain_score": settings.min_option_chain_score,
+            "min_option_quality_score": settings.min_option_quality_score,
+            "min_risk_reward": settings.min_risk_reward,
+            "min_directional_room_pct": settings.min_directional_room_pct,
+        }
+        tracker = FakeArmedEntryTracker()
+        try:
+            object.__setattr__(settings, "enable_option_premium_confirmation", True)
+            object.__setattr__(settings, "enable_banknifty_intelligence", False)
+            object.__setattr__(settings, "enable_kite_websocket", True)
+            object.__setattr__(settings, "min_signal_score", 0)
+            object.__setattr__(settings, "early_arm_min_score", 1)
+            object.__setattr__(settings, "min_market_regime_score", 1)
+            object.__setattr__(settings, "min_price_action_score", 1)
+            object.__setattr__(settings, "min_option_chain_score", 1)
+            object.__setattr__(settings, "min_option_quality_score", 1)
+            object.__setattr__(settings, "min_risk_reward", 0.0)
+            object.__setattr__(settings, "min_directional_room_pct", 0.0)
+            scanner = ScannerService(
+                feed=BankNiftyQualityFeed(
+                    {
+                        "instrument_token": 580001,
+                        "last_price": 1087.1,
+                        "depth": {"buy": [{"price": 1086.0}], "sell": [{"price": 1087.1}]},
+                        "volume": 100000,
+                        "oi": 100000,
+                    }
+                ),
+                rejected_opportunity_repository=RejectedOpportunityRepository(),
+                option_premium_confirmation_service=FakePendingPremiumConfirmationService(),
+                entry_timing_service=FakeNoTradeEntryTimingService(),
+                armed_entry_tracker=tracker,
+            )
+
+            result = scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")[0]
+        finally:
+            for key, value in originals.items():
+                object.__setattr__(settings, key, value)
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["entry_timing_state"], "ARMED_FOR_ENTRY")
+        self.assertEqual(result["armed_setup_id"], "armed-test-1", result["factor_scores"].get("armed_entry"))
+        self.assertTrue(result["factor_scores"]["armed_entry"]["early_arm"])
+        self.assertTrue(tracker.calls[0]["entry_timing"]["early_arm"])
+        self.assertGreater(tracker.calls[0]["entry_timing"]["entry_trigger_price"], tracker.calls[0]["entry_timing"]["current_premium"])
+        self.assertIn("premium_confirmation_pending", tracker.calls[0]["entry_timing"]["reasons"])
+
+    def test_scanner_early_arm_does_not_bypass_non_premium_hard_gate(self) -> None:
+        originals = {
+            "enable_option_premium_confirmation": settings.enable_option_premium_confirmation,
+            "enable_banknifty_regime_filter": settings.enable_banknifty_regime_filter,
+            "enable_banknifty_intelligence": settings.enable_banknifty_intelligence,
+            "enable_kite_websocket": settings.enable_kite_websocket,
+            "min_signal_score": settings.min_signal_score,
+            "early_arm_min_score": settings.early_arm_min_score,
+            "min_market_regime_score": settings.min_market_regime_score,
+            "min_price_action_score": settings.min_price_action_score,
+            "min_option_chain_score": settings.min_option_chain_score,
+            "min_option_quality_score": settings.min_option_quality_score,
+            "min_risk_reward": settings.min_risk_reward,
+            "min_directional_room_pct": settings.min_directional_room_pct,
+        }
+        tracker = FakeArmedEntryTracker()
+        try:
+            object.__setattr__(settings, "enable_option_premium_confirmation", True)
+            object.__setattr__(settings, "enable_banknifty_regime_filter", True)
+            object.__setattr__(settings, "enable_banknifty_intelligence", False)
+            object.__setattr__(settings, "enable_kite_websocket", True)
+            object.__setattr__(settings, "min_signal_score", 0)
+            object.__setattr__(settings, "early_arm_min_score", 1)
+            object.__setattr__(settings, "min_market_regime_score", 1)
+            object.__setattr__(settings, "min_price_action_score", 1)
+            object.__setattr__(settings, "min_option_chain_score", 1)
+            object.__setattr__(settings, "min_option_quality_score", 1)
+            object.__setattr__(settings, "min_risk_reward", 0.0)
+            object.__setattr__(settings, "min_directional_room_pct", 0.0)
+            scanner = ScannerService(
+                feed=BankNiftyQualityFeed(
+                    {
+                        "instrument_token": 580001,
+                        "last_price": 1087.1,
+                        "depth": {"buy": [{"price": 1086.0}], "sell": [{"price": 1087.1}]},
+                        "volume": 100000,
+                        "oi": 100000,
+                    }
+                ),
+                rejected_opportunity_repository=RejectedOpportunityRepository(),
+                option_premium_confirmation_service=FakePendingPremiumConfirmationService(),
+                entry_timing_service=FakeNoTradeEntryTimingService(),
+                banknifty_regime_filter_service=FakeBlockingRegimeFilterService(),
+                armed_entry_tracker=tracker,
+            )
+
+            result = scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")[0]
+        finally:
+            for key, value in originals.items():
+                object.__setattr__(settings, key, value)
+
+        self.assertFalse(result["passed"])
+        self.assertIn("opening_trap_structure", result["reasons"])
+        self.assertEqual(len(tracker.calls), 0)
+        self.assertEqual(result["factor_scores"]["armed_entry"]["reason"], "hard_gate_failed_before_early_arming")
+
+    def test_scanner_early_arm_is_paper_only_by_default(self) -> None:
+        scanner = ScannerService(feed=BankNiftyQualityFeed({}), rejected_opportunity_repository=RejectedOpportunityRepository())
+        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 1087.1, 100000, 100000, 1086.0, 1087.1)
+        result = scanner._maybe_register_armed_entry(
+            symbol="BANKNIFTY",
+            side="BUY",
+            trend="bullish",
+            contract=contract,
+            prices={"entry_price": 1087.1, "stop_loss": 1000.0, "target_1": 1250.0, "target_2": 1300.0, "target_3": 1350.0, "risk_reward": 1.8},
+            entry_timing_eval={"entry_timing_state": "NO_TRADE", "reasons": ["entry_timing_price_inputs_missing"]},
+            score=90,
+            probability=0.8,
+            confidence=0.9,
+            quantity=15,
+            factor_scores={
+                "data_quality": {"passed": True},
+                "data_freshness": {"passed": True},
+                "option_quality": {"passed": True},
+                "market_regime": {"passed": True},
+                "price_action": {"passed": True},
+                "banknifty_intelligence": {"passed": True},
+                "option_premium_confirmation": {"passed": False, "reasons": ["premium_candles_stale_or_missing"], "details": {}},
+            },
+            order_mode="live",
+            gate_failures=["premium_candles_stale_or_missing"],
+        )
+
+        self.assertEqual(result["reason"], "early_arming_paper_only")
+
     def test_previous_day_option_candles_fail_premium_confirmation_during_current_session(self) -> None:
         yesterday = datetime.now() - timedelta(days=1, hours=1)
         self._replace_premium_candles(
@@ -473,6 +696,25 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.assertTrue(result["details"]["premium_candle_freshness_passed"])
         self.assertEqual(result["details"]["premium_candle_session_date"], result["details"]["current_market_session_date"])
         self.assertIsNotNone(result["details"]["premium_candle_age_seconds"])
+
+    def test_on_demand_live_gap_backfill_repairs_missing_premium_candles(self) -> None:
+        session = get_session()
+        try:
+            session.query(Candle).filter(Candle.symbol == "BANKNIFTY26JUL58000CE").delete()
+            session.commit()
+        finally:
+            session.close()
+        backfill_service = FakeLiveGapBackfillService()
+        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 116, 50000, 10000, 115, 116)
+
+        result = OptionPremiumConfirmationService(live_gap_backfill_service=backfill_service).evaluate(contract=contract, side="BUY")
+
+        self.assertEqual(len(backfill_service.calls), 1)
+        self.assertEqual(backfill_service.calls[0]["kwargs"]["timeframes"], ["1minute"])
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["details"]["premium_candle_source"], "stored_candles")
+        self.assertEqual(result["details"]["live_candle_gap_backfill_timeframe"], "1minute")
+        self.assertEqual(result["details"]["live_candle_gap_backfill"]["inserted"], 7)
 
     def test_websocket_built_candle_is_accepted_if_fresh(self) -> None:
         session = get_session()

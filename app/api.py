@@ -208,7 +208,9 @@ professional_readiness_service = ProfessionalReadinessService(
 after_market_research_service = AfterMarketResearchService(
     backtest_service=backtest_service,
     professional_insights_service=professional_insights_service,
+    data_ingestion_service=None,
     outcome_learning_service=outcome_learning_service,
+    rejected_outcome_service=None,
     opportunity_analytics_service=opportunity_analytics_service,
     execution_analytics_service=execution_analytics_service,
     professional_readiness_service=professional_readiness_service,
@@ -250,6 +252,7 @@ rejected_opportunity_outcome_service = RejectedOpportunityOutcomeService(
     kite_provider_factory=get_kite_provider,
     market_data_coordinator=market_data_coordinator,
 )
+after_market_research_service.rejected_outcome_service = rejected_opportunity_outcome_service
 
 
 data_ingestion_service = DataIngestionService(
@@ -259,6 +262,8 @@ data_ingestion_service = DataIngestionService(
     greeks_service=greeks_service,
     market_data_coordinator=market_data_coordinator,
 )
+after_market_research_service.data_ingestion_service = data_ingestion_service
+option_premium_confirmation_service.live_gap_backfill_service = data_ingestion_service
 option_snapshot_collector_service = OptionSnapshotCollectorService(data_ingestion_service)
 
 
@@ -266,7 +271,7 @@ def get_scanner_service() -> ScannerService:
     return ScannerService(
         strategy_edge_service=strategy_edge_service,
         feed=shared_kite_feed,
-        option_premium_confirmation_service=OptionPremiumConfirmationService(kite_websocket_price_feed),
+        option_premium_confirmation_service=OptionPremiumConfirmationService(kite_websocket_price_feed, live_gap_backfill_service=data_ingestion_service),
         rejected_opportunity_repository=rejected_opportunity_repository,
         banknifty_option_prewarm_service=banknifty_option_prewarm_service,
         armed_entry_tracker=armed_entry_tracker_service,
@@ -728,6 +733,9 @@ async def command_center_dashboard() -> HTMLResponse:
         <a class="linkbtn secondary" href="/research/outcome-learning" target="_blank">Learning</a>
         <a class="linkbtn secondary" href="/research/professional-insights" target="_blank">Insights</a>
         <a class="linkbtn secondary" href="/research/research-engine" target="_blank">Research Engine</a>
+        <a class="linkbtn secondary" href="/research/gate-effectiveness" target="_blank">Gate Effectiveness</a>
+        <a class="linkbtn secondary" href="/research/rejected-opportunity-quality" target="_blank">Rejected Quality</a>
+        <a class="linkbtn secondary" href="/data/option-candle-coverage?symbols=BANKNIFTY" target="_blank">Candle Coverage</a>
         <a class="linkbtn secondary" href="/research/threshold-validation" target="_blank">Thresholds</a>
         <a class="linkbtn secondary" href="/research/execution-realism" target="_blank">Execution Realism</a>
         <a class="linkbtn secondary" href="/research/daily-review" target="_blank">Daily Review</a>
@@ -745,6 +753,8 @@ async def command_center_dashboard() -> HTMLResponse:
     <section class="data-grid">
       <div class="panel"><h2>Active Trade / Exit Watch</h2><div id="activeTrade"></div></div>
       <div class="panel"><h2>Latest Watch</h2><div id="latestWatch"></div></div>
+      <div class="panel full"><h2>Option Candle Coverage</h2><div class="metrics" id="optionCandleCoverageMetrics"></div><div class="tablewrap"><table id="optionCandleCoverageTable"></table></div></div>
+      <div class="panel full"><h2>Rejected Learning</h2><div class="metrics" id="rejectedLearningMetrics"></div><div class="tablewrap"><table id="gateEffectivenessTable"></table></div></div>
       <div class="panel full"><h2>System Thought Feed</h2><div class="feed" id="decisionFeed"><div class="empty">Loading recent decisions...</div></div></div>
       <div class="panel"><h2>Latest Opportunities</h2><div class="tablewrap"><table id="latestTable"></table></div></div>
       <div class="panel"><h2>Opportunity Journal</h2><div class="tablewrap"><table id="journalTable"></table></div></div>
@@ -1051,14 +1061,14 @@ function loadControls(config, runtime) {
   window.controlsLoaded = true;
 }
 async function refreshAll() {
-  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, runtimeConfig, collector, ingest, websocket, cache, decisionFeed, afterMarketResearch] = await Promise.allSettled([
+  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, runtimeConfig, collector, ingest, websocket, cache, decisionFeed, afterMarketResearch, gateEffectiveness] = await Promise.allSettled([
     getJson("/health"), getJson("/db/health"), getJsonCached("kiteHealth", "/kite/health", DASHBOARD_BROKER_REFRESH_MS), getJson("/auto-trader/status"), getJson("/opportunity-monitor/status"),
     getJson("/opportunities/performance"), getJson("/auto-trader/latest"), getJsonCached("journal", "/opportunities?limit=50", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("failures", "/opportunities/failure-analysis", DASHBOARD_SLOW_REFRESH_MS),
     getReviewJsonCached("learning", "/research/outcome-learning", DASHBOARD_SLOW_REFRESH_MS), getJson("/auto-trader/executions"), getJson("/paper/trades"), getJsonCached("margins", "/kite/margins", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("positions", "/kite/positions", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("risk", "/risk/status", DASHBOARD_BROKER_REFRESH_MS), getJson("/trades?limit=50"),
-    getJson("/automation/status"), getJsonCached("runtimeConfig", "/runtime/trading-config", DASHBOARD_SLOW_REFRESH_MS), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30"), getJsonCached("afterMarketResearch", "/research/after-market/status", DASHBOARD_SLOW_REFRESH_MS)
+    getJson("/automation/status"), getJsonCached("runtimeConfig", "/runtime/trading-config", DASHBOARD_SLOW_REFRESH_MS), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30"), getJsonCached("afterMarketResearch", "/research/after-market/status", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("gateEffectiveness", "/research/gate-effectiveness?limit=3000", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("optionCandleCoverage", "/data/option-candle-coverage?symbols=BANKNIFTY", DASHBOARD_SLOW_REFRESH_MS)
   ]);
   const val = r => r.status === "fulfilled" ? r.value : {error: r.reason.message};
-  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), runtime=val(runtimeConfig), c=val(collector), ing=val(ingest), ws=val(websocket), cacheStatus=val(cache), feed=val(decisionFeed), researchJob=val(afterMarketResearch);
+  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), runtime=val(runtimeConfig), c=val(collector), ing=val(ingest), ws=val(websocket), cacheStatus=val(cache), feed=val(decisionFeed), researchJob=val(afterMarketResearch), gates=val(gateEffectiveness), candleCoverage=val(optionCandleCoverage);
   window.dashboardMarketOpen = Boolean(au.market_open) || researchJob.market_session === "REGULAR_MARKET";
   loadControls(au.config, runtime);
   document.getElementById("statusCards").innerHTML =
@@ -1079,6 +1089,17 @@ async function refreshAll() {
     metric("Open", p.open || 0) + metric("Closed", p.closed || 0) + metric("Win rate", p.closed ? `${Math.round((p.wins || 0) / p.closed * 100)}%` : "0%") +
     metric("P&L", p.pnl || 0) + metric("Risk", r.passed === false ? "Blocked" : "Allowed") + metric("Research", researchJob.last_run_date || researchJob.next_action || "-");
   document.getElementById("activityJson").textContent = JSON.stringify({automation:au, runtime_config:runtime, auto_trader:a, collector:c, ingestion:ing, monitor:m, performance:p, risk:r, websocket:ws, cache:cacheStatus, after_market_research:researchJob, decision_feed:feed}, null, 2);
+  const rq = gates.rejected_summary || {};
+  const cs = candleCoverage.summary || {};
+  document.getElementById("optionCandleCoverageMetrics").innerHTML =
+    metric("Quality", cs.data_quality || candleCoverage.reason || "-") + metric("Contracts", candleCoverage.contracts || 0) +
+    metric("Avg coverage", cs.avg_coverage_pct != null ? `${cs.avg_coverage_pct}%` : "-") + metric("Missing", cs.missing_candles || 0) +
+    metric("High confidence", cs.high_confidence || 0) + metric("Partial", cs.partial_data || 0);
+  table(document.getElementById("optionCandleCoverageTable"), (candleCoverage.rows || []).slice(0, 12), ["tradingsymbol","timeframe","coverage_pct","data_quality","actual_candles","expected_candles","missing_candles","latest_candle","sources"]);
+  document.getElementById("rejectedLearningMetrics").innerHTML =
+    metric("Reviewed", rq.reviewed || 0) + metric("Missed winners", rq.missed_winners || 0) + metric("Saved losers", rq.saved_losers || 0) +
+    metric("Unresolved", rq.unresolved || 0) + metric("Ambiguous", rq.ambiguous || 0) + metric("Avg min", rq.avg_minutes_to_outcome || "-");
+  table(document.getElementById("gateEffectivenessTable"), (gates.gates || []).slice(0, 12), ["gate_or_reason","count","reviewed","missed_winners","saved_losers","unresolved","ambiguous","avg_minutes_to_outcome","interpretation"]);
   table(document.getElementById("latestTable"), l.opportunities || [], ["symbol","action","tradingsymbol","entry_price","stop_loss","target_1","quantity","score"]);
   table(document.getElementById("journalTable"), j.opportunities || [], ["id","created_at","action","tradingsymbol","entry_price","stop_loss","target_1","score","status","outcome","pnl"]);
   document.getElementById("failureJson").textContent = JSON.stringify(f, null, 2);
@@ -1613,6 +1634,71 @@ def ingest_option_candles(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get(
+    "/data/option-candle-coverage",
+    tags=["11 Data Ingestion"],
+    summary="Check candle coverage for app-relevant option contracts",
+    description="Measures 1-minute/5-minute option candle completeness for contracts that were traded, rejected, or accepted today.",
+    dependencies=PROTECTED_ROUTE,
+)
+def get_option_candle_coverage(
+    symbols: str = "BANKNIFTY",
+    trading_date: str | None = None,
+    timeframes: str | None = None,
+    max_contracts: int | None = None,
+) -> dict[str, object]:
+    timeframe_values = [item.strip() for item in str(timeframes or settings.targeted_option_candle_backfill_timeframes).split(",") if item.strip()]
+    return data_ingestion_service.option_candle_coverage_report(
+        symbols=parse_symbol_list(symbols),
+        trading_date=trading_date,
+        timeframes=timeframe_values,
+        max_contracts=_bounded_int(max_contracts, settings.targeted_option_candle_backfill_max_contracts, maximum=500),
+    )
+
+
+@app.post(
+    "/data/ingest/relevant-option-candles",
+    tags=["11 Data Ingestion"],
+    summary="Backfill candles for option contracts actually touched by the app",
+    description="Targets traded, accepted, and rejected option contracts for the selected day, then reports candle coverage after ingestion.",
+    dependencies=PROTECTED_ROUTE,
+)
+def ingest_relevant_option_candles(
+    payload: dict[str, object] | None = Body(
+        default=None,
+        examples=[
+            {
+                "symbols": "BANKNIFTY",
+                "trading_date": "2026-07-13",
+                "timeframes": "1minute,5minute",
+                "max_contracts": 120,
+                "batch_limit": 25,
+                "delay_seconds": 0.5,
+                "manual_override": True,
+            }
+        ],
+    ),
+) -> dict[str, object]:
+    payload = payload or {}
+    _require_manual_override_for_market_heavy_operation(payload, "targeted relevant option candle backfill")
+    timeframe_values = [
+        item.strip()
+        for item in str(payload.get("timeframes") or settings.targeted_option_candle_backfill_timeframes).split(",")
+        if item.strip()
+    ]
+    try:
+        return data_ingestion_service.backfill_relevant_option_candles(
+            symbols=parse_symbol_list(payload.get("symbols")),
+            trading_date=str(payload.get("trading_date")) if payload.get("trading_date") else None,
+            timeframes=timeframe_values,
+            max_contracts=_bounded_int(payload.get("max_contracts"), settings.targeted_option_candle_backfill_max_contracts, maximum=500),
+            batch_limit=_bounded_int(payload.get("batch_limit"), settings.targeted_option_candle_backfill_batch_limit, maximum=100),
+            delay_seconds=float(payload.get("delay_seconds", settings.targeted_option_candle_backfill_delay_seconds)),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post(
     "/data/ingest/all",
     tags=["11 Data Ingestion"],
@@ -1710,6 +1796,36 @@ def get_research_settings() -> dict[str, object]:
             "min_outcome_learning_expectancy_pct": settings.min_outcome_learning_expectancy_pct,
             "min_outcome_learning_win_rate_pct": settings.min_outcome_learning_win_rate_pct,
             "outcome_learning_lookback": settings.outcome_learning_lookback,
+            "rejected_outcome_replay": {
+                "enabled": settings.enable_rejected_outcome_candle_replay,
+                "timeframes": settings.rejected_outcome_replay_timeframes,
+                "max_candles": settings.rejected_outcome_replay_max_candles,
+                "use_ws_token_candles": settings.rejected_outcome_use_ws_token_candles,
+                "ambiguous_candle_policy": settings.rejected_outcome_ambiguous_candle_policy,
+                "batch_limit": settings.rejected_outcome_batch_limit,
+                "max_batches": settings.rejected_outcome_max_batches,
+                "batch_delay_seconds": settings.rejected_outcome_batch_delay_seconds,
+            },
+            "targeted_option_candle_backfill": {
+                "enabled": settings.enable_targeted_option_candle_backfill,
+                "timeframes": settings.targeted_option_candle_backfill_timeframes,
+                "batch_limit": settings.targeted_option_candle_backfill_batch_limit,
+                "max_contracts": settings.targeted_option_candle_backfill_max_contracts,
+                "batch_delay_seconds": settings.targeted_option_candle_backfill_delay_seconds,
+                "min_coverage_pct": settings.min_targeted_option_candle_coverage_pct,
+            },
+            "live_option_candle_gap_backfill": {
+                "enabled": settings.enable_live_option_candle_gap_backfill,
+                "timeframes": settings.live_option_candle_backfill_timeframes,
+                "lookback_minutes": settings.live_option_candle_backfill_lookback_minutes,
+                "interval_seconds": settings.live_option_candle_backfill_interval_seconds,
+                "min_gap_seconds": settings.live_option_candle_backfill_min_gap_seconds,
+                "max_contracts": settings.live_option_candle_backfill_max_contracts,
+                "batch_limit": settings.live_option_candle_backfill_batch_limit,
+                "batch_delay_seconds": settings.live_option_candle_backfill_delay_seconds,
+                "on_demand_enabled": settings.enable_on_demand_premium_candle_backfill,
+                "on_demand_cooldown_seconds": settings.on_demand_premium_candle_backfill_cooldown_seconds,
+            },
             "banknifty_regime_filter": {
                 "enabled": settings.enable_banknifty_regime_filter,
                 "min_score": settings.min_banknifty_regime_score,
@@ -1928,6 +2044,32 @@ def get_research_engine_report(symbol: str = "BANKNIFTY", limit: int = 2000) -> 
     if deferred := _defer_review_analysis_during_market("research_engine"):
         return deferred
     return professional_insights_service.research_engine_report(symbol=symbol, limit=_bounded_int(limit, 2000, maximum=5000))
+
+
+@app.get(
+    "/research/gate-effectiveness",
+    tags=["10 Research"],
+    summary="Measure which rejection gates helped or hurt",
+    description="Shows missed winners, saved losers, unresolved rows, ambiguity, average move, and time-to-outcome by rejection gate.",
+    dependencies=PROTECTED_ROUTE,
+)
+def get_gate_effectiveness_report(symbol: str = "BANKNIFTY", limit: int = 3000) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("gate_effectiveness"):
+        return deferred
+    return professional_insights_service.gate_effectiveness_report(symbol=symbol, limit=_bounded_int(limit, 3000, maximum=5000))
+
+
+@app.get(
+    "/research/rejected-opportunity-quality",
+    tags=["10 Research"],
+    summary="Summarize rejected setup later outcomes",
+    description="Shows missed winners, saved losers, unresolved and ambiguous rejected setups after candle replay.",
+    dependencies=PROTECTED_ROUTE,
+)
+def get_rejected_opportunity_quality_report(symbol: str = "BANKNIFTY", limit: int = 3000) -> dict[str, object]:
+    if deferred := _defer_review_analysis_during_market("rejected_opportunity_quality"):
+        return deferred
+    return professional_insights_service.rejected_opportunity_quality_report(symbol=symbol, limit=_bounded_int(limit, 3000, maximum=5000))
 
 
 @app.get(
@@ -3149,6 +3291,10 @@ def update_rejected_opportunity_outcome(
             outcome=outcome,
             exit_price=exit_price,
             notes=str(payload.get("notes") or ""),
+            outcome_source=str(payload.get("outcome_source") or "manual"),
+            outcome_timeframe=str(payload.get("outcome_timeframe") or "") or None,
+            outcome_minutes=float(payload["outcome_minutes"]) if payload.get("outcome_minutes") is not None else None,
+            ambiguous=bool(payload.get("ambiguous", False)),
         )
         return {"rejection": rejected_opportunity_repository.to_dict(record)}
     except Exception as exc:
@@ -3165,7 +3311,10 @@ def evaluate_open_opportunities(
     payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100}])
 ) -> dict[str, object]:
     payload = payload or {}
-    return opportunity_outcome_service.evaluate_once(limit=int(payload.get("limit") or 100))
+    return opportunity_outcome_service.evaluate_once(
+        limit=int(payload.get("limit") or 100),
+        exhaust_rejected=bool(payload.get("exhaust_rejected", False)),
+    )
 
 
 @app.post(
@@ -3175,11 +3324,19 @@ def evaluate_open_opportunities(
     description="Checks rejected scanner setups against current option prices and stores later_outcome when target/stop/expiry can be inferred.",
 )
 def evaluate_rejected_opportunities(
-    payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100, "symbol": "BANKNIFTY"}])
+    payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100, "symbol": "BANKNIFTY", "exhaust": True}])
 ) -> dict[str, object]:
     payload = payload or {}
     symbol_value = payload.get("symbol", "BANKNIFTY")
     symbol = str(symbol_value) if symbol_value is not None else None
+    if bool(payload.get("exhaust", payload.get("all", False))):
+        return rejected_opportunity_outcome_service.evaluate_batches(
+            symbol=symbol,
+            batch_limit=int(payload.get("limit") or settings.rejected_outcome_batch_limit),
+            max_batches=int(payload.get("max_batches") or settings.rejected_outcome_max_batches),
+            learning_only=bool(payload.get("learning_only", True)),
+            delay_seconds=float(payload.get("delay_seconds", settings.rejected_outcome_batch_delay_seconds)),
+        )
     return rejected_opportunity_outcome_service.evaluate_once(
         symbol=symbol,
         limit=int(payload.get("limit") or 100),

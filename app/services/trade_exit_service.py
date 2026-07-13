@@ -83,6 +83,10 @@ class TradeExitService:
         current_price = current_tick.price
         self._record_price_excursion(trade, current_tick)
 
+        protective_stop = self._pending_or_filled_protective_stop(provider, trade, current_tick)
+        if protective_stop is not None:
+            return protective_stop
+
         outcome = self._outcome_for_price(provider, trade, current_price)
         if outcome is None:
             return {
@@ -140,6 +144,24 @@ class TradeExitService:
             "pnl": updated.net_pnl if updated.net_pnl is not None else updated.pnl,
             "squareoff": squareoff,
         }
+
+    def _pending_or_filled_protective_stop(self, provider: KiteProvider, trade: Any, tick: PriceTick) -> dict[str, Any] | None:
+        if str(trade.mode).lower() != "live":
+            return None
+        protective_order_id = str(getattr(trade, "protective_order_id", "") or "")
+        if not protective_order_id:
+            return None
+        if not self._stop_loss_crossed(trade, float(tick.price or 0.0)):
+            return None
+        return self._handle_protective_stop_exit(provider, trade, protective_order_id, tick, "stop_loss")
+
+    def _stop_loss_crossed(self, trade: Any, price: float) -> bool:
+        if trade.stop_loss is None or price <= 0:
+            return False
+        stop = float(trade.stop_loss)
+        if str(trade.side).upper() == "SELL":
+            return price >= stop
+        return price <= stop
 
     def _record_price_excursion(self, trade: Any, tick: PriceTick) -> None:
         try:
