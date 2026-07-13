@@ -42,6 +42,8 @@ def test_early_armed_entry_settings_are_present_in_env_files() -> None:
         "LIVE_OPTION_CANDLE_BACKFILL_MAX_HISTORICAL_CALLS_PER_RUN",
         "ENABLE_ON_DEMAND_PREMIUM_CANDLE_BACKFILL",
         "ON_DEMAND_PREMIUM_CANDLE_BACKFILL_COOLDOWN_SECONDS",
+        "ENABLE_WEBSOCKET_CANDLE_CONTEXT_RECOVERY",
+        "WEBSOCKET_CANDLE_CONTEXT_RECOVERY_LOOKBACK_MINUTES",
     }
 
     for filename in (".env", ".env.example"):

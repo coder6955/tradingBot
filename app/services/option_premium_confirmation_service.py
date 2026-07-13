@@ -21,6 +21,7 @@ class OptionPremiumConfirmationService:
             return {"enabled": False, "score": 100, "passed": True, "reasons": [], "details": {}}
 
         minimum = self._minimum_required()
+        initial_context_recovery = self._recover_websocket_candle_context(contract, timeframe=timeframe)
         websocket_state = self._websocket_candle_state(contract)
         websocket_candles = self._recent_websocket_candles(contract, settings.option_premium_lookback_candles + 1)
         websocket_freshness = self._candle_freshness(websocket_candles, source="websocket_builder", symbol=contract.tradingsymbol)
@@ -29,7 +30,7 @@ class OptionPremiumConfirmationService:
                 contract=contract,
                 candles=websocket_candles,
                 source="websocket_builder",
-                freshness={**websocket_freshness, **websocket_state},
+                freshness={**websocket_freshness, **websocket_state, "websocket_candle_context_recovery": initial_context_recovery},
             )
 
         candles = self._recent_candles(contract.tradingsymbol, timeframe, settings.option_premium_lookback_candles + 1)
@@ -39,11 +40,32 @@ class OptionPremiumConfirmationService:
                 contract=contract,
                 candles=candles,
                 source="stored_candles",
-                freshness={**stored_freshness, **websocket_state, "websocket_fallback": websocket_freshness},
+                freshness={
+                    **stored_freshness,
+                    **websocket_state,
+                    "websocket_fallback": websocket_freshness,
+                    "websocket_candle_context_recovery": initial_context_recovery,
+                },
             )
 
         live_backfill = self._maybe_live_gap_backfill(contract, timeframe=timeframe)
         if live_backfill is not None:
+            post_backfill_context_recovery = self._recover_websocket_candle_context(contract, timeframe=timeframe, force=True)
+            websocket_state = self._websocket_candle_state(contract)
+            websocket_candles = self._recent_websocket_candles(contract, settings.option_premium_lookback_candles + 1)
+            websocket_freshness = self._candle_freshness(websocket_candles, source="websocket_builder", symbol=contract.tradingsymbol)
+            if len(websocket_candles) >= minimum and websocket_freshness["premium_candle_freshness_passed"]:
+                return self._evaluate_candles(
+                    contract=contract,
+                    candles=websocket_candles,
+                    source="websocket_builder",
+                    freshness={
+                        **websocket_freshness,
+                        **websocket_state,
+                        "websocket_candle_context_recovery": post_backfill_context_recovery,
+                        "live_candle_gap_backfill": live_backfill,
+                    },
+                )
             for replay_timeframe in self._post_backfill_timeframes(timeframe):
                 catchup_candles = self._recent_candles(contract.tradingsymbol, replay_timeframe, settings.option_premium_lookback_candles + 1)
                 catchup_freshness = self._candle_freshness(catchup_candles, source="stored_candles", symbol=contract.tradingsymbol)
@@ -56,6 +78,7 @@ class OptionPremiumConfirmationService:
                             **catchup_freshness,
                             **websocket_state,
                             "websocket_fallback": websocket_freshness,
+                            "websocket_candle_context_recovery": post_backfill_context_recovery,
                             "live_candle_gap_backfill": live_backfill,
                             "live_candle_gap_backfill_timeframe": replay_timeframe,
                         },
@@ -79,6 +102,7 @@ class OptionPremiumConfirmationService:
                 "premium_confirmation_ready": False,
                 "premium_confirmation_block_reason": block_reason,
                 "websocket_fallback": websocket_freshness,
+                "websocket_candle_context_recovery": initial_context_recovery,
                 "snapshot_diagnostics": snapshot_eval,
                 "live_candle_gap_backfill": live_backfill,
             },
@@ -503,6 +527,24 @@ class OptionPremiumConfirmationService:
             )
         except Exception as exc:
             return {"status": "error", "reason": "live_candle_gap_backfill_failed", "message": str(exc)}
+
+    def _recover_websocket_candle_context(self, contract: OptionContract, *, timeframe: str, force: bool = False) -> dict[str, Any] | None:
+        if self.websocket_price_feed is None or not contract.instrument_token:
+            return None
+        recover = getattr(self.websocket_price_feed, "recover_premium_candle_context", None)
+        if not callable(recover):
+            return None
+        try:
+            return dict(
+                recover(
+                    instrument_token=int(contract.instrument_token),
+                    tradingsymbol=contract.tradingsymbol,
+                    timeframe=settings.websocket_premium_candle_timeframe or timeframe,
+                    force=force,
+                )
+            )
+        except Exception as exc:
+            return {"status": "error", "reason": "websocket_candle_context_recovery_failed", "message": str(exc)}
 
     def _live_backfill_timeframes(self) -> list[str]:
         raw = str(settings.live_option_candle_backfill_timeframes or settings.websocket_premium_candle_timeframe or "1minute")

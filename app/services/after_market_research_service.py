@@ -315,8 +315,8 @@ class AfterMarketResearchService:
             "completed_at": format_ist(completed_at),
             "reports": reports,
             "recommendation": self._recommendation(
-                daily_summary=reports.get("daily_summary", {}),
-                walk_forward=reports.get("walk_forward", {}),
+                daily_summary=self._stage_result(reports, "daily_summary"),
+                walk_forward=self._stage_result(reports, "walk_forward"),
             ),
             "notes": [
                 "This staged job runs after market close and does not affect live scanner decisions.",
@@ -347,6 +347,11 @@ class AfterMarketResearchService:
         delay = max(0.0, float(settings.after_market_research_step_delay_seconds))
         if delay > 0:
             time_module.sleep(delay)
+
+    def _stage_result(self, reports: dict[str, dict[str, Any]], name: str) -> dict[str, Any]:
+        stage = reports.get(name, {})
+        result = stage.get("result") if isinstance(stage, dict) else None
+        return result if isinstance(result, dict) else {}
 
     def _pipeline_names(self) -> list[str]:
         names = [

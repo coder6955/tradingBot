@@ -101,8 +101,11 @@ class KiteWebSocketPriceFeed:
         self._premium_candles: dict[int, dict[datetime, WebSocketPremiumCandle]] = {}
         self._ticks_seen: dict[int, int] = {}
         self._rehydrated_tokens: set[int] = set()
+        self._context_recovered_tokens: set[tuple[int, str | None]] = set()
         self._persisted_candle_writes = 0
         self._rehydrated_candle_count = 0
+        self._context_recovered_candle_count = 0
+        self._last_context_recovery: dict[str, Any] | None = None
         self._last_candle_cleanup_date: date | None = None
         self._last_candle_cleanup_at: datetime | None = None
         self._last_candle_cleanup_deleted = 0
@@ -340,6 +343,9 @@ class KiteWebSocketPriceFeed:
                     "persisted_writes": self._persisted_candle_writes,
                     "rehydrated_tokens": sorted(self._rehydrated_tokens),
                     "rehydrated_candle_count": self._rehydrated_candle_count,
+                    "context_recovery_enabled": settings.enable_websocket_candle_context_recovery,
+                    "context_recovered_candle_count": self._context_recovered_candle_count,
+                    "last_context_recovery": self._last_context_recovery,
                     "daily_cleanup_enabled": settings.enable_websocket_candle_daily_cleanup,
                     "pending_coalesced_writes": len(self._pending_candle_persist),
                     "queued_coalesced_keys": len(self._queued_candle_persist_keys),
@@ -891,6 +897,109 @@ class KiteWebSocketPriceFeed:
     def premium_candle_status(self, instrument_token: int) -> dict[str, Any]:
         with self._lock:
             return self._premium_candle_status_locked(int(instrument_token), ist_now_naive())
+
+    def recover_premium_candle_context(
+        self,
+        *,
+        instrument_token: int,
+        tradingsymbol: str | None = None,
+        timeframe: str | None = None,
+        lookback_minutes: int | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Seed in-memory premium candles from stored candles after restart/backfill.
+
+        This intentionally restores candle context only. It does not create ticks,
+        dispatch tick handlers, or increment ticks_seen.
+        """
+        token = self._safe_int(instrument_token)
+        if token is None or token <= 0:
+            return {"status": "skipped", "reason": "instrument_token_unavailable"}
+        if not settings.enable_websocket_candle_context_recovery:
+            return {"status": "skipped", "reason": "websocket_candle_context_recovery_disabled"}
+        if not settings.enable_websocket_premium_candle_builder:
+            return {"status": "skipped", "reason": "websocket_premium_candle_builder_disabled"}
+        selected_timeframe = timeframe or settings.websocket_premium_candle_timeframe
+        normalized_symbol = str(tradingsymbol or "").upper().strip() or None
+        recovery_key = (int(token), normalized_symbol)
+        with self._lock:
+            if not force and recovery_key in self._context_recovered_tokens:
+                return {"status": "skipped", "reason": "already_recovered", "instrument_token": int(token), "tradingsymbol": normalized_symbol}
+        now = self._now().replace(second=0, microsecond=0)
+        today_start = datetime.combine(now.date(), time.min)
+        lookback = max(5, int(lookback_minutes or settings.websocket_candle_context_recovery_lookback_minutes))
+        since = max(today_start, now - timedelta(minutes=lookback))
+        symbols = [self._storage_symbol(int(token))]
+        if normalized_symbol:
+            symbols.append(normalized_symbol)
+        session = get_session()
+        inserted = 0
+        candidate_count = 0
+        try:
+            rows = (
+                session.query(Candle)
+                .filter(Candle.symbol.in_(symbols))
+                .filter(Candle.timeframe == selected_timeframe)
+                .filter(Candle.timestamp >= since)
+                .filter(Candle.timestamp <= now)
+                .order_by(Candle.timestamp.asc())
+                .all()
+            )
+            candidate_count = len(rows)
+            with self._lock:
+                bucket = self._premium_candles.setdefault(int(token), {})
+                for row in rows:
+                    timestamp = row.timestamp.replace(second=0, microsecond=0, tzinfo=None)
+                    existing = bucket.get(timestamp)
+                    row_symbol = str(row.symbol or "").upper()
+                    is_ws_token = row_symbol == self._storage_symbol(int(token))
+                    if existing is not None and not is_ws_token:
+                        continue
+                    source = "websocket_builder_rehydrated" if is_ws_token else "kite_historical_context_recovered"
+                    if existing is None:
+                        inserted += 1
+                    bucket[timestamp] = WebSocketPremiumCandle(
+                        instrument_token=int(token),
+                        timeframe=row.timeframe,
+                        timestamp=timestamp,
+                        open_price=float(row.open_price),
+                        high_price=float(row.high_price),
+                        low_price=float(row.low_price),
+                        close_price=float(row.close_price),
+                        volume=float(row.volume or 0.0),
+                        tick_count=0,
+                        source=source,
+                    )
+                self._trim_premium_candles(int(token))
+                self._context_recovered_tokens.add(recovery_key)
+                self._context_recovered_candle_count += inserted
+                self._last_context_recovery = {
+                    "instrument_token": int(token),
+                    "tradingsymbol": normalized_symbol,
+                    "timeframe": selected_timeframe,
+                    "from": since.isoformat(sep=" "),
+                    "to": now.isoformat(sep=" "),
+                    "candidate_candles": candidate_count,
+                    "inserted_candles": inserted,
+                    "force": force,
+                }
+        except Exception as exc:
+            logger.warning("WebSocket candle context recovery failed token=%s symbol=%s error=%s", token, normalized_symbol, exc)
+            return {"status": "error", "reason": "context_recovery_failed", "message": str(exc)}
+        finally:
+            session.close()
+        return {
+            "status": "ok",
+            "instrument_token": int(token),
+            "tradingsymbol": normalized_symbol,
+            "timeframe": selected_timeframe,
+            "from": since.isoformat(sep=" "),
+            "to": now.isoformat(sep=" "),
+            "candidate_candles": candidate_count,
+            "inserted_candles": inserted,
+            "current_session_candle_count": len(self.get_current_session_premium_candles(int(token))),
+            "tick_replay": False,
+        }
 
     def _update_premium_candle(self, tick: WebSocketTick) -> None:
         if not settings.enable_websocket_premium_candle_builder:

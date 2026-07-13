@@ -263,6 +263,8 @@ class Settings:
     enable_websocket_candle_persistence: bool = os.getenv("ENABLE_WEBSOCKET_CANDLE_PERSISTENCE", "true").lower() == "true"
     websocket_candle_storage_prefix: str = os.getenv("WEBSOCKET_CANDLE_STORAGE_PREFIX", "WS_TOKEN")
     enable_websocket_candle_daily_cleanup: bool = os.getenv("ENABLE_WEBSOCKET_CANDLE_DAILY_CLEANUP", "true").lower() == "true"
+    enable_websocket_candle_context_recovery: bool = os.getenv("ENABLE_WEBSOCKET_CANDLE_CONTEXT_RECOVERY", "true").lower() == "true"
+    websocket_candle_context_recovery_lookback_minutes: int = int(os.getenv("WEBSOCKET_CANDLE_CONTEXT_RECOVERY_LOOKBACK_MINUTES", "390"))
     enable_market_data_gap_detection: bool = os.getenv("ENABLE_MARKET_DATA_GAP_DETECTION", "true").lower() == "true"
     max_websocket_gap_seconds: int = int(os.getenv("MAX_WEBSOCKET_GAP_SECONDS", "10"))
     enable_websocket_gap_backfill: bool = os.getenv("ENABLE_WEBSOCKET_GAP_BACKFILL", "false").lower() == "true"

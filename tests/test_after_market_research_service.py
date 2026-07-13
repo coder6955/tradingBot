@@ -66,6 +66,16 @@ class FakeInsightsService:
         return {"status": "ok", "symbol": symbol, "date": review_date.isoformat(), "limit": limit}
 
 
+class ReadyInsightsService(FakeInsightsService):
+    def daily_banknifty_summary(self, *, summary_date=None):
+        return {
+            "status": "ok",
+            "date": summary_date.isoformat(),
+            "total_closed_paper_trades": 35,
+            "recommendation": {"safe_to_enable_live": False},
+        }
+
+
 class PartiallyFailingInsightsService(FakeInsightsService):
     def research_engine_report(self, *, symbol="BANKNIFTY", limit=3000):
         raise RuntimeError("research engine unavailable")
@@ -217,6 +227,19 @@ class AfterMarketResearchServiceTests(unittest.TestCase):
         self.assertEqual(rejected.calls, ["replay"])
         replay = result["reports"]["rejected_outcome_replay"]["result"]
         self.assertEqual(replay["data_ingestion_calls_before_replay"], ["targeted_backfill", "coverage"])
+
+    def test_recommendation_uses_stage_results_not_report_wrappers(self) -> None:
+        service = AfterMarketResearchService(
+            backtest_service=FakeBacktestService(),
+            professional_insights_service=ReadyInsightsService(),
+            clock=lambda: datetime(2026, 7, 3, 16, 0),
+            job_repository=FakeJobRepository(),
+        )
+
+        result = service.maybe_run_after_market()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("Evidence is improving", result["recommendation"]["reason"])
 
     def test_restart_after_partial_after_market_pipeline_does_not_repeat_heavy_stages(self) -> None:
         job_repository = FakeJobRepository()

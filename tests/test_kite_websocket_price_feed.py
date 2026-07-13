@@ -151,6 +151,8 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
             "exit_open_trades_before_close_minutes": settings.exit_open_trades_before_close_minutes,
             "enable_websocket_candle_persistence": settings.enable_websocket_candle_persistence,
             "enable_websocket_candle_daily_cleanup": settings.enable_websocket_candle_daily_cleanup,
+            "enable_websocket_candle_context_recovery": settings.enable_websocket_candle_context_recovery,
+            "websocket_candle_context_recovery_lookback_minutes": settings.websocket_candle_context_recovery_lookback_minutes,
             "websocket_reconnect_min_gap_seconds": settings.websocket_reconnect_min_gap_seconds,
             "websocket_reconnect_window_seconds": settings.websocket_reconnect_window_seconds,
             "websocket_reconnect_max_attempts_per_window": settings.websocket_reconnect_max_attempts_per_window,
@@ -166,6 +168,8 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         object.__setattr__(settings, "websocket_live_stale_blocks", True)
         object.__setattr__(settings, "enable_websocket_candle_persistence", True)
         object.__setattr__(settings, "enable_websocket_candle_daily_cleanup", True)
+        object.__setattr__(settings, "enable_websocket_candle_context_recovery", True)
+        object.__setattr__(settings, "websocket_candle_context_recovery_lookback_minutes", 390)
         object.__setattr__(settings, "websocket_reconnect_min_gap_seconds", 5)
         object.__setattr__(settings, "websocket_reconnect_window_seconds", 60)
         object.__setattr__(settings, "websocket_reconnect_max_attempts_per_window", 5)
@@ -294,6 +298,52 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertEqual(candles[0].source, "websocket_builder_rehydrated")
         self.assertEqual(status["candle_persistence"]["rehydrated_candle_count"], 1)
         rehydrated.stop()
+
+    def test_recover_premium_candle_context_uses_stored_candles_without_replaying_ticks(self) -> None:
+        base = regular_market_now().replace(second=0, microsecond=0)
+        session = get_session()
+        try:
+            session.add_all(
+                [
+                    Candle(
+                        symbol="BANKNIFTY26JUL58000PE",
+                        timeframe="1minute",
+                        timestamp=base - timedelta(minutes=2),
+                        open_price=100,
+                        high_price=106,
+                        low_price=99,
+                        close_price=105,
+                        volume=1000,
+                    ),
+                    Candle(
+                        symbol="WS_TOKEN:123",
+                        timeframe="1minute",
+                        timestamp=base - timedelta(minutes=1),
+                        open_price=106,
+                        high_price=111,
+                        low_price=104,
+                        close_price=110,
+                        volume=1200,
+                    ),
+                ]
+            )
+            session.commit()
+        finally:
+            session.close()
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=lambda: base)
+
+        result = feed.recover_premium_candle_context(instrument_token=123, tradingsymbol="BANKNIFTY26JUL58000PE")
+        candles = feed.get_current_session_premium_candles(123)
+        status = feed.status()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["inserted_candles"], 2)
+        self.assertEqual(feed.tick_count(123), 0)
+        self.assertEqual([candle.close_price for candle in candles], [105, 110])
+        self.assertEqual(candles[0].source, "kite_historical_context_recovered")
+        self.assertEqual(candles[1].source, "websocket_builder_rehydrated")
+        self.assertEqual(status["candle_persistence"]["context_recovered_candle_count"], 2)
+        self.assertFalse(result["tick_replay"])
 
     def test_running_feed_coalesces_candle_persistence_for_same_minute(self) -> None:
         base = regular_market_now().replace(second=10, microsecond=0)

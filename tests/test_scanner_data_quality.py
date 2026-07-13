@@ -10,7 +10,7 @@ from app.services.database import Candle, get_session, init_db
 from app.services.market_regime_service import MarketRegimeService
 from app.services.option_chain_service import OptionChainService
 from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
-from app.services.kite_websocket_price_feed import WebSocketPremiumCandle
+from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed, WebSocketPremiumCandle
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
 from app.services.scanner_service import ScannerService
 from app.services.trade_setup_service import OptionContract
@@ -248,6 +248,7 @@ class ScannerDataQualityTests(unittest.TestCase):
             "early_arm_allow_premium_pending": settings.early_arm_allow_premium_pending,
             "enable_live_option_candle_gap_backfill": settings.enable_live_option_candle_gap_backfill,
             "enable_on_demand_premium_candle_backfill": settings.enable_on_demand_premium_candle_backfill,
+            "enable_websocket_candle_context_recovery": settings.enable_websocket_candle_context_recovery,
             "live_option_candle_backfill_timeframes": settings.live_option_candle_backfill_timeframes,
         }
         object.__setattr__(settings, "use_kite_market_data", True)
@@ -265,6 +266,7 @@ class ScannerDataQualityTests(unittest.TestCase):
         object.__setattr__(settings, "early_arm_allow_premium_pending", True)
         object.__setattr__(settings, "enable_live_option_candle_gap_backfill", True)
         object.__setattr__(settings, "enable_on_demand_premium_candle_backfill", True)
+        object.__setattr__(settings, "enable_websocket_candle_context_recovery", True)
         object.__setattr__(settings, "live_option_candle_backfill_timeframes", "1minute")
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.temp_db.close()
@@ -715,6 +717,31 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.assertEqual(result["details"]["premium_candle_source"], "stored_candles")
         self.assertEqual(result["details"]["live_candle_gap_backfill_timeframe"], "1minute")
         self.assertEqual(result["details"]["live_candle_gap_backfill"]["inserted"], 7)
+
+    def test_on_demand_backfill_restores_websocket_candle_context_without_fake_ticks(self) -> None:
+        session = get_session()
+        try:
+            session.query(Candle).filter(Candle.symbol == "BANKNIFTY26JUL58000CE").delete()
+            session.commit()
+        finally:
+            session.close()
+        now = datetime.now().replace(second=0, microsecond=0)
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=None, clock=lambda: now)
+        backfill_service = FakeLiveGapBackfillService()
+        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 116, 50000, 10000, 115, 116)
+
+        result = OptionPremiumConfirmationService(feed, live_gap_backfill_service=backfill_service).evaluate(contract=contract, side="BUY")
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(feed.tick_count(580001), 0)
+        self.assertEqual(result["details"]["premium_candle_source"], "websocket_builder")
+        recovery = result["details"]["websocket_candle_context_recovery"]
+        self.assertEqual(recovery["status"], "ok")
+        self.assertEqual(recovery["inserted_candles"], 7)
+        self.assertFalse(recovery["tick_replay"])
+        candles = feed.get_current_session_premium_candles(580001)
+        self.assertEqual(len(candles), 7)
+        self.assertEqual(candles[-1].source, "kite_historical_context_recovered")
 
     def test_websocket_built_candle_is_accepted_if_fresh(self) -> None:
         session = get_session()
