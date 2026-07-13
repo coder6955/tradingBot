@@ -248,6 +248,20 @@ class StrategyVersionRecord(Base):
     config_drift_detected = Column(Integer, nullable=False, default=0, index=True)
 
 
+class RuntimeJobRunRecord(Base):
+    __tablename__ = "runtime_job_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_name = Column(String(100), nullable=False, index=True)
+    trading_date = Column(String(20), nullable=False, index=True)
+    status = Column(String(30), nullable=False, default="pending", index=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    metadata_json = Column(Text, nullable=True)
+
+
 def init_db(database_url: Optional[str] = None) -> None:
     global engine, SessionLocal
     url = database_url or settings.database_url
@@ -260,6 +274,7 @@ def init_db(database_url: Optional[str] = None) -> None:
     _ensure_rejected_opportunity_columns()
     _ensure_strategy_validation_columns()
     _ensure_strategy_version_columns()
+    _ensure_runtime_job_run_columns()
 
 
 def _ensure_opportunity_columns() -> None:
@@ -397,6 +412,29 @@ def _ensure_strategy_version_columns() -> None:
                 connection.execute(text(f"ALTER TABLE strategy_versions ADD COLUMN {column} {column_type}"))
 
 
+def _ensure_runtime_job_run_columns() -> None:
+    if engine is None:
+        return
+    inspector = inspect(engine)
+    if "runtime_job_runs" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("runtime_job_runs")}
+    required = {
+        "job_name": "VARCHAR(100)",
+        "trading_date": "VARCHAR(20)",
+        "status": "VARCHAR(30)",
+        "started_at": "DATETIME",
+        "completed_at": "DATETIME",
+        "duration_ms": "INTEGER",
+        "error_message": "TEXT",
+        "metadata_json": "TEXT",
+    }
+    with engine.begin() as connection:
+        for column, column_type in required.items():
+            if column not in existing:
+                connection.execute(text(f"ALTER TABLE runtime_job_runs ADD COLUMN {column} {column_type}"))
+
+
 def get_session():
     if SessionLocal is None:
         init_db()
@@ -406,4 +444,5 @@ def get_session():
         _ensure_rejected_opportunity_columns()
         _ensure_strategy_validation_columns()
         _ensure_strategy_version_columns()
+        _ensure_runtime_job_run_columns()
     return SessionLocal()

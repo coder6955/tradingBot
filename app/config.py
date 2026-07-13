@@ -27,6 +27,8 @@ class Settings:
     python_version: str = "3.12"
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./app.db")
     redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    api_auth_token: Optional[str] = os.getenv("API_AUTH_TOKEN") or os.getenv("APP_API_KEY")
+    api_auth_required: bool = os.getenv("API_AUTH_REQUIRED", "false").lower() == "true"
     kite_api_key: Optional[str] = os.getenv("KITE_API_KEY")
     kite_api_secret: Optional[str] = os.getenv("KITE_API_SECRET")
     kite_access_token: Optional[str] = os.getenv("KITE_ACCESS_TOKEN")
@@ -60,6 +62,13 @@ class Settings:
     enforce_market_hours: bool = os.getenv("ENFORCE_MARKET_HOURS", "false").lower() == "true"
     market_open_time: str = os.getenv("MARKET_OPEN_TIME", "09:20")
     market_close_time: str = os.getenv("MARKET_CLOSE_TIME", "15:10")
+    runtime_pre_market_start_time: str = os.getenv("RUNTIME_PRE_MARKET_START_TIME", "09:00")
+    runtime_market_open_time: str = os.getenv("RUNTIME_MARKET_OPEN_TIME", "09:15")
+    runtime_market_closing_start_time: str = os.getenv("RUNTIME_MARKET_CLOSING_START_TIME", "15:20")
+    runtime_market_close_time: str = os.getenv("RUNTIME_MARKET_CLOSE_TIME", "15:30")
+    runtime_after_market_review_start_time: str = os.getenv("RUNTIME_AFTER_MARKET_REVIEW_START_TIME", "15:35")
+    runtime_holidays: str = os.getenv("RUNTIME_HOLIDAYS", os.getenv("MARKET_HOLIDAYS", ""))
+    runtime_manual_override: bool = os.getenv("RUNTIME_MANUAL_OVERRIDE", "false").lower() == "true"
     blocked_event_dates: str = os.getenv("BLOCKED_EVENT_DATES", "")
     blocked_symbols: str = os.getenv("BLOCKED_SYMBOLS", "")
     allow_option_selling: bool = os.getenv("ALLOW_OPTION_SELLING", "true").lower() == "true"
@@ -113,6 +122,8 @@ class Settings:
     after_market_research_horizon_candles: int = int(os.getenv("AFTER_MARKET_RESEARCH_HORIZON_CANDLES", "12"))
     after_market_research_limit: int = int(os.getenv("AFTER_MARKET_RESEARCH_LIMIT", "3000"))
     after_market_research_decision_mode: str = os.getenv("AFTER_MARKET_RESEARCH_DECISION_MODE", "scanner_parity")
+    after_market_research_step_delay_seconds: float = float(os.getenv("AFTER_MARKET_RESEARCH_STEP_DELAY_SECONDS", "1.0"))
+    automation_stop_after_after_market_complete: bool = os.getenv("AUTOMATION_STOP_AFTER_AFTER_MARKET_COMPLETE", "true").lower() == "true"
     enable_strategy_edge_guard: bool = os.getenv("ENABLE_STRATEGY_EDGE_GUARD", "false").lower() == "true"
     min_strategy_trades: int = int(os.getenv("MIN_STRATEGY_TRADES", "30"))
     min_strategy_expectancy_pct: float = float(os.getenv("MIN_STRATEGY_EXPECTANCY_PCT", "0.05"))
@@ -197,6 +208,7 @@ class Settings:
     scanner_refresh_stuck_seconds: int = int(os.getenv("SCANNER_REFRESH_STUCK_SECONDS", "30"))
     account_funds_cache_ttl_seconds: int = int(os.getenv("ACCOUNT_FUNDS_CACHE_TTL_SECONDS", "5"))
     dashboard_broker_cache_ttl_seconds: int = int(os.getenv("DASHBOARD_BROKER_CACHE_TTL_SECONDS", "60"))
+    slow_api_log_threshold_seconds: float = float(os.getenv("SLOW_API_LOG_THRESHOLD_SECONDS", "3.0"))
     option_quote_premium_mismatch_tolerance_pct: float = float(os.getenv("OPTION_QUOTE_PREMIUM_MISMATCH_TOLERANCE_PCT", "25.0"))
     estimated_brokerage_per_order: float = float(os.getenv("ESTIMATED_BROKERAGE_PER_ORDER", "20.0"))
     estimated_stt_sell_pct: float = float(os.getenv("ESTIMATED_STT_SELL_PCT", "0.0625"))

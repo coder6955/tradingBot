@@ -180,6 +180,13 @@ class RuntimeTradingConfigService:
                 "enabled": live_only,
                 "description": "Keeps live automation conservative by allowing only one open live trade.",
             },
+            {
+                "key": "paper_shadow_for_blocked_live",
+                "label": "Paper shadow for blocked live",
+                "default": bool(self.options.get("paper_shadow_for_blocked_live", True)),
+                "enabled": True,
+                "description": "Keeps a paper/shadow record for blocked live setups so learning continues without placing a real order.",
+            },
         ]
         return choices
 

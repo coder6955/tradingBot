@@ -1,28 +1,47 @@
 from __future__ import annotations
 
+import time as time_module
 from datetime import datetime, time
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.services.backtest_service import BacktestService
+from app.services.market_session_service import MarketSessionService
 from app.services.professional_insights_service import ProfessionalInsightsService
+from app.services.runtime_job_repository import RuntimeJobRepository
 from app.services.time_utils import format_ist, to_ist_naive
 
 
 class AfterMarketResearchService:
     """Run evidence checks after market close, outside the live scanner path."""
 
+    JOB_NAME = "after_market_review"
+
     def __init__(
         self,
         *,
         backtest_service: BacktestService,
         professional_insights_service: ProfessionalInsightsService,
+        outcome_learning_service: Any | None = None,
+        opportunity_analytics_service: Any | None = None,
+        execution_analytics_service: Any | None = None,
+        professional_readiness_service: Any | None = None,
+        strategy_edge_service: Any | None = None,
         clock: Callable[[], datetime] | None = None,
+        market_session_service: MarketSessionService | None = None,
+        job_repository: RuntimeJobRepository | None = None,
     ) -> None:
         self.backtest_service = backtest_service
         self.professional_insights_service = professional_insights_service
+        self.outcome_learning_service = outcome_learning_service
+        self.opportunity_analytics_service = opportunity_analytics_service
+        self.execution_analytics_service = execution_analytics_service
+        self.professional_readiness_service = professional_readiness_service
+        self.strategy_edge_service = strategy_edge_service
         self.clock = clock or (lambda: datetime.now(ZoneInfo("Asia/Kolkata")))
+        self.market_session_service = market_session_service or MarketSessionService(clock=self.clock)
+        self.job_repository = job_repository or RuntimeJobRepository()
         self.running = False
         self.last_started_at: datetime | None = None
         self.last_completed_at: datetime | None = None
@@ -46,6 +65,8 @@ class AfterMarketResearchService:
             "timeframe": settings.after_market_research_timeframe,
             "direction": settings.after_market_research_direction.upper(),
             "decision_mode": settings.after_market_research_decision_mode,
+            "step_delay_seconds": settings.after_market_research_step_delay_seconds,
+            "pipeline": self._pipeline_names(),
             "last_started_at": format_ist(self.last_started_at),
             "last_completed_at": format_ist(self.last_completed_at),
             "last_run_date": self.last_run_date,
@@ -57,6 +78,7 @@ class AfterMarketResearchService:
             "due": self._can_run(now=now, force=False)[0],
             "next_action": self._next_action(now),
             "last_result": self.last_result,
+            "job_run": self.job_repository.latest(job_name=self.JOB_NAME, trading_date=now.date().isoformat()),
         }
 
     def maybe_run_after_market(self, now: datetime | None = None) -> dict[str, Any]:
@@ -94,6 +116,11 @@ class AfterMarketResearchService:
         self.running = True
         self.last_started_at = now
         self.last_error = None
+        job_run = self.job_repository.start(
+            job_name=self.JOB_NAME,
+            trading_date=now.date().isoformat(),
+            metadata={"trigger": trigger, "force": force},
+        )
         try:
             result = self._build_report(now=now, trigger=trigger, force=force)
             self.last_result = result
@@ -101,6 +128,12 @@ class AfterMarketResearchService:
             self.run_count += 1
             if trigger == "manual":
                 self.manual_run_count += 1
+            self.job_repository.finish(
+                run_id=int(job_run["id"]),
+                status="success" if str(result.get("status")) == "ok" else "failed",
+                metadata={"trigger": trigger, "force": force, "result": result},
+                error_message=None if str(result.get("status")) == "ok" else str(result.get("status")),
+            )
             return result
         except Exception as exc:
             self.last_error = str(exc)
@@ -114,6 +147,12 @@ class AfterMarketResearchService:
                 "completed_at": format_ist(self._now()),
             }
             self.last_result = result
+            self.job_repository.finish(
+                run_id=int(job_run["id"]),
+                status="failed",
+                metadata={"trigger": trigger, "force": force, "result": result},
+                error_message=str(exc),
+            )
             return result
         finally:
             self.running = False
@@ -127,11 +166,39 @@ class AfterMarketResearchService:
         limit = settings.after_market_research_limit
         decision_mode = settings.after_market_research_decision_mode
 
-        daily_summary = self._safe_report(
-            lambda: self.professional_insights_service.daily_banknifty_summary(summary_date=now.date())
+        reports: dict[str, dict[str, Any]] = {}
+        self._run_stage(
+            reports,
+            "daily_summary",
+            lambda: self.professional_insights_service.daily_banknifty_summary(summary_date=now.date()),
         )
-        data_completeness = self._safe_report(lambda: self.professional_insights_service.data_completeness(symbol=symbol))
-        option_backtest = self._safe_report(
+        self._run_stage(reports, "data_completeness", lambda: self.professional_insights_service.data_completeness(symbol=symbol))
+        if self.outcome_learning_service is not None:
+            self._run_stage(reports, "outcome_learning", lambda: self.outcome_learning_service.analyze())
+        if self.opportunity_analytics_service is not None:
+            self._run_stage(reports, "opportunity_analytics", lambda: self.opportunity_analytics_service.analyze(symbol=symbol, limit=limit))
+        if self.execution_analytics_service is not None:
+            self._run_stage(reports, "execution_analytics", lambda: self.execution_analytics_service.analyze(symbol=symbol, limit=limit))
+        self._run_stage(reports, "professional_insights", lambda: self.professional_insights_service.analyze(symbol=symbol, limit=limit))
+        self._run_stage(reports, "research_engine", lambda: self.professional_insights_service.research_engine_report(symbol=symbol, limit=limit))
+        self._run_stage(
+            reports,
+            "threshold_validation",
+            lambda: self.professional_insights_service.threshold_validation_report(symbol=symbol, limit=limit),
+        )
+        self._run_stage(
+            reports,
+            "execution_realism",
+            lambda: self.professional_insights_service.execution_realism_report(symbol=symbol, limit=limit),
+        )
+        self._run_stage(
+            reports,
+            "daily_review",
+            lambda: self.professional_insights_service.daily_review(symbol=symbol, review_date=now.date(), limit=limit),
+        )
+        self._run_stage(
+            reports,
+            "option_backtest",
             lambda: self.backtest_service.run_option_premium(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -139,9 +206,24 @@ class AfterMarketResearchService:
                 horizon_candles=horizon,
                 limit=limit,
                 decision_mode=decision_mode,
-            )
+            ),
+            compact=True,
         )
-        walk_forward = self._safe_report(
+        self._run_stage(
+            reports,
+            "ablation",
+            lambda: self.backtest_service.run_ablation(
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=direction,
+                horizon_candles=horizon,
+                limit=min(limit, 1000),
+            ),
+            compact=True,
+        )
+        self._run_stage(
+            reports,
+            "walk_forward",
             lambda: self.backtest_service.run_walk_forward(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -149,14 +231,23 @@ class AfterMarketResearchService:
                 horizon_candles=horizon,
                 limit=limit,
                 decision_mode=decision_mode,
-            )
+            ),
+            compact=True,
         )
-        reports = {
-            "daily_summary": daily_summary,
-            "data_completeness": data_completeness,
-            "option_backtest": self._compact_research_result(option_backtest),
-            "walk_forward": self._compact_research_result(walk_forward),
-        }
+        if self.professional_readiness_service is not None:
+            self._run_stage(
+                reports,
+                "professional_readiness",
+                lambda: self.professional_readiness_service.report(symbol=symbol, timeframe=timeframe, direction=direction, limit=limit),
+                compact=True,
+            )
+        if self.strategy_edge_service is not None:
+            self._run_stage(
+                reports,
+                "strategy_edge_validation",
+                lambda: self.strategy_edge_service.validate(symbol=symbol, timeframe=timeframe, direction=direction, limit=limit),
+                compact=True,
+            )
         overall_status = "ok" if all(str(report.get("status")) == "ok" for report in reports.values()) else "partial"
         completed_at = self._now()
         return {
@@ -172,12 +263,64 @@ class AfterMarketResearchService:
             "started_at": format_ist(now),
             "completed_at": format_ist(completed_at),
             "reports": reports,
-            "recommendation": self._recommendation(daily_summary=daily_summary, walk_forward=walk_forward),
+            "recommendation": self._recommendation(
+                daily_summary=reports.get("daily_summary", {}),
+                walk_forward=reports.get("walk_forward", {}),
+            ),
             "notes": [
-                "This job runs after market close and does not affect live scanner decisions.",
+                "This staged job runs after market close and does not affect live scanner decisions.",
+                "Each report is run sequentially with a configurable delay so the server is not loaded all at once.",
                 "Backtest and walk-forward use scanner_parity by default so evidence is aligned with live scanner logic.",
             ],
         }
+
+    def _run_stage(
+        self,
+        reports: dict[str, dict[str, Any]],
+        name: str,
+        fn: Callable[[], dict[str, Any]],
+        *,
+        compact: bool = False,
+    ) -> None:
+        started_at = self._now()
+        result = self._safe_report(fn)
+        if compact:
+            result = self._compact_research_result(result)
+        completed_at = self._now()
+        reports[name] = {
+            "status": result.get("status", "ok") if "error" not in result else "error",
+            "started_at": format_ist(started_at),
+            "completed_at": format_ist(completed_at),
+            "result": result,
+        }
+        delay = max(0.0, float(settings.after_market_research_step_delay_seconds))
+        if delay > 0:
+            time_module.sleep(delay)
+
+    def _pipeline_names(self) -> list[str]:
+        names = [
+            "daily_summary",
+            "data_completeness",
+            "professional_insights",
+            "research_engine",
+            "threshold_validation",
+            "execution_realism",
+            "daily_review",
+            "option_backtest",
+            "ablation",
+            "walk_forward",
+        ]
+        if self.outcome_learning_service is not None:
+            names.insert(2, "outcome_learning")
+        if self.opportunity_analytics_service is not None:
+            names.insert(3, "opportunity_analytics")
+        if self.execution_analytics_service is not None:
+            names.insert(4, "execution_analytics")
+        if self.professional_readiness_service is not None:
+            names.append("professional_readiness")
+        if self.strategy_edge_service is not None:
+            names.append("strategy_edge_validation")
+        return names
 
     def _safe_report(self, fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
         try:
@@ -235,12 +378,18 @@ class AfterMarketResearchService:
             return True, None
         if now.weekday() >= 5:
             return False, "not_market_day"
-        if self._market_session(now) != "AFTER_MARKET":
+        if not self.market_session_service.should_run_after_market_review(now):
             return False, "not_after_market"
         if now.time() < self._parse_time(settings.after_market_research_time):
             return False, "waiting_for_after_market_research_time"
-        if self.last_run_date == now.date().isoformat():
+        trading_date = now.date().isoformat()
+        job_run = self.job_repository.latest(job_name=self.JOB_NAME, trading_date=trading_date)
+        if self.last_run_date == trading_date or self.job_repository.count(job_name=self.JOB_NAME, trading_date=trading_date, status="success") > 0:
             return False, "already_ran_today"
+        if job_run and job_run.get("status") == "running":
+            return False, "already_running"
+        if self.job_repository.count(job_name=self.JOB_NAME, trading_date=trading_date, status="failed") >= 2:
+            return False, "failed_retry_exhausted"
         return True, None
 
     def _next_action(self, now: datetime) -> str:
@@ -258,13 +407,8 @@ class AfterMarketResearchService:
         return reason or "idle"
 
     def _market_session(self, now: datetime) -> str:
-        if now.weekday() >= 5:
-            return "WEEKEND"
-        start = self._parse_time(settings.market_open_time)
-        end = self._parse_time(settings.market_close_time)
-        if start <= now.time() <= end:
-            return "REGULAR_MARKET"
-        return "PRE_MARKET" if now.time() < start else "AFTER_MARKET"
+        mode = self.market_session_service.current_runtime_mode(now)
+        return "AFTER_MARKET" if mode == "AFTER_MARKET_REVIEW" else mode
 
     def _now(self) -> datetime:
         return to_ist_naive(self.clock())

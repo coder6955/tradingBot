@@ -2,9 +2,11 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 from app.config import settings
 from app.models import Signal
+from app.providers.kite_auth_state import kite_auth_state
 from app.services.active_price_feed import ActiveTradePriceFeed, PriceTick
 from app.services.database import Candle, get_session, init_db
 from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed, WebSocketTick
@@ -159,6 +161,7 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
             "websocket_live_gap_polling_fallback": settings.websocket_live_gap_polling_fallback,
             "cancel_armed_entries_on_data_gap": settings.cancel_armed_entries_on_data_gap,
         }
+        kite_auth_state.clear()
         object.__setattr__(settings, "enable_kite_websocket", True)
         object.__setattr__(settings, "websocket_live_stale_blocks", True)
         object.__setattr__(settings, "enable_websocket_candle_persistence", True)
@@ -177,6 +180,7 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
     def tearDown(self) -> None:
         for key, value in self.originals.items():
             object.__setattr__(settings, key, value)
+        kite_auth_state.clear()
         try:
             if os.path.exists(self.temp_db.name):
                 os.remove(self.temp_db.name)
@@ -196,6 +200,23 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
             self.assertEqual(feed.get_latest_price(123), 88.5)
         finally:
             feed.stop()
+
+    def test_start_refreshes_access_token_from_store(self) -> None:
+        with patch("app.services.kite_websocket_price_feed.load_access_token", return_value="fresh-token"):
+            feed = KiteWebSocketPriceFeed(
+                api_key="k",
+                access_token="stale-token",
+                ticker_factory=FakeTicker,
+                clock=regular_market_now,
+            )
+            try:
+                result = feed.start()
+
+                self.assertTrue(result["started"])
+                self.assertEqual(feed.access_token, "fresh-token")
+                self.assertEqual(feed._ticker.access_token, "fresh-token")
+            finally:
+                feed.stop()
 
     def test_websocket_feed_dispatches_tick_handler(self) -> None:
         seen = []
@@ -544,6 +565,7 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
 
         self.assertEqual(reconnect_calls, [])
         self.assertEqual(status["websocket_status"], "AUTH_FAILED")
+        self.assertTrue(status["relogin_required"])
         self.assertEqual(status["reconnect_skipped_reason"], "auth_failed")
         self.assertEqual(status["last_error_code"], 403)
         self.assertFalse(status["running"])

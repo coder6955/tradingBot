@@ -9,6 +9,7 @@ except ModuleNotFoundError:
     KiteConnect = None  # type: ignore
 
 from app.config import settings
+from app.providers.kite_auth_state import is_kite_token_exception, kite_auth_state
 from app.providers.token_store import load_access_token
 
 
@@ -40,6 +41,7 @@ class KiteProvider:
         self.access_token = token
         if token and self.client is not None:
             self.client.set_access_token(token)
+            kite_auth_state.clear()
 
     def get_profile(self) -> Dict[str, Any]:
         return {"status": "not-configured", "token": bool(self.access_token)}
@@ -56,7 +58,7 @@ class KiteProvider:
             raise RuntimeError("KITE_API_SECRET is not configured")
         if self.client is None:
             raise RuntimeError("kiteconnect is not installed")
-        data = self.client.generate_session(request_token, api_secret=settings.kite_api_secret)
+        data = self._call(self.client.generate_session, request_token, api_secret=settings.kite_api_secret)
         access_token = data.get("access_token")
         if access_token:
             # persist in memory for this process
@@ -75,46 +77,52 @@ class KiteProvider:
         if self.client is None:
             return {"status": "error", "message": "kiteconnect is not installed"}
         try:
-            p = self.client.profile()  # type: ignore
+            p = self._call(self.client.profile)  # type: ignore
             return {"status": "ok", "profile": p}
         except Exception as exc:
+            if is_kite_token_exception(exc):
+                return {
+                    "status": "AUTH_FAILED",
+                    "relogin_required": True,
+                    "message": str(exc),
+                }
             return {"status": "error", "message": str(exc)}
 
     def instruments(self, exchange: str | None = None) -> List[Dict[str, Any]]:
         self._ensure_ready()
-        return self.client.instruments(exchange)  # type: ignore
+        return self._call(self.client.instruments, exchange)  # type: ignore
 
     def quote(self, instruments: Sequence[str]) -> Dict[str, Any]:
         self._ensure_ready()
         if not instruments:
             return {}
-        return self.client.quote(list(instruments))  # type: ignore
+        return self._call(self.client.quote, list(instruments))  # type: ignore
 
     def ltp(self, instruments: Sequence[str]) -> Dict[str, Any]:
         self._ensure_ready()
         if not instruments:
             return {}
-        return self.client.ltp(list(instruments))  # type: ignore
+        return self._call(self.client.ltp, list(instruments))  # type: ignore
 
     def historical_data(self, instrument_token: int, from_dt: datetime, to_dt: datetime, interval: str) -> List[Dict[str, Any]]:
         self._ensure_ready()
-        return self.client.historical_data(instrument_token, from_dt, to_dt, interval)  # type: ignore
+        return self._call(self.client.historical_data, instrument_token, from_dt, to_dt, interval)  # type: ignore
 
     def margins(self) -> Dict[str, Any]:
         self._ensure_ready()
-        return self.client.margins()  # type: ignore
+        return self._call(self.client.margins)  # type: ignore
 
     def positions(self) -> Dict[str, Any]:
         self._ensure_ready()
-        return self.client.positions()  # type: ignore
+        return self._call(self.client.positions)  # type: ignore
 
     def orders(self) -> List[Dict[str, Any]]:
         self._ensure_ready()
-        return self.client.orders()  # type: ignore
+        return self._call(self.client.orders)  # type: ignore
 
     def order_history(self, order_id: str) -> List[Dict[str, Any]]:
         self._ensure_ready()
-        return self.client.order_history(order_id)  # type: ignore
+        return self._call(self.client.order_history, order_id)  # type: ignore
 
     def place_order(
         self,
@@ -130,7 +138,8 @@ class KiteProvider:
         variety: str = "regular",
     ) -> Dict[str, Any]:
         self._ensure_ready()
-        order_id = self.client.place_order(  # type: ignore
+        order_id = self._call(  # type: ignore
+            self.client.place_order,
             variety=variety,
             exchange=exchange,
             tradingsymbol=tradingsymbol,
@@ -146,13 +155,23 @@ class KiteProvider:
 
     def cancel_order(self, order_id: str, variety: str = "regular") -> Dict[str, Any]:
         self._ensure_ready()
-        cancelled = self.client.cancel_order(variety=variety, order_id=order_id)  # type: ignore
+        cancelled = self._call(self.client.cancel_order, variety=variety, order_id=order_id)  # type: ignore
         return {"status": "cancelled", "order_id": cancelled or order_id}
 
     def _ensure_ready(self) -> None:
+        if kite_auth_state.relogin_required:
+            raise RuntimeError("Kite authentication failed; relogin required")
         if not settings.kite_api_key:
             raise RuntimeError("KITE_API_KEY is not configured")
         if not self.access_token:
             raise RuntimeError("KITE_ACCESS_TOKEN is not configured; complete /kite/auth first")
         if self.client is None:
             raise RuntimeError("kiteconnect is not installed")
+
+    def _call(self, func: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return func(*args, **kwargs)
+        except Exception as exc:
+            if is_kite_token_exception(exc):
+                kite_auth_state.mark_auth_failed(str(exc))
+            raise

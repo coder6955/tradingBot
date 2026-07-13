@@ -1,13 +1,16 @@
 import json
 import logging
+import secrets
 import threading
+import time as time_module
 from dataclasses import asdict
 from datetime import datetime, time
 from typing import Callable
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
 from sqlalchemy import text
 
+from app.application_context import ApplicationContext
 from app.config import settings
 from app.services.market_data_service import MarketDataService
 from app.services.scanner_service import ScannerService
@@ -34,6 +37,8 @@ from app.services.armed_entry_tracker_service import ArmedEntryTrackerService
 from app.services.banknifty_option_prewarm_service import BankNiftyOptionPrewarmService
 from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed
 from app.services.market_data_coordinator import MarketDataCoordinator
+from app.services.market_data_runtime_service import MarketDataRuntimeService
+from app.services.market_session_service import MarketSessionService
 from app.services.opportunity_analytics_service import OpportunityAnalyticsService
 from app.services.option_history_repository import OptionHistoryRepository
 from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
@@ -44,6 +49,7 @@ from app.services.professional_readiness_service import ProfessionalReadinessSer
 from app.services.professional_insights_service import ProfessionalInsightsService
 from app.services.risk_management_service import RiskManagementService
 from app.services.runtime_trading_config_service import RuntimeTradingConfigService
+from app.services.runtime_job_repository import RuntimeJobRepository
 from app.services.strategy_edge_service import StrategyEdgeService
 from app.services.strategy_validation_repository import StrategyValidationRepository
 from app.services.strategy_version_registry import StrategyVersionRegistry
@@ -53,6 +59,7 @@ from app.services.trade_repository import TradeRepository
 from app.services.trade_setup_service import OptionContract
 from app.services.time_utils import format_ist, ist_now_naive
 from app.providers.kite_provider import KiteProvider
+from app.providers.kite_auth_state import kite_auth_state
 from app.providers.kite_feed import KiteFeed
 from app.providers.token_store import save_access_token, load_access_token
 from fastapi.responses import RedirectResponse, HTMLResponse
@@ -99,6 +106,66 @@ app = FastAPI(
     description=API_DESCRIPTION,
     openapi_tags=OPENAPI_TAGS,
 )
+
+
+@app.middleware("http")
+async def log_request_timing(request: Request, call_next):
+    started = time_module.perf_counter()
+    try:
+        response = await call_next(request)
+    except Exception:
+        elapsed = time_module.perf_counter() - started
+        logger.exception("request failed after %.3fs path=%s", elapsed, request.url.path)
+        raise
+    elapsed = time_module.perf_counter() - started
+    response.headers["X-Process-Time-ms"] = str(round(elapsed * 1000, 3))
+    if elapsed >= float(settings.slow_api_log_threshold_seconds):
+        logger.warning(
+            "slow request duration_ms=%.3f method=%s path=%s status_code=%s",
+            elapsed * 1000,
+            request.method,
+            request.url.path,
+            response.status_code,
+        )
+    return response
+
+
+def _extract_api_auth_token(authorization: str | None, x_api_key: str | None) -> str | None:
+    if x_api_key:
+        return x_api_key.strip()
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() == "bearer" and token:
+            return token.strip()
+        return authorization.strip()
+    return None
+
+
+def require_api_auth(
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+) -> None:
+    configured_token = settings.api_auth_token
+    if not configured_token:
+        if settings.api_auth_required:
+            raise HTTPException(status_code=503, detail="API auth token is not configured")
+        return
+    supplied_token = _extract_api_auth_token(authorization, x_api_key)
+    if not supplied_token or not secrets.compare_digest(str(configured_token), supplied_token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+PROTECTED_ROUTE = [Depends(require_api_auth)]
+
+
+def _bounded_int(value: object, default: int, *, minimum: int = 1, maximum: int = 3000) -> int:
+    try:
+        parsed = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
 market_data_service = MarketDataService()
 signal_repository = SignalRepository()
 paper_trading_service = PaperTradingService()
@@ -113,9 +180,15 @@ option_quality_service = OptionQualityService(greeks_service)
 backtest_service = BacktestService()
 option_history_repository = OptionHistoryRepository()
 shared_kite_feed = KiteFeed() if settings.use_kite_market_data else None
-kite_websocket_price_feed = KiteWebSocketPriceFeed()
+market_session_service = MarketSessionService()
+kite_websocket_price_feed = KiteWebSocketPriceFeed(market_session_service=market_session_service)
 active_trade_price_feed = ActiveTradePriceFeed(kite_websocket_price_feed)
 banknifty_option_prewarm_service = BankNiftyOptionPrewarmService(kite_websocket_price_feed)
+market_data_runtime_service = MarketDataRuntimeService(
+    websocket_feed=kite_websocket_price_feed,
+    active_price_feed=active_trade_price_feed,
+    prewarm_service=banknifty_option_prewarm_service,
+)
 strategy_validation_repository = StrategyValidationRepository()
 strategy_version_registry = StrategyVersionRegistry()
 strategy_edge_service = StrategyEdgeService(backtest_service=backtest_service, repository=strategy_validation_repository)
@@ -126,32 +199,52 @@ outcome_learning_service = OutcomeLearningService()
 opportunity_analytics_service = OpportunityAnalyticsService()
 execution_analytics_service = ExecutionAnalyticsService()
 professional_insights_service = ProfessionalInsightsService()
-after_market_research_service = AfterMarketResearchService(
-    backtest_service=backtest_service,
-    professional_insights_service=professional_insights_service,
-)
 professional_readiness_service = ProfessionalReadinessService(
     backtest_service=backtest_service,
     opportunity_analytics_service=opportunity_analytics_service,
     execution_analytics_service=execution_analytics_service,
     option_history_repository=option_history_repository,
 )
+after_market_research_service = AfterMarketResearchService(
+    backtest_service=backtest_service,
+    professional_insights_service=professional_insights_service,
+    outcome_learning_service=outcome_learning_service,
+    opportunity_analytics_service=opportunity_analytics_service,
+    execution_analytics_service=execution_analytics_service,
+    professional_readiness_service=professional_readiness_service,
+    strategy_edge_service=strategy_edge_service,
+    market_session_service=market_session_service,
+    job_repository=RuntimeJobRepository(),
+)
 armed_entry_tracker_service: ArmedEntryTrackerService | None = None
 dashboard_broker_cache: dict[str, tuple[datetime, dict[str, object]]] = {}
 scanner_response_cache: dict[str, dict[str, object]] = {}
 scanner_response_cache_lock = threading.RLock()
+kite_provider_lock = threading.RLock()
+shared_kite_provider: KiteProvider | None = None
 
 
 def get_kite_provider() -> KiteProvider:
-    provider = KiteProvider()
-    existing_token = load_access_token()
-    if existing_token:
-        provider.set_access_token(existing_token)
-    return provider
+    global shared_kite_provider
+    with kite_provider_lock:
+        if shared_kite_provider is None:
+            shared_kite_provider = KiteProvider()
+        existing_token = load_access_token()
+        if existing_token and existing_token != shared_kite_provider.access_token:
+            shared_kite_provider.set_access_token(existing_token)
+        return shared_kite_provider
 
 
 market_data_coordinator = MarketDataCoordinator(get_kite_provider)
 active_trade_price_feed.market_data_coordinator = market_data_coordinator
+application_context = ApplicationContext(
+    market_session_service=market_session_service,
+    kite_websocket_price_feed=kite_websocket_price_feed,
+    active_trade_price_feed=active_trade_price_feed,
+    banknifty_option_prewarm_service=banknifty_option_prewarm_service,
+    market_data_runtime_service=market_data_runtime_service,
+    kite_provider_factory=get_kite_provider,
+)
 rejected_opportunity_outcome_service = RejectedOpportunityOutcomeService(
     rejected_opportunity_repository,
     kite_provider_factory=get_kite_provider,
@@ -241,21 +334,32 @@ automation_supervisor_service = AutomationSupervisorService(
     risk_management_service=risk_management_service,
     notification_service=notification_service,
     after_market_research_service=after_market_research_service,
+    market_session_service=market_session_service,
 )
 
 
 @app.on_event("startup")
 async def startup_automation() -> None:
+    threading.Thread(target=_run_startup_maintenance, name="startup-maintenance", daemon=True).start()
+    threading.Thread(target=_run_startup_broker_sync, name="startup-broker-sync", daemon=True).start()
+    if settings.automation_enabled:
+        automation_supervisor_service.start()
+
+
+def _run_startup_maintenance() -> None:
     try:
         strategy_version_registry.ensure_current_version()
     except Exception:
-        pass
+        logger.exception("startup strategy version registration failed")
     try:
         kite_websocket_price_feed.cleanup_old_persisted_candles()
     except Exception:
-        pass
+        logger.exception("startup websocket candle cleanup failed")
     if settings.enable_kite_websocket:
-        active_trade_price_feed.start()
+        try:
+            application_context.market_data_runtime_service.start()
+        except Exception:
+            logger.exception("startup websocket start failed")
     try:
         if _scanner_market_is_open():
             _start_scanner_refresh(
@@ -266,19 +370,23 @@ async def startup_automation() -> None:
                 order_mode=settings.default_order_mode,
             )
     except Exception:
-        pass
+        logger.exception("startup scanner warmup failed")
+
+
+def _run_startup_broker_sync() -> None:
+    if kite_auth_state.relogin_required:
+        logger.warning("startup broker sync skipped: Kite relogin required")
+        return
     try:
         broker_sync_service.sync_open_trades(limit=100)
         broker_sync_service.reconcile_startup_positions()
     except Exception:
-        pass
-    if settings.automation_enabled:
-        automation_supervisor_service.start()
+        logger.exception("startup broker sync failed")
 
 
 @app.on_event("shutdown")
 async def shutdown_background_services() -> None:
-    active_trade_price_feed.stop()
+    application_context.market_data_runtime_service.stop()
     await automation_supervisor_service.stop()
     await option_snapshot_collector_service.stop()
     await auto_trader_service.stop()
@@ -286,7 +394,7 @@ async def shutdown_background_services() -> None:
 
 
 @app.get("/health", tags=["01 System"], summary="Check API health")
-def health() -> dict[str, str]:
+async def health() -> dict[str, str]:
     return {"status": "ok", "service": settings.app_name}
 
 
@@ -312,6 +420,67 @@ def db_health() -> dict[str, object]:
             "error_type": type(exc).__name__,
             "message": str(exc),
         }
+
+
+@app.get("/runtime/status", tags=["01 System"], summary="Inspect live runtime scheduler and API load controls")
+async def runtime_status() -> dict[str, object]:
+    now = ist_now_naive()
+    with scanner_response_cache_lock:
+        scanner_entries = len(scanner_response_cache)
+        scanner_refreshing = sum(1 for entry in scanner_response_cache.values() if entry.get("refreshing"))
+        scanner_errors = [
+            {"key": key, "error": entry.get("last_error")}
+            for key, entry in scanner_response_cache.items()
+            if entry.get("last_error")
+        ][-5:]
+    ws_status = application_context.market_data_runtime_service.control_status()
+    return {
+        "status": "ok",
+        "timestamp": now.isoformat(sep=" "),
+        "session": market_session_service.status(now),
+        "api": {
+            "slow_log_threshold_seconds": settings.slow_api_log_threshold_seconds,
+            "dashboard_refresh_seconds": 15,
+            "dashboard_broker_cache_ttl_seconds": settings.dashboard_broker_cache_ttl_seconds,
+            "scanner_response_cache_ttl_seconds": settings.scanner_response_cache_ttl_seconds,
+            "scanner_response_stale_ttl_seconds": settings.scanner_response_stale_ttl_seconds,
+        },
+        "kite": {
+            "access_token_available": bool(load_access_token() or settings.kite_access_token),
+            "shared_provider_created": shared_kite_provider is not None,
+            "api_timeout_seconds": settings.kite_api_timeout_seconds,
+        },
+        "websocket": {
+            "state": ws_status.get("state"),
+            "reason": ws_status.get("reason"),
+            "status": ws_status.get("websocket_status"),
+            "running": ws_status.get("running"),
+            "connected": ws_status.get("connected"),
+            "market_session": ws_status.get("market_session"),
+            "duplicate_start_prevented_count": ws_status.get("duplicate_start_prevented_count"),
+            "reconnect_count": ws_status.get("reconnect_count"),
+            "disconnect_count": ws_status.get("disconnect_count"),
+            "last_error": ws_status.get("last_error"),
+        },
+        "scanner": {
+            "auto_trader_running": auto_trader_service.running,
+            "last_scan_at": auto_trader_service.last_scan_at,
+            "error_count": len(auto_trader_service.errors),
+            "response_cache_entries": scanner_entries,
+            "refreshing_entries": scanner_refreshing,
+            "recent_cache_errors": scanner_errors,
+        },
+        "runtime_jobs": {
+            "automation_supervisor_running": automation_supervisor_service.running,
+            "automation_duplicate_start_prevented_count": automation_supervisor_service.duplicate_start_prevented_count,
+            "snapshot_collector_running": option_snapshot_collector_service.running,
+            "outcome_monitor_running": opportunity_outcome_service.running,
+            "after_market_review_running": after_market_research_service.running,
+            "after_market_review_last_run_date": after_market_research_service.last_run_date,
+            "after_market_review_last_error": after_market_research_service.last_error,
+        },
+        "market_data_cache": market_data_coordinator.status(),
+    }
 
 
 @app.get("/market-data/cache/status", tags=["09 Market Data"], summary="Inspect shared market-data quote cache")
@@ -400,7 +569,7 @@ def root() -> dict[str, object]:
 
 
 @app.get("/dashboard", response_class=HTMLResponse, tags=["01 System"], summary="Open command center dashboard")
-def command_center_dashboard() -> HTMLResponse:
+async def command_center_dashboard() -> HTMLResponse:
     return HTMLResponse(
         """
 <!doctype html>
@@ -616,15 +785,27 @@ def command_center_dashboard() -> HTMLResponse:
     </div>
   </div>
 <script>
-async function getJson(path) {
-  const res = await fetch(path);
-  if (!res.ok) throw new Error(`${path}: ${res.status}`);
-  return await res.json();
+async function getJson(path, timeoutMs=4500) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(path, {signal: controller.signal, cache: "no-store"});
+    if (!res.ok) throw new Error(`${path}: ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 async function postJson(path, body={}) {
-  const res = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
-  if (!res.ok) throw new Error(`${path}: ${res.status}`);
-  return await res.json();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body), signal: controller.signal, cache: "no-store"});
+    if (!res.ok) throw new Error(`${path}: ${res.status}`);
+    return await res.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 let pendingRuntimeMode = "paper";
 window.lastAppliedMode = "paper";
@@ -822,9 +1003,14 @@ async function getJsonCached(cacheKey, url, ttlMs) {
   const now = Date.now();
   const cached = dashboardEndpointCache[cacheKey];
   if (cached && now - cached.at <= ttlMs) return cached.data;
-  const data = await getJson(url);
-  dashboardEndpointCache[cacheKey] = {at: now, data};
-  return data;
+  try {
+    const data = await getJson(url);
+    dashboardEndpointCache[cacheKey] = {at: now, data};
+    return data;
+  } catch (err) {
+    if (cached) return {...cached.data, cached: true, refresh_error: err.message || String(err)};
+    throw err;
+  }
 }
 async function getReviewJsonCached(cacheKey, url, ttlMs) {
   if (window.dashboardMarketOpen === true) {
@@ -868,7 +1054,7 @@ async function refreshAll() {
   const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, runtimeConfig, collector, ingest, websocket, cache, decisionFeed, afterMarketResearch] = await Promise.allSettled([
     getJson("/health"), getJson("/db/health"), getJsonCached("kiteHealth", "/kite/health", DASHBOARD_BROKER_REFRESH_MS), getJson("/auto-trader/status"), getJson("/opportunity-monitor/status"),
     getJson("/opportunities/performance"), getJson("/auto-trader/latest"), getJsonCached("journal", "/opportunities?limit=50", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("failures", "/opportunities/failure-analysis", DASHBOARD_SLOW_REFRESH_MS),
-    getReviewJsonCached("learning", "/research/outcome-learning", DASHBOARD_SLOW_REFRESH_MS), getJson("/auto-trader/executions"), getJson("/paper/trades"), getJsonCached("margins", "/kite/margins", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("positions", "/kite/positions", DASHBOARD_BROKER_REFRESH_MS), getJson("/risk/status"), getJson("/trades?limit=50"),
+    getReviewJsonCached("learning", "/research/outcome-learning", DASHBOARD_SLOW_REFRESH_MS), getJson("/auto-trader/executions"), getJson("/paper/trades"), getJsonCached("margins", "/kite/margins", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("positions", "/kite/positions", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("risk", "/risk/status", DASHBOARD_BROKER_REFRESH_MS), getJson("/trades?limit=50"),
     getJson("/automation/status"), getJsonCached("runtimeConfig", "/runtime/trading-config", DASHBOARD_SLOW_REFRESH_MS), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30"), getJsonCached("afterMarketResearch", "/research/after-market/status", DASHBOARD_SLOW_REFRESH_MS)
   ]);
   const val = r => r.status === "fulfilled" ? r.value : {error: r.reason.message};
@@ -1197,6 +1383,7 @@ def get_ingestion_status(symbols: str | None = None, timeframe: str = "5minute")
     tags=["11 Data Ingestion"],
     summary="Ingest historical underlying candles from Kite",
     description="Fetches Kite historical OHLCV candles for the given symbols and stores them in MySQL for backtesting.",
+    dependencies=PROTECTED_ROUTE,
 )
 def ingest_historical_candles(
     payload: dict[str, object] | None = Body(
@@ -1215,13 +1402,14 @@ def ingest_historical_candles(
     ),
 ) -> dict[str, object]:
     payload = payload or {}
+    _require_manual_override_for_market_heavy_operation(payload, "historical candle ingestion")
     try:
         return data_ingestion_service.ingest_candles(
             symbols=parse_symbol_list(payload.get("symbols")),
             timeframe=str(payload.get("timeframe") or "5minute"),
             from_date=str(payload.get("from")) if payload.get("from") else None,
             to_date=str(payload.get("to")) if payload.get("to") else None,
-            days=int(payload.get("days") or 90),
+            days=_bounded_int(payload.get("days"), 90, maximum=365),
             use_checkpoint=bool(payload.get("use_checkpoint", False)),
             overlap_minutes=int(payload.get("overlap_minutes") or settings.automation_checkpoint_overlap_minutes),
         )
@@ -1237,6 +1425,7 @@ def ingest_historical_candles(
         "Stores current nearby option quotes, bid/ask, OI, volume, and estimated Greeks/IV. "
         "Run this repeatedly during market hours to build historical option-chain data going forward."
     ),
+    dependencies=PROTECTED_ROUTE,
 )
 def ingest_option_snapshots(
     payload: dict[str, object] | None = Body(
@@ -1266,6 +1455,7 @@ def ingest_option_snapshots(
     tags=["11 Data Ingestion"],
     summary="Start continuous option-chain snapshot collection",
     description="Continuously stores option quote, bid/ask, OI, IV, and Greeks snapshots. Use during market hours to build option-history data.",
+    dependencies=PROTECTED_ROUTE,
 )
 async def start_option_snapshot_collector(
     payload: dict[str, object] | None = Body(
@@ -1289,7 +1479,12 @@ async def start_option_snapshot_collector(
     )
 
 
-@app.post("/data/collector/stop", tags=["11 Data Ingestion"], summary="Stop continuous option-chain snapshot collection")
+@app.post(
+    "/data/collector/stop",
+    tags=["11 Data Ingestion"],
+    summary="Stop continuous option-chain snapshot collection",
+    dependencies=PROTECTED_ROUTE,
+)
 async def stop_option_snapshot_collector() -> dict[str, object]:
     return await option_snapshot_collector_service.stop()
 
@@ -1307,6 +1502,7 @@ def get_option_snapshot_collector_status() -> dict[str, object]:
         "Automatically handles daily candle ingestion, market-hour option snapshot collection, auto scanning, "
         "and outcome monitoring. Orders stay disabled unless `place_orders=true`; live orders still require live config and `confirm_live=true`."
     ),
+    dependencies=PROTECTED_ROUTE,
 )
 async def start_automation(
     payload: dict[str, object] | None = Body(
@@ -1331,7 +1527,12 @@ async def start_automation(
     return automation_supervisor_service.start(merged_payload)
 
 
-@app.post("/automation/stop", tags=["12 Automation"], summary="Stop automation supervisor and intraday collector/scanner")
+@app.post(
+    "/automation/stop",
+    tags=["12 Automation"],
+    summary="Stop automation supervisor and intraday collector/scanner",
+    dependencies=PROTECTED_ROUTE,
+)
 async def stop_automation() -> dict[str, object]:
     return await automation_supervisor_service.stop()
 
@@ -1341,6 +1542,7 @@ async def stop_automation() -> dict[str, object]:
     tags=["12 Automation"],
     summary="Run one automation supervisor cycle now",
     description="Runs the same decision cycle the supervisor loop runs: bootstrap data if needed, start market-hour services, or evaluate open outcomes after hours.",
+    dependencies=PROTECTED_ROUTE,
 )
 def run_automation_once(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
     return automation_supervisor_service.run_once(payload or None)
@@ -1352,17 +1554,22 @@ def get_automation_status() -> dict[str, object]:
 
 
 @app.get("/runtime/trading-config", tags=["12 Automation"], summary="Inspect dashboard runtime trading mode config")
-def get_runtime_trading_config() -> dict[str, object]:
+async def get_runtime_trading_config() -> dict[str, object]:
     return runtime_trading_config_service.status()
 
 
 @app.get("/runtime/trading-config/preview", tags=["12 Automation"], summary="Preview paper/live dashboard mode changes")
-def preview_runtime_trading_config(mode: str = "paper") -> dict[str, object]:
+async def preview_runtime_trading_config(mode: str = "paper") -> dict[str, object]:
     return runtime_trading_config_service.preview(mode)
 
 
-@app.post("/runtime/trading-config/apply", tags=["12 Automation"], summary="Apply dashboard runtime trading mode config")
-def apply_runtime_trading_config(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
+@app.post(
+    "/runtime/trading-config/apply",
+    tags=["12 Automation"],
+    summary="Apply dashboard runtime trading mode config",
+    dependencies=PROTECTED_ROUTE,
+)
+async def apply_runtime_trading_config(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
     return runtime_trading_config_service.apply(payload or {})
 
 
@@ -1374,6 +1581,7 @@ def apply_runtime_trading_config(payload: dict[str, object] | None = Body(defaul
         "Fetches OHLCV candles for currently listed nearby option contracts. "
         "This stores option premium movement, while `/data/ingest/option-snapshots` stores bid/ask, OI, IV, and Greeks."
     ),
+    dependencies=PROTECTED_ROUTE,
 )
 def ingest_option_candles(
     payload: dict[str, object] | None = Body(
@@ -1390,15 +1598,16 @@ def ingest_option_candles(
     ),
 ) -> dict[str, object]:
     payload = payload or {}
+    _require_manual_override_for_market_heavy_operation(payload, "historical option candle ingestion")
     try:
         return data_ingestion_service.ingest_option_candles(
             symbols=parse_symbol_list(payload.get("symbols")),
             timeframe=str(payload.get("timeframe") or "5minute"),
             from_date=str(payload.get("from")) if payload.get("from") else None,
             to_date=str(payload.get("to")) if payload.get("to") else None,
-            days=int(payload.get("days") or 30),
+            days=_bounded_int(payload.get("days"), 30, maximum=90),
             strike_window_pct=float(payload.get("strike_window_pct") or 2.0),
-            max_contracts_per_symbol=int(payload.get("max_contracts_per_symbol") or 20),
+            max_contracts_per_symbol=_bounded_int(payload.get("max_contracts_per_symbol"), 20, maximum=120),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1409,6 +1618,7 @@ def ingest_option_candles(
     tags=["11 Data Ingestion"],
     summary="Ingest candles and capture option snapshots",
     description="Runs historical underlying candle ingestion first, then captures current option-chain snapshots for the same symbols.",
+    dependencies=PROTECTED_ROUTE,
 )
 def ingest_all_market_research_data(
     payload: dict[str, object] | None = Body(
@@ -1427,15 +1637,16 @@ def ingest_all_market_research_data(
     ),
 ) -> dict[str, object]:
     payload = payload or {}
+    _require_manual_override_for_market_heavy_operation(payload, "full market research data ingestion")
     try:
         return data_ingestion_service.ingest_all(
             symbols=parse_symbol_list(payload.get("symbols")),
             timeframe=str(payload.get("timeframe") or "5minute"),
             from_date=str(payload.get("from")) if payload.get("from") else None,
             to_date=str(payload.get("to")) if payload.get("to") else None,
-            days=int(payload.get("days") or 90),
+            days=_bounded_int(payload.get("days"), 90, maximum=365),
             strike_window_pct=float(payload.get("strike_window_pct") or 4.0),
-            max_contracts_per_symbol=int(payload.get("max_contracts_per_symbol") or 120),
+            max_contracts_per_symbol=_bounded_int(payload.get("max_contracts_per_symbol"), 120, maximum=200),
             use_checkpoint=bool(payload.get("use_checkpoint", False)),
             overlap_minutes=int(payload.get("overlap_minutes") or settings.automation_checkpoint_overlap_minutes),
         )
@@ -1571,6 +1782,7 @@ def get_research_settings() -> dict[str, object]:
     tags=["10 Research"],
     summary="Inspect live market insight filters for a symbol and option contract",
     description="Use this to audit day type, option-premium confirmation, and time-bucket edge before trusting an option-buying signal.",
+    dependencies=PROTECTED_ROUTE,
 )
 def get_market_insights(
     payload: dict[str, object] = Body(
@@ -1655,6 +1867,7 @@ def get_market_insights(
     tags=["10 Research"],
     summary="Analyze actual opportunity outcomes for adaptive setup guards",
     description="Shows which symbols, actions, setup types, day types, and time buckets have enough closed-trade evidence to trust or avoid.",
+    dependencies=PROTECTED_ROUTE,
 )
 def get_outcome_learning() -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("outcome_learning"):
@@ -1667,11 +1880,12 @@ def get_outcome_learning() -> dict[str, object]:
     tags=["10 Research"],
     summary="Analyze scanner opportunity outcomes by professional segments",
     description="Studies saved opportunities by CE/PE, expiry day, time bucket, score bucket, setup type, and failure tags.",
+    dependencies=PROTECTED_ROUTE,
 )
 def get_opportunity_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("opportunity_analytics"):
         return deferred
-    return opportunity_analytics_service.analyze(symbol=symbol, limit=limit)
+    return opportunity_analytics_service.analyze(symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000))
 
 
 @app.get(
@@ -1679,11 +1893,12 @@ def get_opportunity_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> d
     tags=["10 Research"],
     summary="Analyze paper/live execution quality and trade outcomes",
     description="Separates execution quality from signal quality: fill rate, entry deviation, CE/PE results, time bucket, and P&L metrics.",
+    dependencies=PROTECTED_ROUTE,
 )
 def get_execution_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("execution_analytics"):
         return deferred
-    return execution_analytics_service.analyze(symbol=symbol, limit=limit)
+    return execution_analytics_service.analyze(symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000))
 
 
 @app.get(
@@ -1691,11 +1906,12 @@ def get_execution_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dic
     tags=["10 Research"],
     summary="Professional Bank Nifty decision-quality insights",
     description="Combines accepted vs rejected analysis, time buckets, DTE, factor attribution, exits, data quality, and shadow/live evidence.",
+    dependencies=PROTECTED_ROUTE,
 )
 def get_professional_insights(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("professional_insights"):
         return deferred
-    return professional_insights_service.analyze(symbol=symbol, limit=limit)
+    return professional_insights_service.analyze(symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000))
 
 
 @app.get(
@@ -1706,11 +1922,12 @@ def get_professional_insights(symbol: str = "BANKNIFTY", limit: int = 1000) -> d
         "Shows filter rejection quality, missed rejected winners, accepted loss impact, and net expectancy "
         "by setup family, weekday, time block, DTE, IV regime, and trend regime. Read-only; does not alter strategy."
     ),
+    dependencies=PROTECTED_ROUTE,
 )
 def get_research_engine_report(symbol: str = "BANKNIFTY", limit: int = 2000) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("research_engine"):
         return deferred
-    return professional_insights_service.research_engine_report(symbol=symbol, limit=limit)
+    return professional_insights_service.research_engine_report(symbol=symbol, limit=_bounded_int(limit, 2000, maximum=5000))
 
 
 @app.get(
@@ -1721,6 +1938,7 @@ def get_research_engine_report(symbol: str = "BANKNIFTY", limit: int = 2000) -> 
         "Read-only threshold evidence report. It inventories configured thresholds and validates score buckets, "
         "rejection gates, setup families, time/regime segments, and score sensitivity without changing live strategy."
     ),
+    dependencies=PROTECTED_ROUTE,
 )
 def get_threshold_validation_report(
     symbol: str = "BANKNIFTY",
@@ -1736,7 +1954,7 @@ def get_threshold_validation_report(
     parsed_end = datetime.fromisoformat(end_date).date() if end_date else None
     return professional_insights_service.threshold_validation_report(
         symbol=symbol,
-        limit=limit,
+        limit=_bounded_int(limit, 3000, maximum=5000),
         start_date=parsed_start,
         end_date=parsed_end,
         setup_family=setup_family,
@@ -1748,11 +1966,12 @@ def get_threshold_validation_report(
     "/research/execution-realism",
     tags=["10 Research"],
     summary="Inspect conservative paper/backtest fill realism and execution drag",
+    dependencies=PROTECTED_ROUTE,
 )
 def get_execution_realism_report(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("execution_realism"):
         return deferred
-    return professional_insights_service.execution_realism_report(symbol=symbol, limit=limit)
+    return professional_insights_service.execution_realism_report(symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000))
 
 
 @app.get(
@@ -1760,12 +1979,13 @@ def get_execution_realism_report(symbol: str = "BANKNIFTY", limit: int = 1000) -
     tags=["10 Research"],
     summary="Daily Bank Nifty trading review",
     description="Shows the day's accepted setups, rejected setups, trades, outcomes, top rejection gates, and review timeline.",
+    dependencies=PROTECTED_ROUTE,
 )
 def get_daily_review(symbol: str = "BANKNIFTY", review_date: str | None = None, limit: int = 1000) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("daily_review"):
         return deferred
     parsed_date = datetime.fromisoformat(review_date).date() if review_date else None
-    return professional_insights_service.daily_review(symbol=symbol, review_date=parsed_date, limit=limit)
+    return professional_insights_service.daily_review(symbol=symbol, review_date=parsed_date, limit=_bounded_int(limit, 1000, maximum=3000))
 
 
 @app.get(
@@ -1773,6 +1993,7 @@ def get_daily_review(symbol: str = "BANKNIFTY", review_date: str | None = None, 
     tags=["10 Research"],
     summary="Minimal daily Bank Nifty evidence summary",
     description="Small paper/live-shadow evidence summary for one Bank Nifty session. This does not replay rejected trades or change strategy.",
+    dependencies=PROTECTED_ROUTE,
 )
 def get_daily_banknifty_summary(date: str | None = None) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("daily_banknifty_summary"):
@@ -1799,6 +2020,7 @@ def get_after_market_research_status() -> dict[str, object]:
         "Runs the after-market evidence job manually. By default it only runs after market close; pass "
         "`force=true` only when you deliberately want a manual research refresh."
     ),
+    dependencies=PROTECTED_ROUTE,
 )
 def run_after_market_research(
     payload: dict[str, object] | None = Body(
@@ -1807,6 +2029,7 @@ def run_after_market_research(
     )
 ) -> dict[str, object]:
     payload = payload or {}
+    _require_manual_override_for_market_heavy_operation(payload, "after-market research job")
     return after_market_research_service.run_once(trigger="manual", force=bool(payload.get("force", False)))
 
 
@@ -1814,17 +2037,19 @@ def run_after_market_research(
     "/research/trade-journal",
     tags=["10 Research"],
     summary="Unified opportunity, rejection, and trade timeline",
+    dependencies=PROTECTED_ROUTE,
 )
 def get_trade_journal(symbol: str = "BANKNIFTY", limit: int = 200) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("trade_journal"):
         return deferred
-    return professional_insights_service.trade_journal(symbol=symbol, limit=limit)
+    return professional_insights_service.trade_journal(symbol=symbol, limit=_bounded_int(limit, 200, maximum=1000))
 
 
 @app.get(
     "/research/data-completeness",
     tags=["10 Research"],
     summary="Inspect stored candle and option snapshot completeness",
+    dependencies=PROTECTED_ROUTE,
 )
 def get_data_completeness(symbol: str = "BANKNIFTY") -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("data_completeness"):
@@ -1836,11 +2061,12 @@ def get_data_completeness(symbol: str = "BANKNIFTY") -> dict[str, object]:
     "/research/shadow-comparison",
     tags=["10 Research"],
     summary="Compare shadow, paper, and live trade evidence",
+    dependencies=PROTECTED_ROUTE,
 )
 def get_shadow_comparison(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("shadow_comparison"):
         return deferred
-    return professional_insights_service.analyze(symbol=symbol, limit=limit)["shadow_mode_comparison"]
+    return professional_insights_service.analyze(symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000))["shadow_mode_comparison"]
 
 
 @app.get(
@@ -1848,6 +2074,7 @@ def get_shadow_comparison(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[
     tags=["10 Research"],
     summary="Combined professional-readiness report for Bank Nifty option buying",
     description="Combines option data coverage, opportunity outcomes, execution analytics, option backtest, ablation, and walk-forward validation.",
+    dependencies=PROTECTED_ROUTE,
 )
 def get_professional_readiness(
     symbol: str = "BANKNIFTY",
@@ -1857,7 +2084,7 @@ def get_professional_readiness(
 ) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("professional_readiness"):
         return deferred
-    return professional_readiness_service.report(symbol=symbol, timeframe=timeframe, direction=direction, limit=limit)
+    return professional_readiness_service.report(symbol=symbol, timeframe=timeframe, direction=direction, limit=_bounded_int(limit, 3000, maximum=5000))
 
 
 @app.post(
@@ -1865,6 +2092,7 @@ def get_professional_readiness(
     tags=["10 Research"],
     summary="Estimate IV and Greeks for an option",
     description="Use this to inspect whether a proposed option has usable delta, acceptable theta decay, and reasonable IV.",
+    dependencies=PROTECTED_ROUTE,
 )
 def estimate_greeks(
     payload: dict[str, object] = Body(
@@ -1897,6 +2125,7 @@ def estimate_greeks(
     tags=["10 Research"],
     summary="Score an option contract for buying quality",
     description="Applies the same option-quality gate used by the scanner: delta, theta, IV, expiry, spread, and premium noise.",
+    dependencies=PROTECTED_ROUTE,
 )
 def score_option_quality(
     payload: dict[str, object] = Body(
@@ -1961,6 +2190,7 @@ def score_option_quality(
         "Runs an underlying-candle rule replay. This improves scanner filters, but exact option P&L still needs "
         "historical option-chain quotes, bid/ask, IV, and Greeks snapshots."
     ),
+    dependencies=PROTECTED_ROUTE,
 )
 def run_research_backtest(
     payload: dict[str, object] = Body(
@@ -1976,7 +2206,8 @@ def run_research_backtest(
         ]
     ),
 ) -> dict[str, object]:
-    if deferred := _defer_review_analysis_during_market("backtest"):
+    _require_manual_override_for_market_heavy_operation(payload, "research backtest")
+    if deferred := _defer_review_analysis_during_market("backtest", manual_override=_manual_override_requested(payload)):
         return deferred
     try:
         return backtest_service.run(
@@ -1985,7 +2216,7 @@ def run_research_backtest(
             side=str(payload.get("side") or "BUY"),
             direction=str(payload.get("direction") or "BOTH"),
             horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
-            limit=int(payload.get("limit") or 2000),
+            limit=_bounded_int(payload.get("limit"), 2000, maximum=5000),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1996,6 +2227,7 @@ def run_research_backtest(
     tags=["10 Research"],
     summary="Replay strategy on historical option premium candles",
     description="Uses stored option OHLC candles to simulate real option entry, premium stop loss, target, slippage, and exits.",
+    dependencies=PROTECTED_ROUTE,
 )
 def run_option_premium_backtest(
     payload: dict[str, object] = Body(
@@ -2011,7 +2243,8 @@ def run_option_premium_backtest(
         ]
     ),
 ) -> dict[str, object]:
-    if deferred := _defer_review_analysis_during_market("option_premium_backtest"):
+    _require_manual_override_for_market_heavy_operation(payload, "option premium backtest")
+    if deferred := _defer_review_analysis_during_market("option_premium_backtest", manual_override=_manual_override_requested(payload)):
         return deferred
     try:
         return backtest_service.run_option_premium(
@@ -2019,7 +2252,7 @@ def run_option_premium_backtest(
             timeframe=str(payload.get("timeframe") or "5minute"),
             direction=str(payload.get("direction") or "BOTH"),
             horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
-            limit=int(payload.get("limit") or 3000),
+            limit=_bounded_int(payload.get("limit"), 3000, maximum=5000),
             decision_mode=str(payload.get("decision_mode") or "scanner_parity"),
         )
     except Exception as exc:
@@ -2031,6 +2264,7 @@ def run_option_premium_backtest(
     tags=["10 Research"],
     summary="Compare backtest performance with selected factors removed",
     description="Runs option-premium replay variants to identify which available factors improve or hurt net expectancy.",
+    dependencies=PROTECTED_ROUTE,
 )
 def run_ablation_backtest(
     payload: dict[str, object] = Body(
@@ -2045,7 +2279,8 @@ def run_ablation_backtest(
         ]
     ),
 ) -> dict[str, object]:
-    if deferred := _defer_review_analysis_during_market("ablation_backtest"):
+    _require_manual_override_for_market_heavy_operation(payload, "ablation backtest")
+    if deferred := _defer_review_analysis_during_market("ablation_backtest", manual_override=_manual_override_requested(payload)):
         return deferred
     try:
         return backtest_service.run_ablation(
@@ -2053,7 +2288,7 @@ def run_ablation_backtest(
             timeframe=str(payload.get("timeframe") or "5minute"),
             direction=str(payload.get("direction") or "BOTH"),
             horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
-            limit=int(payload.get("limit") or 1000),
+            limit=_bounded_int(payload.get("limit"), 1000, maximum=3000),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2064,6 +2299,7 @@ def run_ablation_backtest(
     tags=["10 Research"],
     summary="Run walk-forward option-premium validation",
     description="Splits historical data into train/test periods and validates out-of-sample option-premium performance.",
+    dependencies=PROTECTED_ROUTE,
 )
 def run_walk_forward_validation(
     payload: dict[str, object] = Body(
@@ -2079,7 +2315,8 @@ def run_walk_forward_validation(
         ]
     ),
 ) -> dict[str, object]:
-    if deferred := _defer_review_analysis_during_market("walk_forward"):
+    _require_manual_override_for_market_heavy_operation(payload, "walk-forward validation")
+    if deferred := _defer_review_analysis_during_market("walk_forward", manual_override=_manual_override_requested(payload)):
         return deferred
     try:
         return backtest_service.run_walk_forward(
@@ -2087,7 +2324,7 @@ def run_walk_forward_validation(
             timeframe=str(payload.get("timeframe") or "5minute"),
             direction=str(payload.get("direction") or "BOTH"),
             horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
-            limit=int(payload.get("limit") or 3000),
+            limit=_bounded_int(payload.get("limit"), 3000, maximum=5000),
             decision_mode=str(payload.get("decision_mode") or "scanner_parity"),
         )
     except Exception as exc:
@@ -2099,6 +2336,7 @@ def run_walk_forward_validation(
     tags=["10 Research"],
     summary="Validate and save measured strategy edge",
     description="Runs walk-forward validation, stores the result, and makes it available to the optional scanner edge guard.",
+    dependencies=PROTECTED_ROUTE,
 )
 def validate_strategy_edge(
     payload: dict[str, object] = Body(
@@ -2112,14 +2350,15 @@ def validate_strategy_edge(
         ]
     ),
 ) -> dict[str, object]:
-    if deferred := _defer_review_analysis_during_market("strategy_edge_validation"):
+    _require_manual_override_for_market_heavy_operation(payload, "strategy edge validation")
+    if deferred := _defer_review_analysis_during_market("strategy_edge_validation", manual_override=_manual_override_requested(payload)):
         return deferred
     try:
         return strategy_edge_service.validate(
             symbol=str(payload.get("symbol") or "NIFTY"),
             timeframe=str(payload.get("timeframe") or "5minute"),
             direction=str(payload.get("direction") or "BOTH"),
-            limit=int(payload.get("limit") or 3000),
+            limit=_bounded_int(payload.get("limit"), 3000, maximum=5000),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2136,6 +2375,7 @@ def list_strategy_edge(limit: int = 50) -> dict[str, object]:
     tags=["10 Research"],
     summary="Rank symbols and directions by measured walk-forward edge",
     description="Runs/saves strategy validations and returns the highest expectancy setups first.",
+    dependencies=PROTECTED_ROUTE,
 )
 def rank_strategy_edge(
     payload: dict[str, object] = Body(
@@ -2149,7 +2389,8 @@ def rank_strategy_edge(
         ]
     ),
 ) -> dict[str, object]:
-    if deferred := _defer_review_analysis_during_market("strategy_ranking"):
+    _require_manual_override_for_market_heavy_operation(payload, "strategy ranking")
+    if deferred := _defer_review_analysis_during_market("strategy_ranking", manual_override=_manual_override_requested(payload)):
         return deferred
     symbols = parse_symbol_list(payload.get("symbols"))
     direction_value = payload.get("directions") or "CALL,PUT"
@@ -2163,7 +2404,7 @@ def rank_strategy_edge(
                         symbol=symbol,
                         timeframe=str(payload.get("timeframe") or "5minute"),
                         direction=direction,
-                        limit=int(payload.get("limit") or 3000),
+                        limit=_bounded_int(payload.get("limit"), 3000, maximum=5000),
                     )
                 )
             except Exception as exc:
@@ -2185,6 +2426,7 @@ def rank_strategy_edge(
     tags=["10 Research"],
     summary="Import historical option quote snapshots",
     description="Stores historical option-chain quotes, IV, and Greeks snapshots in MySQL so exact option backtests can be built from real option history.",
+    dependencies=PROTECTED_ROUTE,
 )
 def import_option_history(
     payload: dict[str, object] = Body(
@@ -2215,7 +2457,8 @@ def import_option_history(
         ]
     ),
 ) -> dict[str, object]:
-    if deferred := _defer_review_analysis_during_market("option_history_import"):
+    _require_manual_override_for_market_heavy_operation(payload, "option history import")
+    if deferred := _defer_review_analysis_during_market("option_history_import", manual_override=_manual_override_requested(payload)):
         return deferred
     try:
         rows = payload.get("snapshots")
@@ -2397,18 +2640,25 @@ def _scanner_market_is_open() -> bool:
 
 def _current_market_session() -> str:
     now = ist_now_naive()
+    mode = market_session_service.current_runtime_mode(now)
+    if mode in {"MARKET_OPEN", "MARKET_CLOSING", "MANUAL_OVERRIDE"}:
+        return "REGULAR_MARKET"
+    if mode == "AFTER_MARKET_REVIEW":
+        return "AFTER_MARKET"
+    if mode == "HOLIDAY":
+        return "HOLIDAY"
+    if mode == "PRE_MARKET":
+        return "PRE_MARKET"
     if now.weekday() >= 5:
         return "WEEKEND"
-    market_open = _parse_market_time(settings.market_open_time)
-    market_close = _parse_market_time(settings.market_close_time)
-    if market_open <= now.time() <= market_close:
-        return "REGULAR_MARKET"
-    return "PRE_MARKET" if now.time() < market_open else "AFTER_MARKET"
+    if now.time() > _parse_market_time(settings.runtime_market_close_time):
+        return "AFTER_MARKET"
+    return "MARKET_CLOSED"
 
 
-def _defer_review_analysis_during_market(report: str) -> dict[str, object] | None:
+def _defer_review_analysis_during_market(report: str, *, manual_override: bool = False) -> dict[str, object] | None:
     session = _current_market_session()
-    if session != "REGULAR_MARKET":
+    if session != "REGULAR_MARKET" or manual_override:
         return None
     return {
         "status": "deferred",
@@ -2417,6 +2667,24 @@ def _defer_review_analysis_during_market(report: str) -> dict[str, object] | Non
         "report": report,
         "message": "Review and learning analysis is deferred until after market close to keep live trading responsive.",
     }
+
+
+def _require_manual_override_for_market_heavy_operation(payload: dict[str, object], operation: str) -> None:
+    if _current_market_session() != "REGULAR_MARKET":
+        return
+    if bool(payload.get("manual_override") or payload.get("force") or settings.runtime_manual_override):
+        return
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"{operation} is blocked during market hours to keep runtime responsive; "
+            "pass manual_override=true only for a deliberate manual refresh."
+        ),
+    )
+
+
+def _manual_override_requested(payload: dict[str, object]) -> bool:
+    return bool(payload.get("manual_override") or payload.get("force") or settings.runtime_manual_override)
 
 
 def _parse_market_time(value: str) -> time:
@@ -2477,6 +2745,7 @@ def get_scanner_armed_entries() -> dict[str, object]:
         "Paper order: send `confirm_live=false`. Live order requires `LIVE_TRADING_MODE=true`, "
         "`PAPER_TRADING_MODE=false`, and `confirm_live=true`."
     ),
+    dependencies=PROTECTED_ROUTE,
 )
 def place_order(
     payload: dict[str, object] = Body(
@@ -2554,7 +2823,12 @@ def trade_test_artifacts(limit: int = 100) -> dict[str, object]:
     return trade_repository.suspected_test_artifacts(limit=limit)
 
 
-@app.post("/trades/test-artifacts/quarantine", tags=["04 Orders"], summary="Quarantine suspected synthetic test rows in trades")
+@app.post(
+    "/trades/test-artifacts/quarantine",
+    tags=["04 Orders"],
+    summary="Quarantine suspected synthetic test rows in trades",
+    dependencies=PROTECTED_ROUTE,
+)
 def quarantine_trade_test_artifacts(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
     payload = payload or {}
     return trade_repository.quarantine_suspected_test_artifacts(
@@ -2563,7 +2837,12 @@ def quarantine_trade_test_artifacts(payload: dict[str, object] | None = Body(def
     )
 
 
-@app.post("/trades/{trade_id}/close", tags=["04 Orders"], summary="Manually close a lifecycle trade")
+@app.post(
+    "/trades/{trade_id}/close",
+    tags=["04 Orders"],
+    summary="Manually close a lifecycle trade",
+    dependencies=PROTECTED_ROUTE,
+)
 def close_trade(
     trade_id: int,
     payload: dict[str, object] = Body(examples=[{"outcome": "target_1", "exit_price": 115, "notes": "Manual paper exit"}]),
@@ -2586,16 +2865,26 @@ def close_trade(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/trades/sync", tags=["04 Orders"], summary="Sync open live trades with Kite order status")
+@app.post(
+    "/trades/sync",
+    tags=["04 Orders"],
+    summary="Sync open live trades with Kite order status",
+    dependencies=PROTECTED_ROUTE,
+)
 def sync_live_trades(payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100}])) -> dict[str, object]:
     payload = payload or {}
     try:
-        return broker_sync_service.sync_open_trades(limit=int(payload.get("limit") or 100))
+        return broker_sync_service.sync_open_trades(limit=_bounded_int(payload.get("limit"), 100, maximum=500))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/broker/reconcile", tags=["04 Orders"], summary="Run broker/local live position reconciliation")
+@app.post(
+    "/broker/reconcile",
+    tags=["04 Orders"],
+    summary="Run broker/local live position reconciliation",
+    dependencies=PROTECTED_ROUTE,
+)
 def reconcile_broker_positions() -> dict[str, object]:
     try:
         return broker_sync_service.reconcile_startup_positions()
@@ -2620,11 +2909,16 @@ def broker_emergency_protection_status() -> dict[str, object]:
     }
 
 
-@app.post("/trades/evaluate-exits", tags=["04 Orders"], summary="Auto square-off open trades at target or stop")
+@app.post(
+    "/trades/evaluate-exits",
+    tags=["04 Orders"],
+    summary="Auto square-off open trades at target or stop",
+    dependencies=PROTECTED_ROUTE,
+)
 def evaluate_trade_exits(payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100}])) -> dict[str, object]:
     payload = payload or {}
     try:
-        return trade_exit_service.evaluate_once(limit=int(payload.get("limit") or 100))
+        return trade_exit_service.evaluate_once(limit=_bounded_int(payload.get("limit"), 100, maximum=500))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -2640,6 +2934,7 @@ def send_test_alert(payload: dict[str, object] | None = Body(default=None, examp
     tags=["05 Auto Trader"],
     summary="Start continuous opportunity scanning",
     description="Starts scanner loop. By default it also starts outcome monitoring so saved opportunities are studied.",
+    dependencies=PROTECTED_ROUTE,
 )
 async def start_auto_trader(
     payload: dict[str, object] | None = Body(
@@ -2691,7 +2986,12 @@ async def start_auto_trader(
     }
 
 
-@app.post("/auto-trader/stop", tags=["05 Auto Trader"], summary="Stop continuous scanning")
+@app.post(
+    "/auto-trader/stop",
+    tags=["05 Auto Trader"],
+    summary="Stop continuous scanning",
+    dependencies=PROTECTED_ROUTE,
+)
 async def stop_auto_trader() -> dict[str, object]:
     return await auto_trader_service.stop()
 
@@ -3024,15 +3324,16 @@ def kite_auth() -> RedirectResponse:
 @app.get("/kite/health", tags=["02 Kite Login"], summary="Verify Kite profile access")
 def kite_health() -> dict[str, object]:
     try:
-        return _cached_dashboard_broker_call("kite_health", lambda: get_kite_provider().profile())
+        profile = _cached_dashboard_broker_call("kite_health", lambda: get_kite_provider().profile())
+        return {**profile, "auth": kite_auth_state.status()}
     except Exception as exc:
-        return {"status": "error", "message": str(exc)}
+        return {"status": "error", "message": str(exc), "auth": kite_auth_state.status()}
 
 
 @app.get("/kite/websocket/status", tags=["02 Kite Login"], summary="Inspect active Kite WebSocket price feed")
 def kite_websocket_status() -> dict[str, object]:
-    status = active_trade_price_feed.status()
-    status["banknifty_option_prewarm"] = banknifty_option_prewarm_service.status()
+    status = application_context.market_data_runtime_service.status()
+    status["kite_auth"] = kite_auth_state.status()
     if armed_entry_tracker_service is not None:
         status.update(armed_entry_tracker_service.status())
         status["armed_entry"] = armed_entry_tracker_service.list_entries()
@@ -3083,6 +3384,7 @@ def kite_callback(request_token: str | None = None, error: str | None = None):
         access_token = data.get("access_token")
         if access_token:
             save_access_token(access_token)
+            application_context.market_data_runtime_service.refresh_credentials(access_token=access_token)
             html = f"<h3>Login successful</h3><p>Access token saved.</p><p><a href=\"/\">Back to app</a></p>"
         else:
             html = f"<h3>Login completed but no access token returned.</h3><pre>{data}</pre>"
@@ -3111,6 +3413,7 @@ def kite_session(
         access_token = data.get("access_token")
         if access_token:
             save_access_token(access_token)
+            application_context.market_data_runtime_service.refresh_credentials(access_token=access_token)
         profile = kite_provider.profile()
         return {
             "status": "ok" if access_token else "missing-access-token",

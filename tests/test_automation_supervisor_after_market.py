@@ -1,6 +1,7 @@
 import unittest
 from datetime import datetime
 
+from app.config import settings
 from app.services.automation_supervisor_service import AutomationSupervisorService
 
 
@@ -102,6 +103,13 @@ class FixedClockAutomationSupervisor(AutomationSupervisorService):
 
 
 class AutomationSupervisorAfterMarketTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.original_stop_after_complete = settings.automation_stop_after_after_market_complete
+        object.__setattr__(settings, "automation_stop_after_after_market_complete", True)
+
+    def tearDown(self) -> None:
+        object.__setattr__(settings, "automation_stop_after_after_market_complete", self.original_stop_after_complete)
+
     def test_supervisor_runs_research_in_market_closed_branch(self) -> None:
         research = FakeAfterMarketResearchService()
         supervisor = FixedClockAutomationSupervisor(now=datetime(2026, 7, 3, 16, 0), after_market_research_service=research)
@@ -186,6 +194,24 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(research.calls, [])
         self.assertFalse(any(action.get("action") == "after_market_research" for action in result["actions"]))
+
+    def test_running_supervisor_stops_after_after_market_pipeline_completes(self) -> None:
+        research = FakeAfterMarketResearchService()
+        outcome = FakeOutcomeService()
+        supervisor = FixedClockAutomationSupervisor(
+            now=datetime(2026, 7, 3, 16, 0),
+            after_market_research_service=research,
+            outcome_service=outcome,
+        )
+        supervisor.running = True
+
+        result = supervisor.run_once({"symbols": "BANKNIFTY"})
+
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(supervisor.running)
+        self.assertTrue(
+            any(action.get("action") == "automation_stop_after_after_market_complete" for action in result["actions"])
+        )
 
 
 if __name__ == "__main__":

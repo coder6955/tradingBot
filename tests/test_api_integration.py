@@ -80,19 +80,22 @@ class SimpleAsgiClient:
     def __init__(self, app):
         self.app = app
 
-    def get(self, path: str) -> AsgiResponse:
-        return self.request("GET", path)
+    def get(self, path: str, headers: dict[str, str] | None = None) -> AsgiResponse:
+        return self.request("GET", path, headers=headers)
 
-    def post(self, path: str, json_body=None, json=None) -> AsgiResponse:
+    def post(self, path: str, json_body=None, json=None, headers: dict[str, str] | None = None) -> AsgiResponse:
         body_value = json if json is not None else json_body
-        return self.request("POST", path, json_body=body_value)
+        return self.request("POST", path, json_body=body_value, headers=headers)
 
-    def request(self, method: str, path: str, json_body=None) -> AsgiResponse:
-        return asyncio.run(self._request(method, path, json_body=json_body))
+    def request(self, method: str, path: str, json_body=None, headers: dict[str, str] | None = None) -> AsgiResponse:
+        return asyncio.run(self._request(method, path, json_body=json_body, headers=headers))
 
-    async def _request(self, method: str, path: str, json_body=None) -> AsgiResponse:
+    async def _request(self, method: str, path: str, json_body=None, headers: dict[str, str] | None = None) -> AsgiResponse:
         parsed = urlsplit(path)
         body = b"" if json_body is None else json.dumps(json_body).encode("utf-8")
+        request_headers = [(b"host", b"testserver"), (b"content-type", b"application/json")]
+        for key, value in (headers or {}).items():
+            request_headers.append((key.lower().encode("ascii"), value.encode("utf-8")))
         scope = {
             "type": "http",
             "http_version": "1.1",
@@ -101,7 +104,7 @@ class SimpleAsgiClient:
             "path": parsed.path,
             "raw_path": parsed.path.encode("ascii"),
             "query_string": parsed.query.encode("ascii"),
-            "headers": [(b"host", b"testserver"), (b"content-type", b"application/json")],
+            "headers": request_headers,
             "client": ("testclient", 50000),
             "server": ("testserver", 80),
         }
@@ -132,20 +135,72 @@ class ApiIntegrationTests(unittest.TestCase):
         self.client = SimpleAsgiClient(api.app)
         self.market_session_patcher = patch.object(api, "_current_market_session", return_value="AFTER_MARKET")
         self.market_session_patcher.start()
+        self._api_auth_token = api.settings.api_auth_token
+        self._api_auth_required = api.settings.api_auth_required
 
     def tearDown(self) -> None:
         self.market_session_patcher.stop()
+        object.__setattr__(api.settings, "api_auth_token", self._api_auth_token)
+        object.__setattr__(api.settings, "api_auth_required", self._api_auth_required)
         try:
             if os.path.exists(self.temp_db.name):
                 os.remove(self.temp_db.name)
         except PermissionError:
             pass
 
+    def _enable_api_auth(self) -> dict[str, str]:
+        object.__setattr__(api.settings, "api_auth_token", "test-token")
+        object.__setattr__(api.settings, "api_auth_required", True)
+        return {"Authorization": "Bearer test-token"}
+
     def test_health_endpoints(self) -> None:
         self.assertEqual(self.client.get("/health").status_code, 200)
         db = self.client.get("/db/health")
         self.assertEqual(db.status_code, 200)
         self.assertEqual(db.json()["status"], "ok")
+
+    def test_protected_endpoint_requires_api_auth_when_configured(self) -> None:
+        self._enable_api_auth()
+
+        unauthorized = self.client.post("/automation/start", json={"symbols": "BANKNIFTY"})
+        invalid = self.client.post("/automation/start", json={"symbols": "BANKNIFTY"}, headers={"X-API-Key": "wrong"})
+
+        self.assertEqual(unauthorized.status_code, 401)
+        self.assertEqual(invalid.status_code, 401)
+
+    def test_protected_endpoint_accepts_bearer_token(self) -> None:
+        headers = self._enable_api_auth()
+        with patch.object(api.automation_supervisor_service, "start", return_value={"running": True, "duplicate_start_prevented": False}):
+            response = self.client.post("/automation/start", json={"symbols": "BANKNIFTY"}, headers=headers)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["running"])
+
+    def test_auto_trader_status_does_not_evaluate_risk(self) -> None:
+        with patch.object(api.auto_trader_service.risk_management_service, "evaluate_entry", side_effect=AssertionError("risk evaluated")):
+            response = self.client.get("/auto-trader/status")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["risk"]["status"], "deferred")
+
+    def test_heavy_ingestion_blocked_during_market_without_manual_override(self) -> None:
+        headers = self._enable_api_auth()
+        self.market_session_patcher.stop()
+        self.market_session_patcher = patch.object(api, "_current_market_session", return_value="REGULAR_MARKET")
+        self.market_session_patcher.start()
+
+        blocked = self.client.post("/data/ingest/candles", json={"symbols": "BANKNIFTY"}, headers=headers)
+        self.assertEqual(blocked.status_code, 409)
+
+        with patch.object(api.data_ingestion_service, "ingest_candles", return_value={"status": "ok", "days": 365}) as ingest:
+            allowed = self.client.post(
+                "/data/ingest/candles",
+                json={"symbols": "BANKNIFTY", "days": 999, "manual_override": True},
+                headers=headers,
+            )
+
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(ingest.call_args.kwargs["days"], 365)
 
     def test_dashboard_renders_trader_cockpit_sections(self) -> None:
         response = self.client.get("/dashboard")
@@ -167,6 +222,8 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("/runtime/trading-config", html)
         self.assertIn("const DASHBOARD_REFRESH_MS = 15000;", html)
         self.assertIn("const DASHBOARD_BROKER_REFRESH_MS = 60000;", html)
+        self.assertIn("AbortController", html)
+        self.assertIn("timeoutMs=4500", html)
         self.assertIn("getJsonCached(\"margins\", \"/kite/margins\", DASHBOARD_BROKER_REFRESH_MS)", html)
         self.assertIn("getReviewJsonCached(\"learning\", \"/research/outcome-learning\"", html)
         self.assertIn("dashboard_skip", html)
@@ -204,6 +261,23 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertFalse(paper_payload["effective"]["automation"]["confirm_live"])
         self.assertFalse(paper_payload["effective"]["runtime_options"]["broker_emergency_sl"])
         self.assertFalse(paper_payload["required"]["settings_overrides"]["LIVE_TRADING_MODE"])
+
+    def test_runtime_trading_config_preview_shows_all_optional_choices(self) -> None:
+        preview = self.client.get("/runtime/trading-config/preview?mode=live")
+
+        self.assertEqual(preview.status_code, 200)
+        keys = {choice["key"] for choice in preview.json()["optional_choices"]}
+        self.assertEqual(keys, set(api.runtime_trading_config_service.OPTIONAL_DEFAULTS))
+
+    def test_runtime_status_is_lightweight_control_snapshot(self) -> None:
+        response = self.client.get("/runtime/status")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("session", payload)
+        self.assertIn("market_data_cache", payload)
+        self.assertIn("runtime_jobs", payload)
 
     def test_dashboard_decision_feed_shows_rejected_setup(self) -> None:
         RejectedOpportunityRepository().save_rejection(
@@ -498,6 +572,31 @@ class ApiIntegrationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("websocket_enabled", response.json())
+
+    def test_runtime_status_uses_websocket_status_keys(self) -> None:
+        with patch.object(
+            api.application_context.market_data_runtime_service,
+            "control_status",
+            return_value={
+                "state": "CONNECTED",
+                "reason": None,
+                "websocket_status": "CONNECTED",
+                "running": True,
+                "connected": True,
+                "market_session": "REGULAR_MARKET",
+                "duplicate_start_prevented_count": 0,
+                "reconnect_count": 1,
+                "disconnect_count": 0,
+                "last_error": None,
+            },
+        ):
+            response = self.client.get("/runtime/status")
+
+        self.assertEqual(response.status_code, 200)
+        websocket = response.json()["websocket"]
+        self.assertEqual(websocket["state"], "CONNECTED")
+        self.assertEqual(websocket["status"], "CONNECTED")
+        self.assertTrue(websocket["connected"])
 
     def test_strategy_version_registry_endpoints(self) -> None:
         current = self.client.get("/strategy/versions/current")

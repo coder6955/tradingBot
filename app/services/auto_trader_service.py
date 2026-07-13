@@ -99,7 +99,11 @@ class AutoTraderService:
             "mode": order_mode,
             "live_ordering_requires_confirm_live": True,
             "risk_limits_apply_to_order_mode": order_mode == "live",
-            "risk": self.risk_management_service.evaluate_entry(),
+            "risk": {
+                "status": "deferred",
+                "reason": "status_is_lightweight",
+                "detail": "Use /risk/status for an explicit broker/risk evaluation.",
+            },
         }
 
     async def _run(self) -> None:

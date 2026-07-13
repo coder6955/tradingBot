@@ -1,6 +1,9 @@
 import os
+import threading
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 
 from app.models import Signal
@@ -14,17 +17,23 @@ from app.services.trade_setup_service import OptionContract
 
 
 class CountingProvider:
-    def __init__(self, price: float = 121.0) -> None:
+    def __init__(self, price: float = 121.0, delay_seconds: float = 0.0) -> None:
         self.price = price
+        self.delay_seconds = delay_seconds
+        self.lock = threading.Lock()
         self.quote_count = 0
         self.instrument_count = 0
 
     def quote(self, instruments):
-        self.quote_count += 1
+        if self.delay_seconds:
+            time.sleep(self.delay_seconds)
+        with self.lock:
+            self.quote_count += 1
         return {instrument: {"last_price": self.price} for instrument in instruments}
 
     def instruments(self, exchange=None):
-        self.instrument_count += 1
+        with self.lock:
+            self.instrument_count += 1
         if exchange == "NSE":
             return [{"tradingsymbol": "NIFTY BANK", "name": "NIFTY BANK", "instrument_token": 260105}]
         return [{"tradingsymbol": "BANKNIFTY26JUL58000CE", "exchange": exchange or "NFO", "instrument_token": 123}]
@@ -66,6 +75,23 @@ class MarketDataCoordinatorTests(unittest.TestCase):
         self.assertEqual(first[0]["tradingsymbol"], "NIFTY BANK")
         self.assertEqual(second[0]["instrument_token"], 260105)
         self.assertEqual(coordinator.status()["instrument_cache_hits"], 1)
+
+    def test_concurrent_quote_requests_reuse_inflight_provider_call(self) -> None:
+        provider = CountingProvider(delay_seconds=0.05)
+        coordinator = MarketDataCoordinator(lambda: provider, quote_ttl_seconds=5)
+        instrument = "NFO:BANKNIFTY26JUL58000CE"
+        barrier = threading.Barrier(5)
+
+        def call_quote(_):
+            barrier.wait(timeout=2)
+            return coordinator.quote([instrument])
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(call_quote, range(5)))
+
+        self.assertTrue(all(result[instrument]["last_price"] == 121.0 for result in results))
+        self.assertEqual(provider.quote_count, 1)
+        self.assertGreaterEqual(coordinator.status()["quote_inflight_reused"], 1)
 
     def test_accepted_and_rejected_outcome_evaluation_share_quote_cache(self) -> None:
         provider = CountingProvider(price=121.0)

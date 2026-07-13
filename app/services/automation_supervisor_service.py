@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from app.config import settings
 from app.services.auto_trader_service import AutoTraderService
 from app.services.data_ingestion_service import DataIngestionService
+from app.services.market_session_service import MarketSessionService
 from app.services.notification_service import NotificationService
 from app.services.opportunity_outcome_service import OpportunityOutcomeService
 from app.services.option_snapshot_collector_service import OptionSnapshotCollectorService
@@ -27,6 +28,7 @@ class AutomationSupervisorService:
         risk_management_service: RiskManagementService,
         notification_service: NotificationService | None = None,
         after_market_research_service: Any | None = None,
+        market_session_service: MarketSessionService | None = None,
     ) -> None:
         self.data_ingestion_service = data_ingestion_service
         self.snapshot_collector_service = snapshot_collector_service
@@ -35,6 +37,7 @@ class AutomationSupervisorService:
         self.risk_management_service = risk_management_service
         self.notification_service = notification_service or NotificationService()
         self.after_market_research_service = after_market_research_service
+        self.market_session_service = market_session_service or MarketSessionService(clock=self._now)
         self.task: asyncio.Task[None] | None = None
         self.running = False
         self.config: dict[str, Any] = {}
@@ -46,9 +49,11 @@ class AutomationSupervisorService:
         self.last_bootstrap_result: dict[str, Any] = {}
         self.last_actions: list[dict[str, Any]] = []
         self.errors: list[dict[str, Any]] = []
+        self.duplicate_start_prevented_count = 0
 
     def start(self, config: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.running:
+            self.duplicate_start_prevented_count += 1
             return self.status()
         self.config = self._normalize_config(config or {})
         self.running = True
@@ -70,10 +75,13 @@ class AutomationSupervisorService:
         return self.status()
 
     def status(self) -> dict[str, Any]:
-        market_open = self._market_is_open()
+        now = self._now()
+        market_open = self._market_is_open(now)
         return {
             "running": self.running,
             "market_open": market_open,
+            "runtime_mode": self.market_session_service.current_runtime_mode(now),
+            "duplicate_start_prevented_count": self.duplicate_start_prevented_count,
             "config": self.config or self._normalize_config({}),
             "last_cycle_at": self.last_cycle_at,
             "last_bootstrap_date": self.last_bootstrap_date,
@@ -87,7 +95,7 @@ class AutomationSupervisorService:
                 "collector": self.snapshot_collector_service.status(),
                 "auto_trader": self.auto_trader_service.status(),
                 "outcome_monitor": self.outcome_service.status(),
-                "risk": self.risk_management_service.evaluate_entry(),
+                "risk": {"status": "deferred", "reason": "use /risk/status for explicit risk evaluation"},
                 "after_market_research": self.after_market_research_service.status() if self.after_market_research_service else {"enabled": False},
             },
         }
@@ -111,6 +119,15 @@ class AutomationSupervisorService:
                 self._evaluate_open_once_if_due(now, actions)
                 self._run_after_market_research_if_due(now, actions)
                 actions.append({"action": "market_closed", "status": "ok", "message": "intraday Kite scanning services are stopped outside market hours"})
+                if self._should_stop_after_after_market_complete(now, actions):
+                    self.running = False
+                    actions.append(
+                        {
+                            "action": "automation_stop_after_after_market_complete",
+                            "status": "ok",
+                            "reason": "after_market_pipeline_completed",
+                        }
+                    )
             self.last_actions.extend(actions)
             return {"status": "ok", "market_open": self._market_is_open(now), "actions": actions, "automation": self.status()}
         except Exception as exc:
@@ -120,7 +137,10 @@ class AutomationSupervisorService:
 
     async def _run(self) -> None:
         while self.running:
-            self.run_once()
+            if self._market_is_open(self._now()):
+                self.run_once()
+            else:
+                await asyncio.to_thread(self.run_once)
             await asyncio.sleep(30)
 
     def _bootstrap_daily_data(self) -> dict[str, Any]:
@@ -192,7 +212,7 @@ class AutomationSupervisorService:
             actions.append({"action": "evaluate_open_opportunities", "status": "error", "message": str(exc)})
 
     def _evaluate_open_once_if_due(self, now: datetime, actions: list[dict[str, Any]]) -> None:
-        market_close = self._parse_time(settings.market_close_time)
+        market_close = self._parse_time(settings.runtime_market_close_time)
         if now.weekday() >= 5 or now.time() <= market_close:
             actions.append({"action": "evaluate_open_opportunities", "status": "skipped", "reason": "market_not_closed_for_day"})
             return
@@ -208,10 +228,30 @@ class AutomationSupervisorService:
             return
         try:
             result = self.after_market_research_service.maybe_run_after_market(now)
-            if result.get("status") != "idle":
+            if result.get("status") != "idle" or result.get("reason") == "already_ran_today":
                 actions.append(result)
         except Exception as exc:
             actions.append({"action": "after_market_research", "status": "error", "message": str(exc)})
+
+    def _should_stop_after_after_market_complete(self, now: datetime, actions: list[dict[str, Any]]) -> bool:
+        if not self.running or not bool(settings.automation_stop_after_after_market_complete):
+            return False
+        market_close = self._parse_time(settings.runtime_market_close_time)
+        if now.weekday() >= 5 or now.time() <= market_close:
+            return False
+        if self.last_market_closed_evaluation_date != now.date().isoformat():
+            return False
+        for action in reversed(actions):
+            if action.get("action") != "after_market_research":
+                continue
+            status = str(action.get("status") or "")
+            reason = str(action.get("reason") or "")
+            return status in {"ok", "partial"} or reason == "already_ran_today"
+        try:
+            status = self.after_market_research_service.status() if self.after_market_research_service else {}
+        except Exception:
+            return False
+        return status.get("next_action") == "research_completed_for_today"
 
     async def _stop_intraday_services(self) -> None:
         if self.auto_trader_service.running:
@@ -238,17 +278,14 @@ class AutomationSupervisorService:
         return actions
 
     def _should_bootstrap_today(self, now: datetime) -> bool:
-        if now.weekday() >= 5:
+        if not self.market_session_service.is_market_day(now):
             return False
-        return self.last_bootstrap_date != now.date().isoformat()
+        if self.last_bootstrap_date == now.date().isoformat():
+            return False
+        return self.market_session_service.current_runtime_mode(now) in {"PRE_MARKET", "AFTER_MARKET_REVIEW"}
 
     def _market_is_open(self, now: datetime | None = None) -> bool:
-        now = now or self._now()
-        if now.weekday() >= 5:
-            return False
-        start = self._parse_time(settings.market_open_time)
-        end = self._parse_time(settings.market_close_time)
-        return start <= now.time() <= end
+        return self.market_session_service.should_run_live_modules(now or self._now())
 
     def _normalize_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         order_mode = str(payload.get("order_mode") or settings.default_order_mode or "paper").lower()

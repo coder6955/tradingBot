@@ -9,8 +9,10 @@ from threading import Event, RLock, Thread
 from typing import Any, Callable
 
 from app.config import settings
+from app.providers.kite_auth_state import is_kite_token_exception, kite_auth_state
 from app.providers.token_store import load_access_token
 from app.services.database import Candle, get_session
+from app.services.market_session_service import MarketSessionService
 from app.services.time_utils import ist_now_naive
 
 try:
@@ -63,6 +65,7 @@ class KiteWebSocketPriceFeed:
         tick_handler: Callable[[WebSocketTick], Any] | None = None,
         gap_handler: Callable[[dict[str, Any]], Any] | None = None,
         clock: Callable[[], datetime] | None = None,
+        market_session_service: MarketSessionService | None = None,
     ) -> None:
         self.api_key = api_key or settings.kite_api_key
         self.access_token = access_token or load_access_token() or settings.kite_access_token
@@ -71,6 +74,7 @@ class KiteWebSocketPriceFeed:
         self.tick_handler = tick_handler
         self.gap_handler = gap_handler
         self.clock = clock or ist_now_naive
+        self.market_session_service = market_session_service or MarketSessionService(clock=self.clock)
         self._ticker: Any | None = None
         self._ticks: dict[int, WebSocketTick] = {}
         self._subscribed_tokens: set[int] = set()
@@ -127,9 +131,17 @@ class KiteWebSocketPriceFeed:
     def start(self) -> dict[str, Any]:
         with self._start_stop_lock:
             self.cleanup_old_persisted_candles()
+            self.refresh_credentials()
             if not settings.enable_kite_websocket:
                 self.websocket_status = "DISABLED"
                 return {"started": False, "reason": "websocket_disabled"}
+            if kite_auth_state.relogin_required:
+                self.running = False
+                self.connected = False
+                self.websocket_status = "AUTH_FAILED"
+                self.reconnect_skipped_reason = "auth_failed"
+                self.last_error = "kite_relogin_required"
+                return {"started": False, "reason": "kite_relogin_required", "relogin_required": True}
             session = self.market_session()
             if session != "REGULAR_MARKET":
                 self.running = False
@@ -146,6 +158,7 @@ class KiteWebSocketPriceFeed:
             if not self.api_key or not self.access_token:
                 self.last_error = "missing_kite_api_key_or_access_token"
                 self.websocket_status = "AUTH_FAILED"
+                kite_auth_state.mark_auth_failed(self.last_error)
                 logger.warning("Kite WebSocket not started: %s", self.last_error)
                 return {"started": False, "reason": self.last_error}
             factory = self.ticker_factory or KiteTicker
@@ -169,13 +182,29 @@ class KiteWebSocketPriceFeed:
                 self.connected = False
                 self.last_error = str(exc)
                 self.last_error_reason = str(exc)
-                self.websocket_status = "AUTH_FAILED" if self._is_auth_failure(None, str(exc)) else "ERROR"
+                self.websocket_status = "AUTH_FAILED" if self._is_auth_failure(None, str(exc), exc=exc) else "ERROR"
                 self.reconnect_skipped_reason = "auth_failed" if self.websocket_status == "AUTH_FAILED" else None
+                if self.websocket_status == "AUTH_FAILED":
+                    kite_auth_state.mark_auth_failed(str(exc))
                 self._stop_workers()
                 logger.exception("Kite WebSocket connect failed")
                 return {"started": False, "reason": self.last_error}
             logger.info("Kite WebSocket start requested")
             return {"started": True}
+
+    def refresh_credentials(self, *, access_token: str | None = None) -> None:
+        """Refresh credentials from the token store before creating a ticker."""
+        self.api_key = settings.kite_api_key
+        latest_token = access_token or load_access_token() or settings.kite_access_token
+        if latest_token and latest_token != self.access_token:
+            logger.info("Kite WebSocket access token refreshed")
+        self.access_token = latest_token
+        if latest_token and self.websocket_status == "AUTH_FAILED":
+            kite_auth_state.clear()
+            self.websocket_status = "DISCONNECTED"
+            self.last_error = None
+            self.last_error_reason = None
+            self.reconnect_skipped_reason = None
 
     def stop(self) -> dict[str, Any]:
         with self._start_stop_lock:
@@ -264,6 +293,7 @@ class KiteWebSocketPriceFeed:
             return {
                 "websocket_enabled": settings.enable_kite_websocket,
                 "websocket_status": status_label,
+                "relogin_required": kite_auth_state.relogin_required,
                 "market_session": session,
                 "websocket_connected": self.connected,
                 "running": self.running,
@@ -397,6 +427,7 @@ class KiteWebSocketPriceFeed:
             self.websocket_status = "AUTH_FAILED"
             self.reconnect_skipped_reason = "auth_failed"
             self.last_error = reason or f"closed:{code}"
+            kite_auth_state.mark_auth_failed(self.last_error)
             self._signal_workers_to_stop()
             logger.error("Kite WebSocket authentication failed; Kite re-login required: code=%s reason=%s", code, reason)
             return
@@ -432,6 +463,7 @@ class KiteWebSocketPriceFeed:
             self.running = False
             self.websocket_status = "AUTH_FAILED"
             self.reconnect_skipped_reason = "auth_failed"
+            kite_auth_state.mark_auth_failed(self.last_error)
             self._signal_workers_to_stop()
             logger.error("Kite WebSocket authentication failed; Kite re-login required: code=%s reason=%s", code, reason)
             return
@@ -695,7 +727,9 @@ class KiteWebSocketPriceFeed:
                     recorded["backfill_status"] = status
                     break
 
-    def _is_auth_failure(self, code: int | None, reason: str | None) -> bool:
+    def _is_auth_failure(self, code: int | None, reason: str | None, *, exc: BaseException | None = None) -> bool:
+        if exc is not None and is_kite_token_exception(exc):
+            return True
         if code in {401, 403}:
             return True
         text = str(reason or "").lower()
@@ -1234,14 +1268,19 @@ class KiteWebSocketPriceFeed:
         return round(max(0.0, (self._now() - self.connected_at).total_seconds()), 3)
 
     def market_session(self, now: datetime | None = None) -> str:
-        now = (now or self._now()).replace(tzinfo=None)
-        if now.weekday() >= 5:
-            return "WEEKEND"
-        start = self._parse_time(settings.market_open_time)
-        end = self._parse_time(settings.market_close_time)
-        if start <= now.time() <= end:
+        current = (now or self._now()).replace(tzinfo=None)
+        mode = self.market_session_service.current_runtime_mode(current)
+        if mode in {"MARKET_OPEN", "MARKET_CLOSING", "MANUAL_OVERRIDE"}:
             return "REGULAR_MARKET"
-        return "PRE_MARKET" if now.time() < start else "AFTER_MARKET"
+        if mode == "PRE_MARKET":
+            return "PRE_MARKET"
+        if mode == "HOLIDAY":
+            return "HOLIDAY"
+        if current.weekday() >= 5:
+            return "WEEKEND"
+        if current.time() > self._parse_time(settings.runtime_market_close_time):
+            return "AFTER_MARKET"
+        return "MARKET_CLOSED"
 
     def _now(self) -> datetime:
         return self.clock().replace(tzinfo=None)
