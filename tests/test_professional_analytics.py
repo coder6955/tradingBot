@@ -176,6 +176,29 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
         self.assertEqual(gate["unresolved"], 1)
         self.assertEqual(gate["avg_minutes_to_outcome"], 3.33)
 
+    def test_gate_effectiveness_summary_only_avoids_full_comparison_payload(self) -> None:
+        rejected_repo = RejectedOpportunityRepository()
+        rejected = rejected_repo.save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=78,
+            reasons=["premium confirmation failed"],
+            contract=SimpleNamespace(tradingsymbol="BANKNIFTY26JUL58000CE", exchange="NFO", expiry="2026-07-26", strike=58000, option_type="CE"),
+            factor_scores={"prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}},
+            market_session="REGULAR_MARKET",
+            learning_eligible=True,
+        )
+        rejected_repo.mark_later_outcome(rejected.id, outcome="would_have_hit_stop_loss", exit_price=80)
+
+        result = ProfessionalInsightsService().gate_effectiveness_report(symbol="BANKNIFTY", limit=100, summary_only=True, top_n=1)
+
+        self.assertTrue(result["summary_only"])
+        self.assertEqual(len(result["gates"]), 1)
+        self.assertEqual(result["rejected_summary"]["saved_losers"], 1)
+        self.assertNotIn("accepted_vs_rejected", result)
+        self.assertNotIn("comparison", result)
+
     def test_research_engine_report_ranks_filters_and_segments_expectancy(self) -> None:
         opportunity_repo = OpportunityRepository()
         rejected_repo = RejectedOpportunityRepository()

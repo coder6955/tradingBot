@@ -66,6 +66,11 @@ class FakeInsightsService:
         return {"status": "ok", "symbol": symbol, "date": review_date.isoformat(), "limit": limit}
 
 
+class PartiallyFailingInsightsService(FakeInsightsService):
+    def research_engine_report(self, *, symbol="BANKNIFTY", limit=3000):
+        raise RuntimeError("research engine unavailable")
+
+
 class FakeDataIngestionService:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -212,6 +217,57 @@ class AfterMarketResearchServiceTests(unittest.TestCase):
         self.assertEqual(rejected.calls, ["replay"])
         replay = result["reports"]["rejected_outcome_replay"]["result"]
         self.assertEqual(replay["data_ingestion_calls_before_replay"], ["targeted_backfill", "coverage"])
+
+    def test_restart_after_partial_after_market_pipeline_does_not_repeat_heavy_stages(self) -> None:
+        job_repository = FakeJobRepository()
+        data_ingestion = FakeDataIngestionService()
+        first = AfterMarketResearchService(
+            backtest_service=FakeBacktestService(),
+            professional_insights_service=PartiallyFailingInsightsService(),
+            data_ingestion_service=data_ingestion,
+            clock=lambda: datetime(2026, 7, 3, 16, 0),
+            job_repository=job_repository,
+        )
+
+        first_result = first.maybe_run_after_market()
+        restarted = AfterMarketResearchService(
+            backtest_service=FakeBacktestService(),
+            professional_insights_service=FakeInsightsService(),
+            data_ingestion_service=data_ingestion,
+            clock=lambda: datetime(2026, 7, 3, 17, 0),
+            job_repository=job_repository,
+        )
+        second_result = restarted.maybe_run_after_market()
+
+        self.assertEqual(first_result["status"], "partial")
+        self.assertEqual(job_repository.latest(job_name=AfterMarketResearchService.JOB_NAME, trading_date="2026-07-03")["status"], "partial")
+        self.assertEqual(second_result["status"], "idle")
+        self.assertEqual(second_result["reason"], "already_ran_today")
+        self.assertEqual(data_ingestion.calls, ["targeted_backfill", "coverage"])
+
+    def test_manual_force_can_rerun_after_completed_pipeline(self) -> None:
+        job_repository = FakeJobRepository()
+        data_ingestion = FakeDataIngestionService()
+        first = AfterMarketResearchService(
+            backtest_service=FakeBacktestService(),
+            professional_insights_service=FakeInsightsService(),
+            data_ingestion_service=data_ingestion,
+            clock=lambda: datetime(2026, 7, 3, 16, 0),
+            job_repository=job_repository,
+        )
+        first.maybe_run_after_market()
+        forced = AfterMarketResearchService(
+            backtest_service=FakeBacktestService(),
+            professional_insights_service=FakeInsightsService(),
+            data_ingestion_service=data_ingestion,
+            clock=lambda: datetime(2026, 7, 3, 17, 0),
+            job_repository=job_repository,
+        )
+
+        result = forced.run_once(trigger="manual", force=True)
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(data_ingestion.calls, ["targeted_backfill", "coverage", "targeted_backfill", "coverage"])
 
     def _service(self, backtest: FakeBacktestService, now: datetime) -> AfterMarketResearchService:
         return AfterMarketResearchService(

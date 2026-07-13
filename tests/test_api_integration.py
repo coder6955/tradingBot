@@ -140,6 +140,7 @@ class ApiIntegrationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.market_session_patcher.stop()
+        api._research_report_cache.clear()
         object.__setattr__(api.settings, "api_auth_token", self._api_auth_token)
         object.__setattr__(api.settings, "api_auth_required", self._api_auth_required)
         try:
@@ -226,6 +227,7 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("timeoutMs=4500", html)
         self.assertIn("getJsonCached(\"margins\", \"/kite/margins\", DASHBOARD_BROKER_REFRESH_MS)", html)
         self.assertIn("getReviewJsonCached(\"learning\", \"/research/outcome-learning\"", html)
+        self.assertIn("/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300", html)
         self.assertIn("dashboard_skip", html)
 
     def test_runtime_trading_config_switches_live_and_paper_modes(self) -> None:
@@ -532,6 +534,27 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("filter_rejection_quality", payload)
         self.assertIn("accepted_trade_loss_impact", payload)
         self.assertIn("segment_expectancy", payload)
+
+    def test_gate_effectiveness_endpoint_uses_summary_cache(self) -> None:
+        api._research_report_cache.clear()
+        report = {
+            "status": "ok",
+            "summary_only": True,
+            "rejected_summary": {"reviewed": 1},
+            "gates": [{"gate_or_reason": "premium_confirmation_failed"}],
+        }
+        with patch.object(api.professional_insights_service, "gate_effectiveness_report", return_value=report) as gate_report:
+            first = self.client.get("/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300")
+            second = self.client.get("/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertFalse(first.json()["cache_hit"])
+        self.assertTrue(second.json()["cache_hit"])
+        self.assertEqual(gate_report.call_count, 1)
+        self.assertTrue(gate_report.call_args.kwargs["summary_only"])
+        self.assertEqual(gate_report.call_args.kwargs["limit"], 500)
+        self.assertEqual(gate_report.call_args.kwargs["top_n"], 12)
 
     def test_threshold_validation_endpoint(self) -> None:
         response = self.client.get("/research/threshold-validation?symbol=BANKNIFTY&limit=10&mode=all")

@@ -561,6 +561,7 @@ class DataIngestionService:
     ) -> dict[str, Any]:
         provider = self.kite_provider_factory()
         market_start, market_close = self._market_day_window(now.date())
+        market_start = datetime.combine(now.date(), self._parse_time(settings.live_option_candle_backfill_session_start_time))
         live_end = min(now.replace(second=0, microsecond=0), market_close)
         if live_end < market_start:
             return {"status": "skipped", "reason": "outside_market_window"}
@@ -571,6 +572,7 @@ class DataIngestionService:
         fetched_total = 0
         batch_size = max(1, int(batch_limit or 1))
         delay = max(0.0, float(delay_seconds))
+        max_historical_calls = max(1, int(settings.live_option_candle_backfill_max_historical_calls_per_run))
         for idx, contract in enumerate(contracts, start=1):
             token = self._safe_int(contract.get("instrument_token"))
             tradingsymbol = str(contract.get("tradingsymbol") or "").upper()
@@ -598,16 +600,19 @@ class DataIngestionService:
                 if cooldown is not None:
                     contract_result["timeframes"][timeframe] = {**backfill_window, "status": "skipped", "reason": "recently_attempted", "cooldown_seconds_remaining": cooldown}
                     continue
+                if attempted >= max_historical_calls:
+                    contract_result["timeframes"][timeframe] = {**backfill_window, "status": "skipped", "reason": "historical_call_limit_reached", "historical_call_limit": max_historical_calls}
+                    continue
                 try:
                     start = self._parse_optional_datetime(backfill_window.get("from"))
                     end = self._parse_optional_datetime(backfill_window.get("to"))
                     if start is None or end is None or end < start:
                         contract_result["timeframes"][timeframe] = {**backfill_window, "status": "skipped", "reason": "invalid_backfill_window"}
                         continue
+                    attempted += 1
                     fetched = provider.historical_data(int(token), start, end, timeframe)
                     candles = [self._kite_candle_to_row(item) for item in fetched]
                     inserted = self.market_data_service.save_candles(tradingsymbol, timeframe, candles)
-                    attempted += 1
                     inserted_total += int(inserted)
                     fetched_total += len(candles)
                     self._live_backfill_last_attempts[(tradingsymbol, timeframe)] = now
@@ -629,6 +634,8 @@ class DataIngestionService:
             "reason": reason,
             "timeframes": timeframes,
             "lookback_minutes": lookback_minutes,
+            "market_open_on_first_seen": settings.live_option_candle_backfill_market_open_on_first_seen,
+            "historical_call_limit": max_historical_calls,
             "contracts_found": len(contracts),
             "contracts_attempted": len([row for row in results if row.get("status") in {"ok", "partial"}]),
             "historical_calls": attempted,
@@ -648,12 +655,20 @@ class DataIngestionService:
         lookback_minutes: int,
     ) -> dict[str, Any]:
         minutes = self._timeframe_minutes(timeframe)
-        latest = self._latest_contract_candle_timestamp(tradingsymbol=tradingsymbol, instrument_token=instrument_token, timeframe=timeframe)
-        earliest = max(market_start, now - timedelta(minutes=max(1, lookback_minutes)))
-        if latest is None:
-            start = earliest
+        first_candle, latest = self._contract_candle_bounds(tradingsymbol=tradingsymbol, instrument_token=instrument_token, timeframe=timeframe)
+        earliest_allowed = max(market_start, now - timedelta(minutes=max(1, lookback_minutes)))
+        market_open_first_seen = bool(settings.live_option_candle_backfill_market_open_on_first_seen)
+        start_policy = "lookback_window"
+        if market_open_first_seen and latest is None:
+            start = market_start
+            start_policy = "market_open_first_seen"
+        elif market_open_first_seen and first_candle is not None and first_candle > market_start + timedelta(minutes=minutes):
+            start = market_start
+            start_policy = "market_open_missing_prefix"
+        elif latest is None:
+            start = earliest_allowed
         else:
-            start = max(earliest, latest.replace(second=0, microsecond=0) + timedelta(minutes=minutes))
+            start = max(earliest_allowed, latest.replace(second=0, microsecond=0) + timedelta(minutes=minutes))
         end = now - timedelta(minutes=minutes)
         end = self._floor_to_timeframe(end, timeframe)
         if end < start:
@@ -662,10 +677,13 @@ class DataIngestionService:
                 "status": "skipped",
                 "reason": "no_missing_closed_candles",
                 "latest_candle": latest.isoformat(sep=" ") if latest else None,
+                "earliest_candle": first_candle.isoformat(sep=" ") if first_candle else None,
+                "start_policy": start_policy,
                 "from": start.isoformat(sep=" "),
                 "to": end.isoformat(sep=" "),
             }
-        gap_seconds = (end - (latest or market_start)).total_seconds() if latest else (end - start).total_seconds() + (minutes * 60)
+        gap_anchor = market_start if start_policy.startswith("market_open") else (latest or start)
+        gap_seconds = (end - gap_anchor).total_seconds() + (minutes * 60 if latest is None or start_policy.startswith("market_open") else 0)
         if gap_seconds < settings.live_option_candle_backfill_min_gap_seconds:
             return {
                 "needed": False,
@@ -673,6 +691,8 @@ class DataIngestionService:
                 "reason": "gap_below_threshold",
                 "gap_seconds": round(max(0.0, gap_seconds), 3),
                 "latest_candle": latest.isoformat(sep=" ") if latest else None,
+                "earliest_candle": first_candle.isoformat(sep=" ") if first_candle else None,
+                "start_policy": start_policy,
                 "from": start.isoformat(sep=" "),
                 "to": end.isoformat(sep=" "),
             }
@@ -680,6 +700,8 @@ class DataIngestionService:
             "needed": True,
             "gap_seconds": round(max(0.0, gap_seconds), 3),
             "latest_candle": latest.isoformat(sep=" ") if latest else None,
+            "earliest_candle": first_candle.isoformat(sep=" ") if first_candle else None,
+            "start_policy": start_policy,
             "from": start.isoformat(sep=" "),
             "to": end.isoformat(sep=" "),
         }
@@ -699,19 +721,32 @@ class DataIngestionService:
         return int(round(cooldown - elapsed))
 
     def _latest_contract_candle_timestamp(self, *, tradingsymbol: str, instrument_token: int | None, timeframe: str) -> datetime | None:
+        _, latest = self._contract_candle_bounds(tradingsymbol=tradingsymbol, instrument_token=instrument_token, timeframe=timeframe)
+        return latest
+
+    def _contract_candle_bounds(self, *, tradingsymbol: str, instrument_token: int | None, timeframe: str) -> tuple[datetime | None, datetime | None]:
         symbols = [tradingsymbol.upper()]
         if instrument_token is not None:
             symbols.append(f"{settings.websocket_candle_storage_prefix}:{int(instrument_token)}".upper())
         session = get_session()
         try:
-            row = (
+            first_row = (
+                session.query(Candle.timestamp)
+                .filter(Candle.symbol.in_(symbols))
+                .filter(Candle.timeframe == timeframe)
+                .order_by(Candle.timestamp.asc())
+                .first()
+            )
+            last_row = (
                 session.query(Candle.timestamp)
                 .filter(Candle.symbol.in_(symbols))
                 .filter(Candle.timeframe == timeframe)
                 .order_by(Candle.timestamp.desc())
                 .first()
             )
-            return row[0].replace(tzinfo=None) if row else None
+            first = first_row[0].replace(tzinfo=None) if first_row else None
+            last = last_row[0].replace(tzinfo=None) if last_row else None
+            return first, last
         finally:
             session.close()
 

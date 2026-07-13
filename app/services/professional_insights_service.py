@@ -321,13 +321,34 @@ class ProfessionalInsightsService:
             ],
         }
 
-    def gate_effectiveness_report(self, *, symbol: str | None = "BANKNIFTY", limit: int = 3000) -> dict[str, Any]:
+    def gate_effectiveness_report(
+        self,
+        *,
+        symbol: str | None = "BANKNIFTY",
+        limit: int = 3000,
+        summary_only: bool = False,
+        top_n: int | None = None,
+    ) -> dict[str, Any]:
+        if summary_only:
+            rejections = self._load_rejections(symbol=symbol, limit=limit)
+            eligible = self._learning_eligible_rejections(rejections)
+            gates = self._gate_effectiveness_rows(eligible)
+            if top_n is not None:
+                gates = gates[: max(1, int(top_n))]
+            return {
+                "status": "ok",
+                "symbol": symbol.upper() if symbol else "ALL",
+                "limit": limit,
+                "summary_only": True,
+                "rejected_summary": self._rejected_quality_summary(eligible),
+                "gates": gates,
+            }
         opportunities, rejections, trades = self._load(symbol=symbol, limit=limit)
         eligible = self._learning_eligible_rejections(rejections)
         accepted_rows: list[Any] = [row for row in trades if str(row.status or "").lower() == "closed"]
         if not accepted_rows:
             accepted_rows = [row for row in opportunities if str(row.status or "").lower() == "closed"]
-        return {
+        result = {
             "status": "ok",
             "symbol": symbol.upper() if symbol else "ALL",
             "limit": limit,
@@ -337,6 +358,9 @@ class ProfessionalInsightsService:
             "accepted_vs_rejected": self._accepted_vs_rejected(opportunities, eligible),
             "comparison": self._accepted_rejected_comparison(accepted_rows, eligible),
         }
+        if top_n is not None:
+            result["gates"] = result["gates"][: max(1, int(top_n))]
+        return result
 
     def trade_journal(self, *, symbol: str | None = "BANKNIFTY", limit: int = 200) -> dict[str, Any]:
         opportunities, rejections, trades = self._load(symbol=symbol, limit=limit)
@@ -408,6 +432,16 @@ class ProfessionalInsightsService:
                 rejection_query = rejection_query.filter(RejectedOpportunityRecord.symbol == symbol_value)
                 trade_query = trade_query.filter(TradeRecord.symbol == symbol_value)
             return opportunity_query.limit(limit).all(), rejection_query.limit(limit).all(), trade_query.limit(limit).all()
+        finally:
+            session.close()
+
+    def _load_rejections(self, *, symbol: str | None, limit: int) -> list[RejectedOpportunityRecord]:
+        session = get_session()
+        try:
+            query = session.query(RejectedOpportunityRecord).order_by(RejectedOpportunityRecord.id.desc())
+            if symbol:
+                query = query.filter(RejectedOpportunityRecord.symbol == symbol.upper())
+            return query.limit(limit).all()
         finally:
             session.close()
 

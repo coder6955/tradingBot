@@ -193,6 +193,9 @@ class Settings:
     live_option_candle_backfill_max_contracts: int = int(os.getenv("LIVE_OPTION_CANDLE_BACKFILL_MAX_CONTRACTS", "20"))
     live_option_candle_backfill_batch_limit: int = int(os.getenv("LIVE_OPTION_CANDLE_BACKFILL_BATCH_LIMIT", "10"))
     live_option_candle_backfill_delay_seconds: float = float(os.getenv("LIVE_OPTION_CANDLE_BACKFILL_DELAY_SECONDS", "0.2"))
+    live_option_candle_backfill_market_open_on_first_seen: bool = os.getenv("LIVE_OPTION_CANDLE_BACKFILL_MARKET_OPEN_ON_FIRST_SEEN", "true").lower() == "true"
+    live_option_candle_backfill_session_start_time: str = os.getenv("LIVE_OPTION_CANDLE_BACKFILL_SESSION_START_TIME", "09:15")
+    live_option_candle_backfill_max_historical_calls_per_run: int = int(os.getenv("LIVE_OPTION_CANDLE_BACKFILL_MAX_HISTORICAL_CALLS_PER_RUN", "6"))
     enable_on_demand_premium_candle_backfill: bool = os.getenv("ENABLE_ON_DEMAND_PREMIUM_CANDLE_BACKFILL", "true").lower() == "true"
     on_demand_premium_candle_backfill_cooldown_seconds: int = int(os.getenv("ON_DEMAND_PREMIUM_CANDLE_BACKFILL_COOLDOWN_SECONDS", "120"))
     enforce_execution_quality: bool = os.getenv("ENFORCE_EXECUTION_QUALITY", "true").lower() == "true"

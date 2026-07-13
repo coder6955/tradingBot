@@ -5,7 +5,7 @@ import threading
 import time as time_module
 from dataclasses import asdict
 from datetime import datetime, time
-from typing import Callable
+from typing import Any, Callable
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
 from sqlalchemy import text
@@ -84,6 +84,8 @@ Safety note: signals are probability-ranked trade setups, not guaranteed-profit 
 """
 
 logger = logging.getLogger(__name__)
+_research_report_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_research_report_cache_lock = threading.Lock()
 
 OPENAPI_TAGS = [
     {"name": "01 System", "description": "Start here: app health, DB health, and workflow overview."},
@@ -164,6 +166,31 @@ def _bounded_int(value: object, default: int, *, minimum: int = 1, maximum: int 
     except (TypeError, ValueError):
         parsed = default
     return max(minimum, min(parsed, maximum))
+
+
+def _cached_research_report(
+    key: tuple[Any, ...],
+    *,
+    cache_seconds: int,
+    builder: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    ttl = max(0, min(int(cache_seconds or 0), 900))
+    if ttl <= 0:
+        result = builder()
+        result["cache_hit"] = False
+        return result
+    now = time_module.monotonic()
+    with _research_report_cache_lock:
+        cached = _research_report_cache.get(key)
+        if cached and now - cached[0] <= ttl:
+            result = dict(cached[1])
+            result["cache_hit"] = True
+            return result
+    result = builder()
+    result["cache_hit"] = False
+    with _research_report_cache_lock:
+        _research_report_cache[key] = (now, dict(result))
+    return result
 
 
 market_data_service = MarketDataService()
@@ -1061,11 +1088,11 @@ function loadControls(config, runtime) {
   window.controlsLoaded = true;
 }
 async function refreshAll() {
-  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, runtimeConfig, collector, ingest, websocket, cache, decisionFeed, afterMarketResearch, gateEffectiveness] = await Promise.allSettled([
+  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, runtimeConfig, collector, ingest, websocket, cache, decisionFeed, afterMarketResearch, gateEffectiveness, optionCandleCoverage] = await Promise.allSettled([
     getJson("/health"), getJson("/db/health"), getJsonCached("kiteHealth", "/kite/health", DASHBOARD_BROKER_REFRESH_MS), getJson("/auto-trader/status"), getJson("/opportunity-monitor/status"),
     getJson("/opportunities/performance"), getJson("/auto-trader/latest"), getJsonCached("journal", "/opportunities?limit=50", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("failures", "/opportunities/failure-analysis", DASHBOARD_SLOW_REFRESH_MS),
     getReviewJsonCached("learning", "/research/outcome-learning", DASHBOARD_SLOW_REFRESH_MS), getJson("/auto-trader/executions"), getJson("/paper/trades"), getJsonCached("margins", "/kite/margins", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("positions", "/kite/positions", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("risk", "/risk/status", DASHBOARD_BROKER_REFRESH_MS), getJson("/trades?limit=50"),
-    getJson("/automation/status"), getJsonCached("runtimeConfig", "/runtime/trading-config", DASHBOARD_SLOW_REFRESH_MS), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30"), getJsonCached("afterMarketResearch", "/research/after-market/status", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("gateEffectiveness", "/research/gate-effectiveness?limit=3000", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("optionCandleCoverage", "/data/option-candle-coverage?symbols=BANKNIFTY", DASHBOARD_SLOW_REFRESH_MS)
+    getJson("/automation/status"), getJsonCached("runtimeConfig", "/runtime/trading-config", DASHBOARD_SLOW_REFRESH_MS), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30"), getJsonCached("afterMarketResearch", "/research/after-market/status", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("gateEffectiveness", "/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("optionCandleCoverage", "/data/option-candle-coverage?symbols=BANKNIFTY", DASHBOARD_SLOW_REFRESH_MS)
   ]);
   const val = r => r.status === "fulfilled" ? r.value : {error: r.reason.message};
   const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), runtime=val(runtimeConfig), c=val(collector), ing=val(ingest), ws=val(websocket), cacheStatus=val(cache), feed=val(decisionFeed), researchJob=val(afterMarketResearch), gates=val(gateEffectiveness), candleCoverage=val(optionCandleCoverage);
@@ -1823,6 +1850,9 @@ def get_research_settings() -> dict[str, object]:
                 "max_contracts": settings.live_option_candle_backfill_max_contracts,
                 "batch_limit": settings.live_option_candle_backfill_batch_limit,
                 "batch_delay_seconds": settings.live_option_candle_backfill_delay_seconds,
+                "market_open_on_first_seen": settings.live_option_candle_backfill_market_open_on_first_seen,
+                "session_start_time": settings.live_option_candle_backfill_session_start_time,
+                "max_historical_calls_per_run": settings.live_option_candle_backfill_max_historical_calls_per_run,
                 "on_demand_enabled": settings.enable_on_demand_premium_candle_backfill,
                 "on_demand_cooldown_seconds": settings.on_demand_premium_candle_backfill_cooldown_seconds,
             },
@@ -2053,10 +2083,34 @@ def get_research_engine_report(symbol: str = "BANKNIFTY", limit: int = 2000) -> 
     description="Shows missed winners, saved losers, unresolved rows, ambiguity, average move, and time-to-outcome by rejection gate.",
     dependencies=PROTECTED_ROUTE,
 )
-def get_gate_effectiveness_report(symbol: str = "BANKNIFTY", limit: int = 3000) -> dict[str, object]:
+def get_gate_effectiveness_report(
+    symbol: str = "BANKNIFTY",
+    limit: int = 3000,
+    summary_only: bool = False,
+    top_n: int | None = None,
+    cache_seconds: int = 300,
+) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("gate_effectiveness"):
         return deferred
-    return professional_insights_service.gate_effectiveness_report(symbol=symbol, limit=_bounded_int(limit, 3000, maximum=5000))
+    bounded_limit = _bounded_int(limit, 3000, maximum=5000)
+    bounded_top_n = _bounded_int(top_n, 12, maximum=100) if top_n is not None else None
+    cache_key = (
+        "gate_effectiveness",
+        symbol.upper() if symbol else "ALL",
+        bounded_limit,
+        bool(summary_only),
+        bounded_top_n,
+    )
+    return _cached_research_report(
+        cache_key,
+        cache_seconds=_bounded_int(cache_seconds, 300, minimum=0, maximum=900),
+        builder=lambda: professional_insights_service.gate_effectiveness_report(
+            symbol=symbol,
+            limit=bounded_limit,
+            summary_only=summary_only,
+            top_n=bounded_top_n,
+        ),
+    )
 
 
 @app.get(

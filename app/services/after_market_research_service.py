@@ -17,6 +17,7 @@ class AfterMarketResearchService:
     """Run evidence checks after market close, outside the live scanner path."""
 
     JOB_NAME = "after_market_review"
+    COMPLETED_JOB_STATUSES = {"success", "partial"}
 
     def __init__(
         self,
@@ -134,9 +135,9 @@ class AfterMarketResearchService:
                 self.manual_run_count += 1
             self.job_repository.finish(
                 run_id=int(job_run["id"]),
-                status="success" if str(result.get("status")) == "ok" else "failed",
+                status=self._job_status_from_result(result),
                 metadata={"trigger": trigger, "force": force, "result": result},
-                error_message=None if str(result.get("status")) == "ok" else str(result.get("status")),
+                error_message=None if str(result.get("status")) in {"ok", "partial"} else str(result.get("status")),
             )
             return result
         except Exception as exc:
@@ -446,13 +447,27 @@ class AfterMarketResearchService:
             return False, "waiting_for_after_market_research_time"
         trading_date = now.date().isoformat()
         job_run = self.job_repository.latest(job_name=self.JOB_NAME, trading_date=trading_date)
-        if self.last_run_date == trading_date or self.job_repository.count(job_name=self.JOB_NAME, trading_date=trading_date, status="success") > 0:
+        if self.last_run_date == trading_date or self._completed_job_count(trading_date) > 0:
             return False, "already_ran_today"
         if job_run and job_run.get("status") == "running":
             return False, "already_running"
         if self.job_repository.count(job_name=self.JOB_NAME, trading_date=trading_date, status="failed") >= 2:
             return False, "failed_retry_exhausted"
         return True, None
+
+    def _completed_job_count(self, trading_date: str) -> int:
+        return sum(
+            self.job_repository.count(job_name=self.JOB_NAME, trading_date=trading_date, status=status)
+            for status in self.COMPLETED_JOB_STATUSES
+        )
+
+    def _job_status_from_result(self, result: dict[str, Any]) -> str:
+        status = str(result.get("status") or "")
+        if status == "ok":
+            return "success"
+        if status == "partial":
+            return "partial"
+        return "failed"
 
     def _next_action(self, now: datetime) -> str:
         allowed, reason = self._can_run(now=now, force=False)
