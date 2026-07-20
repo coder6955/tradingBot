@@ -82,7 +82,7 @@ class BankNiftyIntelligenceService:
             hard_reasons.append("option premium is below option VWAP")
 
         if not expected_move["passed"]:
-            hard_reasons.append(expected_move["reason"])
+            soft_reasons.append(expected_move["reason"])
         if dte["risk"] == "near_expiry" and not premium_eval.get("passed", False):
             hard_reasons.append("near-expiry option buying needs strong premium expansion")
         if dte["risk"] == "far_expiry" and expected_move["coverage"] < 1.25:
@@ -90,7 +90,7 @@ class BankNiftyIntelligenceService:
         if event["is_event_day"] and not event["post_event_confirmation_window"]:
             soft_reasons.append("event day requires post-event confirmation")
         if zone["zoneRisk"] == "trapped":
-            hard_reasons.append("Bank Nifty is trapped near a major round-number zone")
+            soft_reasons.append("Bank Nifty is near a major round-number zone; require breakout confirmation")
         elif zone["zoneRisk"] != "clear":
             soft_reasons.append(zone["reason"])
         if not near_atm["supports"]:

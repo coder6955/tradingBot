@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -70,17 +71,24 @@ class ArmedEntrySetup:
     tick_quality_last_ask: float | None = None
     tick_quality_confirmed: bool = False
     tick_quality_reason: str = ""
+    recent_premiums: list[float] = field(default_factory=list)
+    latest_normalized_chase: float | None = None
+    latest_chase_scale: float | None = None
     entered_trade: dict[str, Any] | None = None
     entered_at: datetime | None = None
     cancelled_at: datetime | None = None
     rejection_saved: bool = False
     factor_scores: dict[str, Any] = field(default_factory=dict)
+    risk_preflight_passed: bool = False
+    risk_preflight_at: datetime | None = None
+    risk_preflight_reasons: list[str] = field(default_factory=list)
 
 
 class ArmedEntryTrackerService:
     """Track near-trigger Bank Nifty option setups and fire paper entries from ticks."""
 
     ACTIVE_STATES = {EntryTimingService.ARMED_FOR_ENTRY, EntryTimingService.ENTER_NOW}
+    PENDING_STATES = {"ORDER_PENDING"}
     TERMINAL_STATES = {"TOO_LATE", "EXPIRED", "CANCELLED", "ENTERED_PAPER"}
 
     def __init__(
@@ -104,6 +112,7 @@ class ArmedEntryTrackerService:
         self._lock = RLock()
         self.last_triggered_at: datetime | None = None
         self.last_reason: str | None = None
+        self._execution_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="armed-entry-execution")
 
     def register_from_scan(
         self,
@@ -131,6 +140,13 @@ class ArmedEntryTrackerService:
             return {"registered": False, "reason": "armed_entry_inputs_missing"}
 
         now = self.clock().replace(tzinfo=None)
+        risk_preflight = self.risk_management_service.evaluate_signal(symbol)
+        if not risk_preflight.get("passed", False):
+            return {
+                "registered": False,
+                "reason": "risk_preflight_failed",
+                "risk_reasons": [str(reason) for reason in risk_preflight.get("reasons", [])],
+            }
         valid_until = now + timedelta(seconds=max(5, settings.armed_entry_valid_seconds))
         key = self._key(order_mode=order_mode, action=action, token=token, expiry=contract.expiry, strike=contract.strike)
         with self._lock:
@@ -173,14 +189,18 @@ class ArmedEntryTrackerService:
                 reasons=list(reasons or entry_timing.get("reasons") or []),
                 latest_reason="waiting_for_entry_trigger",
                 latest_premium=current,
+                recent_premiums=[current],
                 factor_scores=dict(factor_scores or {}),
+                risk_preflight_passed=True,
+                risk_preflight_at=now,
+                risk_preflight_reasons=[],
             )
             if existing_id and existing_id in self._setups and self._setups[existing_id].latest_state in self.TERMINAL_STATES:
                 setup.setup_id = f"armed-{uuid4().hex[:12]}"
             self._setups[setup.setup_id] = setup
             self._setup_id_by_key[key] = setup.setup_id
 
-        subscribe_result = self._subscribe_token(token)
+        subscribe_result = self._subscribe_token(token, setup_id=setup.setup_id)
         payload = self._to_dict(setup)
         payload.update(
             {
@@ -220,6 +240,7 @@ class ArmedEntryTrackerService:
         executable = float(tick.ask or tick.price)
         bid = self._float(tick.bid)
         ask = self._float(tick.ask)
+        confirmation_price = min(float(tick.price or 0.0), bid) if bid > 0 else 0.0
         spread_pct = self._spread_pct(bid=bid, ask=ask, price=tick.price, fallback=setup.cached_spread_pct)
         now = self.clock().replace(tzinfo=None)
         with self._lock:
@@ -227,20 +248,24 @@ class ArmedEntryTrackerService:
             setup.latest_bid = bid or None
             setup.latest_ask = ask or None
             setup.latest_spread_pct = spread_pct
+            setup.recent_premiums.append(executable)
+            keep = max(3, int(settings.normalized_entry_chase_lookback_ticks))
+            setup.recent_premiums = setup.recent_premiums[-keep:]
 
         if now > setup.valid_until:
             return self._mark_rejected(setup.setup_id, "EXPIRED", ["armed_setup_expired"])
 
-        if executable < setup.entry_trigger_price:
+        if executable >= setup.entry_trigger_price:
+            checks = self._entry_checks(setup, executable_price=executable, spread_pct=spread_pct)
+            if checks:
+                return self._mark_rejected(setup.setup_id, "TOO_LATE", checks)
+
+        if confirmation_price < setup.entry_trigger_price:
             with self._lock:
                 setup.latest_state = EntryTimingService.ARMED_FOR_ENTRY
-                setup.latest_reason = "waiting_for_entry_trigger"
+                setup.latest_reason = "waiting_for_bid_and_last_trigger_confirmation"
                 self._reset_tick_quality_locked(setup)
             return self._to_dict(setup)
-
-        checks = self._entry_checks(setup, executable_price=executable, spread_pct=spread_pct)
-        if checks:
-            return self._mark_rejected(setup.setup_id, "TOO_LATE", checks)
 
         tick_quality = self._tick_quality_confirmation(
             setup,
@@ -277,6 +302,18 @@ class ArmedEntryTrackerService:
         if not risk.get("passed", False):
             return self._mark_rejected(setup.setup_id, "CANCELLED", ["event_entry_hard_gate_failed", *[str(reason) for reason in risk.get("reasons", [])]])
 
+        if bool(getattr(self.websocket_price_feed, "running", False)):
+            with self._lock:
+                setup.latest_state = "ORDER_PENDING"
+                setup.latest_reason = "event_entry_queued_for_execution"
+            self._execution_worker.submit(
+                self._enter_paper,
+                setup.setup_id,
+                executable_price=executable,
+                tick=tick,
+                spread_pct=spread_pct,
+            )
+            return {**self._to_dict(setup), "execution_queued": True}
         return self._enter_paper(setup.setup_id, executable_price=executable, tick=tick, spread_pct=spread_pct)
 
     def cancel(self, setup_id: str, reason: str = "cancelled") -> dict[str, Any]:
@@ -285,11 +322,19 @@ class ArmedEntryTrackerService:
     def cancel_for_data_gap(self, event: dict[str, Any] | None = None) -> dict[str, Any]:
         if not settings.cancel_armed_entries_on_data_gap:
             return {"cancelled": 0, "reason": "cancel_on_gap_disabled"}
+        if event and (event.get("recovered") or not event.get("entry_blocking", True)):
+            return {"cancelled": 0, "reason": "non_blocking_or_recovered_gap"}
         reason = "websocket_data_gap_detected"
         if event and event.get("reason"):
             reason = str(event.get("reason"))
+        affected_token = self._int(event.get("instrument_token")) if event else None
         with self._lock:
-            setup_ids = [setup.setup_id for setup in self._setups.values() if setup.latest_state in self.ACTIVE_STATES]
+            setup_ids = [
+                setup.setup_id
+                for setup in self._setups.values()
+                if setup.latest_state in self.ACTIVE_STATES
+                and (affected_token is None or setup.instrument_token == affected_token)
+            ]
         results = [
             self._mark_rejected(setup_id, "CANCELLED", ["event_entry_hard_gate_failed", "data_gap_detected", reason])
             for setup_id in setup_ids
@@ -380,6 +425,7 @@ class ArmedEntryTrackerService:
             self.last_triggered_at = current.entered_at
             self.last_reason = current.latest_reason
         logger.info("armed_entry_entered_paper %s", {"setup_id": setup_id, "tradingsymbol": setup.tradingsymbol, "entry": executable_price})
+        self._release_subscription(self._setups[setup_id])
         return self._to_dict(self._setups[setup_id])
 
     def _entry_checks(self, setup: ArmedEntrySetup, *, executable_price: float, spread_pct: float) -> list[str]:
@@ -390,10 +436,21 @@ class ArmedEntryTrackerService:
         risk = executable_price - setup.stop_loss
         reward = setup.target_1 - executable_price
         remaining_rr = reward / risk if risk > 0 and reward > 0 else 0.0
-        if chase_pct > setup.max_entry_chase_pct:
-            reasons.extend(["entry_too_late", "chase_risk_high"])
-        if move_from_base_pct > setup.max_premium_move_from_base_pct:
-            reasons.extend(["entry_too_late", "chase_risk_high"])
+        if settings.enable_normalized_entry_chase:
+            observations = [float(value) for value in setup.recent_premiums if float(value) > 0]
+            observed_range = max(observations) - min(observations) if len(observations) >= 2 else 0.0
+            spread_scale = setup.entry_trigger_price * max(setup.cached_spread_pct, spread_pct, 0.05) / 100.0
+            chase_scale = max(observed_range, spread_scale * 3.0, setup.entry_trigger_price * 0.002, 0.15)
+            normalized_chase = max(0.0, executable_price - setup.entry_trigger_price) / chase_scale
+            setup.latest_normalized_chase = round(normalized_chase, 4)
+            setup.latest_chase_scale = round(chase_scale, 4)
+            if normalized_chase > settings.normalized_entry_chase_max_atr:
+                reasons.extend(["entry_too_late", "chase_risk_high", "normalized_chase_risk_high"])
+        else:
+            if chase_pct > setup.max_entry_chase_pct:
+                reasons.extend(["entry_too_late", "chase_risk_high"])
+            if move_from_base_pct > setup.max_premium_move_from_base_pct:
+                reasons.extend(["entry_too_late", "chase_risk_high"])
         if target1_room_pct < setup.min_target1_room_pct:
             reasons.append("insufficient_target_room_after_entry")
         if remaining_rr < setup.min_remaining_risk_reward:
@@ -416,6 +473,7 @@ class ArmedEntryTrackerService:
             setup.rejection_saved = True
         if should_save:
             self._save_rejection(setup, reasons)
+        self._release_subscription(setup)
         logger.info("armed_entry_%s %s", state.lower(), {"setup_id": setup_id, "reasons": reasons})
         return self._to_dict(setup)
 
@@ -529,6 +587,8 @@ class ArmedEntryTrackerService:
 
         min_ticks = max(1, int(settings.tick_quality_min_ticks_above_trigger))
         hold_seconds = max(0.0, float(settings.tick_quality_hold_seconds))
+        if count >= max(min_ticks, int(settings.tick_quality_fast_min_ticks)):
+            hold_seconds = min(hold_seconds, max(0.0, float(settings.tick_quality_fast_hold_seconds)))
         hold_elapsed = max(0.0, (now - started_at).total_seconds()) if started_at else 0.0
         reasons: list[str] = []
         if count < min_ticks:
@@ -593,16 +653,30 @@ class ArmedEntryTrackerService:
         setup.tick_quality_confirmed = False
         setup.tick_quality_reason = ""
 
-    def _subscribe_token(self, token: int) -> dict[str, Any]:
+    def _subscribe_token(self, token: int, *, setup_id: str) -> dict[str, Any]:
         if self.websocket_price_feed is None:
             return {"subscribed": [], "reason": "websocket_feed_missing"}
         subscribe = getattr(self.websocket_price_feed, "subscribe", None)
         if not callable(subscribe):
             return {"subscribed": [], "reason": "websocket_subscribe_unavailable"}
         try:
-            return dict(subscribe({int(token)}))
+            try:
+                return dict(subscribe({int(token)}, owner=f"armed:{setup_id}", mode="full"))
+            except TypeError:
+                return dict(subscribe({int(token)}))
         except Exception as exc:
             return {"subscribed": [], "reason": "subscription_failed", "message": str(exc)}
+
+    def _release_subscription(self, setup: ArmedEntrySetup) -> None:
+        if self.websocket_price_feed is None:
+            return
+        release = getattr(self.websocket_price_feed, "release_owner", None)
+        if not callable(release):
+            return
+        try:
+            release(f"armed:{setup.setup_id}", {setup.instrument_token})
+        except Exception:
+            logger.exception("failed_to_release_armed_subscription setup_id=%s", setup.setup_id)
 
     def _market_session(self) -> str:
         if self.market_session_provider is not None:
@@ -621,7 +695,7 @@ class ArmedEntryTrackerService:
 
     def _to_dict(self, setup: ArmedEntrySetup) -> dict[str, Any]:
         payload = asdict(setup)
-        for key in ("armed_at", "valid_until", "entered_at", "cancelled_at"):
+        for key in ("armed_at", "valid_until", "entered_at", "cancelled_at", "risk_preflight_at"):
             value = payload.get(key)
             payload[key] = value.isoformat(sep=" ") if isinstance(value, datetime) else value
         payload.pop("factor_scores", None)

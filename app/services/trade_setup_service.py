@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from app.config import settings
 from app.services.account_funds_service import AccountFundsService
 from app.services.database import Candle, get_session
-from app.services.time_utils import ist_today
+from app.services.time_utils import ist_now_naive, ist_today
 
 
 @dataclass(frozen=True)
@@ -35,6 +35,7 @@ class TradeSetupService:
 
     def __init__(self, account_funds_service: AccountFundsService | None = None) -> None:
         self.account_funds_service = account_funds_service or AccountFundsService()
+        self._sticky_contracts: dict[str, tuple[int, datetime]] = {}
 
     def nearest_expiry(self, instruments: Iterable[Dict[str, Any]], underlying: str) -> Optional[str]:
         expiries: List[date] = []
@@ -85,8 +86,40 @@ class TradeSetupService:
         if enforce_budget and side.upper() == "BUY":
             affordable = self._affordable_buy_candidates(candidates)
             if affordable:
-                return max(affordable, key=lambda contract: self._contract_score(contract, target))
-        return max(candidates, key=lambda contract: self._contract_score(contract, target))
+                candidates = affordable
+        selected = max(candidates, key=lambda contract: self._contract_score(contract, target))
+        if underlying.upper() != "BANKNIFTY":
+            return selected
+        return self._sticky_contract_selection(
+            key=f"{underlying.upper()}|{option_type}|{side.upper()}|{expiry}",
+            candidates=candidates,
+            selected=selected,
+            target=target,
+        )
+
+    def _sticky_contract_selection(
+        self,
+        *,
+        key: str,
+        candidates: List[OptionContract],
+        selected: OptionContract,
+        target: float,
+    ) -> OptionContract:
+        now = ist_now_naive()
+        existing = self._sticky_contracts.get(key)
+        if existing is not None:
+            token, selected_at = existing
+            age = max(0.0, (now - selected_at).total_seconds())
+            pinned = next((contract for contract in candidates if contract.instrument_token == token), None)
+            if pinned is not None and age <= max(0, settings.banknifty_contract_stickiness_seconds):
+                selected_score = self._contract_score(selected, target)
+                pinned_score = self._contract_score(pinned, target)
+                spread_safe = self._spread_pct(pinned) <= settings.max_bid_ask_spread_pct
+                if spread_safe and selected_score - pinned_score < settings.banknifty_contract_switch_score_advantage:
+                    return pinned
+        if selected.instrument_token:
+            self._sticky_contracts[key] = (int(selected.instrument_token), now)
+        return selected
 
     def build_contracts(
         self,

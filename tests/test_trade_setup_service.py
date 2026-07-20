@@ -5,6 +5,7 @@ from datetime import date
 
 from app.services.database import init_db
 from app.services.market_data_service import MarketDataService
+from app.config import settings
 from app.services.trade_setup_service import OptionContract, TradeSetupService
 
 
@@ -64,6 +65,40 @@ class TradeSetupServiceTests(unittest.TestCase):
         service = TradeSetupService()
         self.assertEqual(service.option_type_for("bullish", "SELL"), "PE")
         self.assertEqual(service.option_type_for("bearish", "SELL"), "CE")
+
+    def test_banknifty_contract_selection_is_sticky_until_replacement_is_materially_better(self) -> None:
+        service = TradeSetupService()
+        instruments = [
+            {
+                "tradingsymbol": f"BANKNIFTY26JUL{strike}CE",
+                "exchange": "NFO",
+                "name": "BANKNIFTY",
+                "expiry": "2099-07-26",
+                "strike": strike,
+                "instrument_type": "CE",
+                "instrument_token": token,
+                "lot_size": 30,
+            }
+            for strike, token in [(58000, 1), (58100, 2), (58200, 3)]
+        ]
+        quotes = {
+            f"NFO:BANKNIFTY26JUL{strike}CE": {
+                "last_price": 200,
+                "volume": 100000,
+                "oi": 100000,
+                "depth": {"buy": [{"price": 199}], "sell": [{"price": 200}]},
+            }
+            for strike in [58000, 58100, 58200]
+        }
+        original = settings.banknifty_contract_switch_score_advantage
+        object.__setattr__(settings, "banknifty_contract_switch_score_advantage", 100.0)
+        try:
+            first = service.select_contract(instruments, "BANKNIFTY", 58020, "bullish", quotes=quotes)
+            second = service.select_contract(instruments, "BANKNIFTY", 58120, "bullish", quotes=quotes)
+        finally:
+            object.__setattr__(settings, "banknifty_contract_switch_score_advantage", original)
+
+        self.assertEqual(first.instrument_token, second.instrument_token)
 
     def test_affordable_quantity_downsizes_to_available_funds(self) -> None:
         service = TradeSetupService()

@@ -80,8 +80,8 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
             prices={"entry_price": 500, "stop_loss": 420, "target_1": 900, "target_2": 1000, "target_3": 1100, "risk_reward": 5},
         )
 
-        self.assertFalse(result["passed"])
-        self.assertIn("expected move is smaller than option premium target requirement", result["hard_reasons"])
+        self.assertTrue(result["passed"])
+        self.assertIn("expected move is smaller than option premium target requirement", result["soft_reasons"])
 
     def test_event_day_downgrades_confidence(self) -> None:
         from app.services import banknifty_intelligence_service

@@ -43,9 +43,10 @@ class PriceActionServiceTests(unittest.TestCase):
 
         result = service.evaluate(snapshot, "bearish", "BUY")
 
-        self.assertFalse(result["passed"])
+        self.assertTrue(result["passed"])
         self.assertIn("directional option buying has insufficient room to nearest level", result["reasons"])
-        self.assertTrue(result["details"]["hard_block"])
+        self.assertFalse(result["details"]["hard_block"])
+        self.assertFalse(result["details"]["directional_room_is_hard_gate"])
 
     def test_missing_candle_confirmation_is_scoring_evidence_not_hard_block(self) -> None:
         service = PriceActionService()

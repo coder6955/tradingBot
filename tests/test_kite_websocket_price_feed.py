@@ -253,7 +253,21 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertEqual(candles[0].low_price, 98)
         self.assertEqual(candles[0].close_price, 98)
         self.assertEqual(candles[0].tick_count, 3)
+        self.assertEqual(candles[0].volume, 200)
         self.assertEqual(feed.tick_count(123), 3)
+
+    def test_websocket_candle_uses_incremental_volume_and_fills_missing_minutes(self) -> None:
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker)
+        base = ist_now_naive().replace(second=10, microsecond=0)
+
+        feed._on_ticks(None, [{"instrument_token": 123, "last_price": 100, "volume_traded": 1000, "exchange_timestamp": base}])
+        feed._on_ticks(None, [{"instrument_token": 123, "last_price": 105, "volume_traded": 1400, "exchange_timestamp": base + timedelta(minutes=3)}])
+
+        candles = feed.get_current_session_premium_candles(123)
+        self.assertEqual(len(candles), 4)
+        self.assertEqual([candle.volume for candle in candles], [0, 0, 0, 400])
+        self.assertEqual(candles[1].source, "websocket_gap_fill")
+        self.assertEqual(candles[1].close_price, 100)
 
     def test_websocket_candle_rolls_on_minute_change(self) -> None:
         feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker)
@@ -482,7 +496,7 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertEqual(status["candle_persistence"]["last_cleanup_deleted"], 1)
 
-    def test_websocket_gap_detection_dispatches_event(self) -> None:
+    def test_quiet_token_is_diagnostic_and_does_not_dispatch_blocking_gap(self) -> None:
         seen: list[dict[str, object]] = []
         base = regular_market_now().replace(second=0, microsecond=0)
         now = {"value": base}
@@ -494,9 +508,9 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
 
         status = feed.status()
         self.assertTrue(status["data_gap"]["data_gap_detected"])
-        self.assertEqual(status["data_gap"]["latest_gap"]["reason"], "tick_gap_detected")
-        self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0]["instrument_token"], 123)
+        self.assertEqual(status["data_gap"]["latest_gap"]["reason"], "token_tick_inactivity_detected")
+        self.assertTrue(status["data_gap"]["latest_gap"]["diagnostic_only"])
+        self.assertEqual(len(seen), 0)
 
     def test_stale_tick_detection(self) -> None:
         feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker)
@@ -516,6 +530,51 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
 
             self.assertEqual(feed.reconnect_count, 1)
             self.assertIn([111, 222], [sorted(item) for item in ticker.subscribed])
+        finally:
+            feed.stop()
+
+    def test_owner_subscription_rotates_with_overlap_and_mode_priority(self) -> None:
+        now = {"value": regular_market_now()}
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=lambda: now["value"])
+        try:
+            feed.start()
+            feed.replace_owner_subscriptions(owner="banknifty_prewarm", tokens={111, 222}, mode="quote", overlap_seconds=180)
+            feed.subscribe({222}, owner="armed:setup-1", mode="full")
+            feed.replace_owner_subscriptions(owner="banknifty_prewarm", tokens={222, 333}, mode="quote", overlap_seconds=180)
+
+            self.assertIn("full", [mode for mode, tokens in feed._ticker.modes if 222 in tokens])
+            self.assertIn(111, feed.status()["desired_tokens"])
+            now["value"] = now["value"] + timedelta(seconds=181)
+            feed.cleanup_subscription_leases()
+
+            self.assertNotIn(111, feed.status()["desired_tokens"])
+            self.assertIn([111], [sorted(tokens) for tokens in feed._ticker.unsubscribed])
+            self.assertIn(222, feed.status()["desired_tokens"])
+            feed.release_owner("armed:setup-1", {222})
+            self.assertIn(222, feed.status()["desired_tokens"])
+        finally:
+            feed.stop()
+
+    def test_order_gap_and_armed_ticks_have_priority_over_warm_ticks(self) -> None:
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=regular_market_now)
+        feed._subscription_owners[222] = {"armed:setup-1": None}
+        armed_tick = WebSocketTick(instrument_token=222, price=100, timestamp=regular_market_now())
+        warm_tick = WebSocketTick(instrument_token=333, price=100, timestamp=regular_market_now())
+
+        self.assertLess(feed._event_priority("order_update", {}), feed._event_priority("gap", {}))
+        self.assertLess(feed._event_priority("gap", {}), feed._event_priority("tick", armed_tick))
+        self.assertLess(feed._event_priority("tick", armed_tick), feed._event_priority("tick", warm_tick))
+
+    def test_subscription_is_live_only_after_fresh_tick(self) -> None:
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=regular_market_now)
+        try:
+            feed.start()
+            feed.subscribe({123}, owner="armed:setup-1", mode="full")
+            self.assertFalse(feed.is_live_verified(123))
+
+            feed._on_ticks(None, [{"instrument_token": 123, "last_price": 100, "exchange_timestamp": regular_market_now()}])
+
+            self.assertTrue(feed.is_live_verified(123))
         finally:
             feed.stop()
 

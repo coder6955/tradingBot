@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import asdict
 from datetime import datetime
+from threading import RLock, Thread
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -43,6 +44,11 @@ class AutoTraderService:
         self.errors: list[dict[str, Any]] = []
         self.seen_order_keys: set[str] = set()
         self.last_scan_at: str | None = None
+        self._fast_rescan_lock = RLock()
+        self._scan_lock = RLock()
+        self._fast_rescan_running = False
+        self._last_fast_rescan_at: datetime | None = None
+        self.last_fast_rally_event: dict[str, Any] | None = None
 
     def _now_ist(self) -> str:
         return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M:%S %p IST")
@@ -120,6 +126,14 @@ class AutoTraderService:
             await asyncio.sleep(float(self.config.get("interval_seconds", settings.scanner_interval_seconds)))
 
     def scan_once(self) -> dict[str, Any]:
+        if not self._scan_lock.acquire(blocking=False):
+            return {"skipped": True, "reason": "scan_already_running", "last_scan_at": self.last_scan_at}
+        try:
+            return self._scan_once_impl()
+        finally:
+            self._scan_lock.release()
+
+    def _scan_once_impl(self) -> dict[str, Any]:
         scanner = self.scanner_factory()
         symbols = self.config.get("symbols")
         opportunities = scanner.scan_symbols(
@@ -182,6 +196,32 @@ class AutoTraderService:
             "opportunities": self.latest_opportunities,
             "placed": placed,
         }
+
+    def request_fast_rescan(self, event: dict[str, Any]) -> dict[str, Any]:
+        """Schedule one non-blocking scan when Bank Nifty accelerates."""
+        self.last_fast_rally_event = dict(event)
+        if not self.running:
+            return {"scheduled": False, "reason": "auto_trader_not_running"}
+        now = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+        with self._fast_rescan_lock:
+            cooldown = max(0.1, float(settings.fast_rally_rescan_cooldown_seconds))
+            if self._fast_rescan_running:
+                return {"scheduled": False, "reason": "fast_rescan_already_running"}
+            if self._last_fast_rescan_at and (now - self._last_fast_rescan_at).total_seconds() < cooldown:
+                return {"scheduled": False, "reason": "fast_rescan_cooldown"}
+            self._fast_rescan_running = True
+            self._last_fast_rescan_at = now
+        Thread(target=self._run_fast_rescan, name="banknifty-fast-rescan", daemon=True).start()
+        return {"scheduled": True}
+
+    def _run_fast_rescan(self) -> None:
+        try:
+            self.scan_once()
+        except Exception as exc:
+            self.errors.append({"time": self._now_ist(), "error": str(exc), "source": "fast_rally_rescan"})
+        finally:
+            with self._fast_rescan_lock:
+                self._fast_rescan_running = False
 
     def _order_key(self, signal: Signal) -> str:
         return "|".join(

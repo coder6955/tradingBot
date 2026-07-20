@@ -636,6 +636,7 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.assertIn("opening_trap_structure", result["reasons"])
         self.assertEqual(len(tracker.calls), 0)
         self.assertEqual(result["factor_scores"]["armed_entry"]["reason"], "hard_gate_failed_before_early_arming")
+        self.assertNotEqual(result["entry_timing_state"], "ARMED_FOR_ENTRY")
 
     def test_scanner_early_arm_is_paper_only_by_default(self) -> None:
         scanner = ScannerService(feed=BankNiftyQualityFeed({}), rejected_opportunity_repository=RejectedOpportunityRepository())
@@ -665,6 +666,56 @@ class ScannerDataQualityTests(unittest.TestCase):
         )
 
         self.assertEqual(result["reason"], "early_arming_paper_only")
+
+    def test_early_arm_uses_early_threshold_instead_of_normal_signal_threshold(self) -> None:
+        tracker = FakeArmedEntryTracker()
+        scanner = ScannerService(
+            feed=BankNiftyQualityFeed({}),
+            rejected_opportunity_repository=RejectedOpportunityRepository(),
+            armed_entry_tracker=tracker,
+        )
+        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 30, 100, 100000, 100000, 99.5, 100)
+        originals = {
+            "enable_kite_websocket": settings.enable_kite_websocket,
+            "min_signal_score": settings.min_signal_score,
+            "early_arm_min_score": settings.early_arm_min_score,
+            "early_armed_entry_paper_only": settings.early_armed_entry_paper_only,
+        }
+        try:
+            object.__setattr__(settings, "enable_kite_websocket", True)
+            object.__setattr__(settings, "min_signal_score", 80)
+            object.__setattr__(settings, "early_arm_min_score", 75)
+            object.__setattr__(settings, "early_armed_entry_paper_only", True)
+            result = scanner._maybe_register_armed_entry(
+                symbol="BANKNIFTY",
+                side="BUY",
+                trend="bullish",
+                contract=contract,
+                prices={"entry_price": 100, "stop_loss": 90, "target_1": 120, "target_2": 130, "target_3": 140, "risk_reward": 2},
+                entry_timing_eval={"entry_timing_state": "NO_TRADE", "reasons": ["premium_candles_stale_or_missing"]},
+                score=76,
+                probability=0.7,
+                confidence=0.76,
+                quantity=30,
+                factor_scores={
+                    "data_quality": {"passed": True},
+                    "data_freshness": {"passed": True},
+                    "option_quality": {"passed": True},
+                    "market_regime": {"passed": True},
+                    "price_action": {"passed": True},
+                    "banknifty_intelligence": {"passed": True},
+                    "option_premium_confirmation": {"passed": False, "details": {}},
+                },
+                order_mode="paper",
+                gate_failures=["premium_candles_stale_or_missing"],
+            )
+        finally:
+            for key, value in originals.items():
+                object.__setattr__(settings, key, value)
+
+        self.assertTrue(result["registered"])
+        self.assertTrue(result["early_arm"])
+        self.assertEqual(len(tracker.calls), 1)
 
     def test_previous_day_option_candles_fail_premium_confirmation_during_current_session(self) -> None:
         yesterday = datetime.now() - timedelta(days=1, hours=1)

@@ -50,7 +50,8 @@ class PriceActionService:
         if side.upper() == "BUY" and room < min_room:
             reasons.append("directional option buying has insufficient room to nearest level")
 
-        if self._is_breakout_or_rejection(price, levels, bullish):
+        breakout_confirmed = self._is_breakout_or_rejection(price, levels, bullish)
+        if breakout_confirmed:
             score += 15
         else:
             reasons.append("price has not confirmed breakout/rejection around key levels")
@@ -75,7 +76,7 @@ class PriceActionService:
             score = max(0, score - 20)
 
         hard_block_reasons: List[str] = []
-        if side.upper() == "BUY" and room < min_room:
+        if side.upper() == "BUY" and room < min_room and settings.enable_directional_room_hard_gate and not (breakout_confirmed and candle_confirmed):
             hard_block_reasons.append("directional option buying has insufficient room to nearest level")
         if chop:
             hard_block_reasons.append(chop)
@@ -91,6 +92,8 @@ class PriceActionService:
                 "levels": levels,
                 "room_to_level_pct": round(room * 100, 2),
                 "candle_confirmed": candle_confirmed,
+                "breakout_confirmed": breakout_confirmed,
+                "directional_room_is_hard_gate": settings.enable_directional_room_hard_gate,
                 "chop_filter": chop or "",
                 "hard_block": bool(hard_block_reasons),
                 "hard_block_reasons": list(dict.fromkeys(hard_block_reasons)),

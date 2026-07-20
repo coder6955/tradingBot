@@ -46,6 +46,7 @@ class Settings:
     min_option_buy_premium: float = float(os.getenv("MIN_OPTION_BUY_PREMIUM", "5.0"))
     block_expiry_day_option_buying: bool = os.getenv("BLOCK_EXPIRY_DAY_OPTION_BUYING", "true").lower() == "true"
     min_directional_room_pct: float = float(os.getenv("MIN_DIRECTIONAL_ROOM_PCT", "0.4"))
+    enable_directional_room_hard_gate: bool = os.getenv("ENABLE_DIRECTIONAL_ROOM_HARD_GATE", "false").lower() == "true"
     min_signal_score: int = int(os.getenv("MIN_SIGNAL_SCORE", "80"))
     min_option_liquidity_score: int = int(os.getenv("MIN_OPTION_LIQUIDITY_SCORE", "70"))
     account_equity: float = float(os.getenv("ACCOUNT_EQUITY", "100000"))
@@ -271,8 +272,12 @@ class Settings:
     websocket_live_gap_polling_fallback: bool = os.getenv("WEBSOCKET_LIVE_GAP_POLLING_FALLBACK", "true").lower() == "true"
     cancel_armed_entries_on_data_gap: bool = os.getenv("CANCEL_ARMED_ENTRIES_ON_DATA_GAP", "true").lower() == "true"
     enable_banknifty_option_prewarm: bool = os.getenv("ENABLE_BANKNIFTY_OPTION_PREWARM", "true").lower() == "true"
-    banknifty_prewarm_strike_depth: int = int(os.getenv("BANKNIFTY_PREWARM_STRIKE_DEPTH", "1"))
+    banknifty_prewarm_strike_depth: int = int(os.getenv("BANKNIFTY_PREWARM_STRIKE_DEPTH", "3"))
     banknifty_prewarm_refresh_seconds: int = int(os.getenv("BANKNIFTY_PREWARM_REFRESH_SECONDS", "60"))
+    banknifty_prewarm_overlap_seconds: int = int(os.getenv("BANKNIFTY_PREWARM_OVERLAP_SECONDS", "180"))
+    banknifty_prewarm_rotation_hysteresis_pct: float = float(os.getenv("BANKNIFTY_PREWARM_ROTATION_HYSTERESIS_PCT", "60.0"))
+    banknifty_contract_stickiness_seconds: int = int(os.getenv("BANKNIFTY_CONTRACT_STICKINESS_SECONDS", "180"))
+    banknifty_contract_switch_score_advantage: float = float(os.getenv("BANKNIFTY_CONTRACT_SWITCH_SCORE_ADVANTAGE", "10.0"))
     min_websocket_premium_candles: int = int(os.getenv("MIN_WEBSOCKET_PREMIUM_CANDLES", "3"))
     max_websocket_premium_candle_age_seconds: int = int(os.getenv("MAX_WEBSOCKET_PREMIUM_CANDLE_AGE_SECONDS", "180"))
     max_stored_premium_candle_age_seconds: int = int(os.getenv("MAX_STORED_PREMIUM_CANDLE_AGE_SECONDS", "300"))
@@ -286,7 +291,7 @@ class Settings:
     min_entry_room_to_level_pct: float = float(os.getenv("MIN_ENTRY_ROOM_TO_LEVEL_PCT", "0.25"))
     enable_event_driven_paper_entry: bool = os.getenv("ENABLE_EVENT_DRIVEN_PAPER_ENTRY", "true").lower() == "true"
     enable_event_driven_live_entry: bool = os.getenv("ENABLE_EVENT_DRIVEN_LIVE_ENTRY", "false").lower() == "true"
-    armed_entry_valid_seconds: int = int(os.getenv("ARMED_ENTRY_VALID_SECONDS", "60"))
+    armed_entry_valid_seconds: int = int(os.getenv("ARMED_ENTRY_VALID_SECONDS", "90"))
     enable_early_armed_entry: bool = os.getenv("ENABLE_EARLY_ARMED_ENTRY", "true").lower() == "true"
     early_armed_entry_paper_only: bool = os.getenv("EARLY_ARMED_ENTRY_PAPER_ONLY", "true").lower() == "true"
     early_arm_min_score: int = int(os.getenv("EARLY_ARM_MIN_SCORE", "75"))
@@ -295,8 +300,16 @@ class Settings:
     enable_tick_quality_confirmation: bool = os.getenv("ENABLE_TICK_QUALITY_CONFIRMATION", "true").lower() == "true"
     tick_quality_min_ticks_above_trigger: int = int(os.getenv("TICK_QUALITY_MIN_TICKS_ABOVE_TRIGGER", "2"))
     tick_quality_hold_seconds: float = float(os.getenv("TICK_QUALITY_HOLD_SECONDS", "1.0"))
+    tick_quality_fast_min_ticks: int = int(os.getenv("TICK_QUALITY_FAST_MIN_TICKS", "4"))
+    tick_quality_fast_hold_seconds: float = float(os.getenv("TICK_QUALITY_FAST_HOLD_SECONDS", "0.25"))
     tick_quality_require_bid_progress: bool = os.getenv("TICK_QUALITY_REQUIRE_BID_PROGRESS", "true").lower() == "true"
     tick_quality_max_spread_multiplier: float = float(os.getenv("TICK_QUALITY_MAX_SPREAD_MULTIPLIER", "1.5"))
+    enable_normalized_entry_chase: bool = os.getenv("ENABLE_NORMALIZED_ENTRY_CHASE", "true").lower() == "true"
+    normalized_entry_chase_max_atr: float = float(os.getenv("NORMALIZED_ENTRY_CHASE_MAX_ATR", "0.50"))
+    normalized_entry_chase_lookback_ticks: int = int(os.getenv("NORMALIZED_ENTRY_CHASE_LOOKBACK_TICKS", "20"))
+    fast_rally_window_seconds: float = float(os.getenv("FAST_RALLY_WINDOW_SECONDS", "5.0"))
+    fast_rally_trigger_pct: float = float(os.getenv("FAST_RALLY_TRIGGER_PCT", "0.08"))
+    fast_rally_rescan_cooldown_seconds: float = float(os.getenv("FAST_RALLY_RESCAN_COOLDOWN_SECONDS", "2.0"))
     live_exit_max_retry_count: int = int(os.getenv("LIVE_EXIT_MAX_RETRY_COUNT", "2"))
     live_reconciliation_blocks_automation: bool = os.getenv("LIVE_RECONCILIATION_BLOCKS_AUTOMATION", "true").lower() == "true"
     enable_underlying_invalidation_exit: bool = os.getenv("ENABLE_UNDERLYING_INVALIDATION_EXIT", "true").lower() == "true"

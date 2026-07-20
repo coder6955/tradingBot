@@ -22,6 +22,15 @@
 - Treat PCR, max pain, and similar context signals as supporting evidence unless tested results justify stronger use.
 - Cap correlated trend and momentum evidence so confidence is not inflated by duplicate signals.
 
+## Documentation Source of Truth
+
+- Treat `docs/ARCHITECTURE.md`, `docs/TRADING_FLOW.md`, and `docs/DECISIONS.md` as the maintained source of truth for the current system.
+- Before changing architecture, trading logic, configuration, state transitions, WebSocket behavior, order routing, exits, or risk management, read the relevant maintained documents.
+- After a material change to any of those areas, update the affected maintained documents in the same task.
+- Use `docs/ARCHITECTURE.md` for current components and runtime wiring, `docs/TRADING_FLOW.md` for current trading behavior and states, and `docs/DECISIONS.md` for rationale and trade-offs.
+- Treat root-level architecture maps, audits, and fix plans as supplemental historical reports when they disagree with the maintained documents or current code.
+- Do not rely on chat history, AI memory, or uploaded document snapshots as the only record of current application behavior.
+
 ## Testing Expectations
 
 - Always include tests for trading-logic changes, or explain clearly why tests cannot be added.

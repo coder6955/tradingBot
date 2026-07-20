@@ -128,7 +128,10 @@ class ActiveTradePriceFeed:
         if not settings.enable_kite_websocket or self.websocket_feed is None:
             self.last_reason = "websocket_disabled"
             return {"subscribed": [], "reason": self.last_reason}
-        result = self.websocket_feed.subscribe(clean_tokens)
+        try:
+            result = self.websocket_feed.subscribe(clean_tokens, owner="active_trade", mode="full")
+        except TypeError:
+            result = self.websocket_feed.subscribe(clean_tokens)
         self.last_reason = str(result.get("reason")) if result.get("reason") else None
         return result
 
@@ -137,6 +140,9 @@ class ActiveTradePriceFeed:
         self.active_trade_tokens.difference_update(clean_tokens)
         if self.websocket_feed is None:
             return {"unsubscribed": sorted(clean_tokens), "reason": "websocket_feed_missing"}
+        release = getattr(self.websocket_feed, "release_owner", None)
+        if callable(release):
+            return release("active_trade", clean_tokens)
         return self.websocket_feed.unsubscribe(clean_tokens)
 
     def latest_price(

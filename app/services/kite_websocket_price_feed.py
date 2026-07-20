@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import json
+import itertools
 import queue
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -79,6 +80,9 @@ class KiteWebSocketPriceFeed:
         self._ticks: dict[int, WebSocketTick] = {}
         self._subscribed_tokens: set[int] = set()
         self._desired_tokens: set[int] = set()
+        self._verified_live_tokens: set[int] = set()
+        self._subscription_owners: dict[int, dict[str, datetime | None]] = {}
+        self._subscription_owner_modes: dict[int, dict[str, str]] = {}
         self._subscription_errors: dict[int, str] = {}
         self._lock = RLock()
         self.running = False
@@ -100,6 +104,7 @@ class KiteWebSocketPriceFeed:
         self._tick_modes: dict[int, str] = {}
         self._premium_candles: dict[int, dict[datetime, WebSocketPremiumCandle]] = {}
         self._ticks_seen: dict[int, int] = {}
+        self._last_cumulative_volume: dict[int, float] = {}
         self._rehydrated_tokens: set[int] = set()
         self._context_recovered_tokens: set[tuple[int, str | None]] = set()
         self._persisted_candle_writes = 0
@@ -116,7 +121,8 @@ class KiteWebSocketPriceFeed:
         self._gap_backfill_success_count = 0
         self._gap_backfill_failure_count = 0
         self._start_stop_lock = RLock()
-        self._event_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=max(1, settings.websocket_event_queue_size))
+        self._event_queue: queue.PriorityQueue[tuple[int, int, str, Any]] = queue.PriorityQueue(maxsize=max(1, settings.websocket_event_queue_size))
+        self._event_sequence = itertools.count()
         self._event_worker: Thread | None = None
         self._event_stop = Event()
         self._candle_persist_queue: queue.Queue[tuple[int, str, datetime]] = queue.Queue(maxsize=max(1, settings.websocket_candle_persist_queue_size))
@@ -236,9 +242,20 @@ class KiteWebSocketPriceFeed:
             self._stop_workers()
             return {"stopped": True}
 
-    def subscribe(self, tokens: list[int] | set[int] | tuple[int, ...]) -> dict[str, Any]:
+    def subscribe(
+        self,
+        tokens: list[int] | set[int] | tuple[int, ...],
+        *,
+        owner: str = "legacy",
+        mode: str = "full",
+        lease_seconds: int | None = None,
+    ) -> dict[str, Any]:
         clean_tokens = {int(token) for token in tokens if self._safe_int(token) is not None and int(token) > 0}
+        expires_at = self._now() + timedelta(seconds=max(1, lease_seconds)) if lease_seconds else None
         with self._lock:
+            for token in clean_tokens:
+                self._subscription_owners.setdefault(token, {})[str(owner)] = expires_at
+                self._subscription_owner_modes.setdefault(token, {})[str(owner)] = self._normalize_mode(mode)
             self._desired_tokens.update(clean_tokens)
         self.cleanup_old_persisted_candles()
         self._rehydrate_premium_candles(clean_tokens)
@@ -259,11 +276,78 @@ class KiteWebSocketPriceFeed:
             return {"subscribed": [], "queued": sorted(clean_tokens), "reason": "websocket_disconnected"}
         return self._subscribe_connected(clean_tokens)
 
-    def unsubscribe(self, tokens: list[int] | set[int] | tuple[int, ...]) -> dict[str, Any]:
+    def replace_owner_subscriptions(
+        self,
+        *,
+        owner: str,
+        tokens: list[int] | set[int] | tuple[int, ...],
+        mode: str = "quote",
+        overlap_seconds: int = 0,
+    ) -> dict[str, Any]:
+        """Subscribe a new owner band before its old band is retired."""
         clean_tokens = {int(token) for token in tokens if self._safe_int(token) is not None and int(token) > 0}
+        owner_key = str(owner)
+        now = self._now()
         with self._lock:
+            previous = {token for token, owners in self._subscription_owners.items() if owner_key in owners}
+            for token in clean_tokens:
+                self._subscription_owners.setdefault(token, {})[owner_key] = None
+                self._subscription_owner_modes.setdefault(token, {})[owner_key] = self._normalize_mode(mode)
+            for token in previous - clean_tokens:
+                if overlap_seconds > 0:
+                    self._subscription_owners[token][owner_key] = now + timedelta(seconds=overlap_seconds)
+                else:
+                    self._subscription_owners[token].pop(owner_key, None)
+                    self._subscription_owner_modes.get(token, {}).pop(owner_key, None)
+            immediate_stale = self._rebuild_desired_tokens_locked(now)
+        subscription = self.subscribe(clean_tokens, owner=owner_key, mode=mode)
+        immediate_cleanup = self.unsubscribe(immediate_stale, preserve_owners=True) if immediate_stale else {"unsubscribed": []}
+        cleanup = self.cleanup_subscription_leases()
+        return {
+            **subscription,
+            "owner": owner_key,
+            "previous": sorted(previous),
+            "retiring": sorted(previous - clean_tokens),
+            "cleanup": {
+                "unsubscribed": sorted(set(immediate_cleanup.get("unsubscribed", [])) | set(cleanup.get("unsubscribed", [])))
+            },
+        }
+
+    def release_owner(self, owner: str, tokens: list[int] | set[int] | tuple[int, ...] | None = None) -> dict[str, Any]:
+        owner_key = str(owner)
+        selected = {int(token) for token in tokens} if tokens is not None else None
+        with self._lock:
+            for token in list(self._subscription_owners):
+                if selected is None or token in selected:
+                    self._subscription_owners[token].pop(owner_key, None)
+                    self._subscription_owner_modes.get(token, {}).pop(owner_key, None)
+            stale = self._rebuild_desired_tokens_locked(self._now())
+        return self.unsubscribe(stale, preserve_owners=True)
+
+    def cleanup_subscription_leases(self) -> dict[str, Any]:
+        with self._lock:
+            stale = self._rebuild_desired_tokens_locked(self._now())
+        return self.unsubscribe(stale, preserve_owners=True) if stale else {"unsubscribed": []}
+
+    def unsubscribe(
+        self,
+        tokens: list[int] | set[int] | tuple[int, ...],
+        *,
+        preserve_owners: bool = False,
+        owner: str = "legacy",
+    ) -> dict[str, Any]:
+        requested_tokens = {int(token) for token in tokens if self._safe_int(token) is not None and int(token) > 0}
+        with self._lock:
+            if not preserve_owners:
+                for token in requested_tokens:
+                    self._subscription_owners.get(token, {}).pop(str(owner), None)
+                    self._subscription_owner_modes.get(token, {}).pop(str(owner), None)
+                clean_tokens = self._rebuild_desired_tokens_locked(self._now())
+            else:
+                clean_tokens = requested_tokens
             self._desired_tokens.difference_update(clean_tokens)
             self._subscribed_tokens.difference_update(clean_tokens)
+            self._verified_live_tokens.difference_update(clean_tokens)
         if self.connected and self._ticker is not None and clean_tokens:
             try:
                 self._ticker.unsubscribe(list(clean_tokens))
@@ -312,6 +396,12 @@ class KiteWebSocketPriceFeed:
                 "running": self.running,
                 "subscribed_tokens": sorted(self._subscribed_tokens),
                 "desired_tokens": sorted(self._desired_tokens),
+                "verified_live_tokens": sorted(self._verified_live_tokens),
+                "subscription_owners": {
+                    str(token): sorted(owners)
+                    for token, owners in self._subscription_owners.items()
+                    if owners
+                },
                 "latest_tick_age": latest_tick_age,
                 "last_tick_timestamp": {
                     str(token): tick.timestamp.isoformat(sep=" ") for token, tick in self._ticks.items()
@@ -422,6 +512,7 @@ class KiteWebSocketPriceFeed:
                     if gap_event:
                         gap_events.append(gap_event)
                     self._ticks[tick.instrument_token] = tick
+                    self._verified_live_tokens.add(tick.instrument_token)
                     self._ticks_seen[tick.instrument_token] = self._ticks_seen.get(tick.instrument_token, 0) + 1
                     self._update_premium_candle(tick)
                     self.last_tick_at = self._now()
@@ -429,7 +520,8 @@ class KiteWebSocketPriceFeed:
                 else:
                     self.ignored_tick_count += 1
         for event in gap_events:
-            self._dispatch_gap(event)
+            if event.get("entry_blocking"):
+                self._dispatch_gap(event)
         for tick in parsed_ticks:
             self._dispatch_tick(tick)
 
@@ -659,7 +751,7 @@ class KiteWebSocketPriceFeed:
     def _event_loop(self) -> None:
         while not self._event_stop.is_set() or not self._event_queue.empty():
             try:
-                event_type, payload = self._event_queue.get(timeout=0.2)
+                _, _, event_type, payload = self._event_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
             try:
@@ -690,10 +782,22 @@ class KiteWebSocketPriceFeed:
             return
         self._ensure_event_worker()
         try:
-            self._event_queue.put_nowait((event_type, payload))
+            self._event_queue.put_nowait((self._event_priority(event_type, payload), next(self._event_sequence), event_type, payload))
         except queue.Full:
             self.event_queue_dropped_count += 1
             logger.warning("Kite WebSocket event queue full; dropped event=%s", event_type)
+
+    def _event_priority(self, event_type: str, payload: Any) -> int:
+        if event_type == "order_update":
+            return 0
+        if event_type == "gap":
+            return 1
+        if event_type == "tick" and isinstance(payload, WebSocketTick):
+            owners = self._subscription_owners.get(int(payload.instrument_token), {})
+            if any(owner.startswith("armed:") or owner.startswith("active_trade") for owner in owners):
+                return 2
+            return 4
+        return 5
 
     def _handle_queued_event(self, event_type: str, payload: Any) -> None:
         if event_type == "order_update":
@@ -826,14 +930,19 @@ class KiteWebSocketPriceFeed:
             return {"subscribed": [], "reason": "websocket_disconnected"}
         try:
             self._ticker.subscribe(list(tokens))
-            mode_full = getattr(self._ticker, "MODE_FULL", None)
             set_mode = getattr(self._ticker, "set_mode", None)
-            if mode_full is not None and callable(set_mode):
-                set_mode(mode_full, list(tokens))
+            if callable(set_mode):
+                groups: dict[str, list[int]] = {}
+                with self._lock:
+                    for token in tokens:
+                        groups.setdefault(self._effective_mode_locked(token), []).append(token)
+                for mode, mode_tokens in groups.items():
+                    sdk_mode = getattr(self._ticker, f"MODE_{mode.upper()}", mode)
+                    set_mode(sdk_mode, mode_tokens)
             with self._lock:
                 self._subscribed_tokens.update(tokens)
                 for token in tokens:
-                    self._tick_modes[token] = "full"
+                    self._tick_modes[token] = self._effective_mode_locked(token)
                 for token in tokens:
                     self._subscription_errors.pop(token, None)
             logger.info("Kite WebSocket subscribed tokens: %s", sorted(tokens))
@@ -846,6 +955,29 @@ class KiteWebSocketPriceFeed:
                     self._subscription_errors[token] = str(exc)
             logger.warning("Kite WebSocket subscribe failed: %s", exc)
             return {"subscribed": [], "reason": "subscription_failed", "message": str(exc)}
+
+    def _normalize_mode(self, mode: str) -> str:
+        normalized = str(mode or "quote").lower()
+        return normalized if normalized in {"ltp", "quote", "full"} else "quote"
+
+    def _effective_mode_locked(self, token: int) -> str:
+        priority = {"ltp": 0, "quote": 1, "full": 2}
+        modes = self._subscription_owner_modes.get(int(token), {}).values()
+        return max((self._normalize_mode(mode) for mode in modes), key=lambda mode: priority[mode], default="full")
+
+    def _rebuild_desired_tokens_locked(self, now: datetime) -> set[int]:
+        previous = set(self._desired_tokens)
+        for token in list(self._subscription_owners):
+            owners = self._subscription_owners[token]
+            for owner, expiry in list(owners.items()):
+                if expiry is not None and now >= expiry:
+                    owners.pop(owner, None)
+                    self._subscription_owner_modes.get(token, {}).pop(owner, None)
+            if not owners:
+                self._subscription_owners.pop(token, None)
+                self._subscription_owner_modes.pop(token, None)
+        self._desired_tokens = set(self._subscription_owners)
+        return previous - self._desired_tokens
 
     def _parse_tick(self, payload: dict[str, Any]) -> WebSocketTick | None:
         token = self._safe_int(payload.get("instrument_token"))
@@ -889,6 +1021,12 @@ class KiteWebSocketPriceFeed:
     def is_subscribed(self, instrument_token: int) -> bool:
         with self._lock:
             return int(instrument_token) in self._subscribed_tokens or int(instrument_token) in self._desired_tokens
+
+    def is_live_verified(self, instrument_token: int) -> bool:
+        token = int(instrument_token)
+        with self._lock:
+            verified = token in self._verified_live_tokens
+        return verified and self.is_fresh(token)
 
     def tick_count(self, instrument_token: int) -> int:
         with self._lock:
@@ -1007,6 +1145,8 @@ class KiteWebSocketPriceFeed:
         minute = tick.timestamp.replace(second=0, microsecond=0)
         token = int(tick.instrument_token)
         bucket = self._premium_candles.setdefault(token, {})
+        self._fill_premium_candle_gaps_locked(token=token, minute=minute)
+        volume_increment = self._volume_increment_locked(token=token, cumulative_volume=tick.volume)
         candle = bucket.get(minute)
         if candle is None:
             candle = WebSocketPremiumCandle(
@@ -1017,7 +1157,7 @@ class KiteWebSocketPriceFeed:
                 high_price=tick.price,
                 low_price=tick.price,
                 close_price=tick.price,
-                volume=float(tick.volume or 0.0),
+                volume=volume_increment,
                 tick_count=1,
             )
             bucket[minute] = candle
@@ -1025,10 +1165,42 @@ class KiteWebSocketPriceFeed:
             candle.high_price = max(candle.high_price, tick.price)
             candle.low_price = min(candle.low_price, tick.price)
             candle.close_price = tick.price
-            candle.volume = max(float(candle.volume or 0.0), float(tick.volume or 0.0))
+            candle.volume = float(candle.volume or 0.0) + volume_increment
             candle.tick_count += 1
         self._queue_premium_candle_persist(self._copy_premium_candle(candle))
         self._trim_premium_candles(token)
+
+    def _volume_increment_locked(self, *, token: int, cumulative_volume: float | None) -> float:
+        current = max(0.0, float(cumulative_volume or 0.0))
+        previous = self._last_cumulative_volume.get(int(token))
+        self._last_cumulative_volume[int(token)] = current
+        if previous is None or current < previous:
+            return 0.0
+        return max(0.0, current - previous)
+
+    def _fill_premium_candle_gaps_locked(self, *, token: int, minute: datetime) -> None:
+        bucket = self._premium_candles.get(int(token), {})
+        if not bucket:
+            return
+        latest_minute = max(bucket)
+        if minute <= latest_minute + timedelta(minutes=1):
+            return
+        previous_close = float(bucket[latest_minute].close_price)
+        cursor = latest_minute + timedelta(minutes=1)
+        while cursor < minute:
+            bucket[cursor] = WebSocketPremiumCandle(
+                instrument_token=int(token),
+                timeframe=settings.websocket_premium_candle_timeframe,
+                timestamp=cursor,
+                open_price=previous_close,
+                high_price=previous_close,
+                low_price=previous_close,
+                close_price=previous_close,
+                volume=0.0,
+                tick_count=0,
+                source="websocket_gap_fill",
+            )
+            cursor += timedelta(minutes=1)
 
     def _copy_premium_candle(self, candle: WebSocketPremiumCandle) -> WebSocketPremiumCandle:
         return WebSocketPremiumCandle(
@@ -1239,12 +1411,15 @@ class KiteWebSocketPriceFeed:
         if gap_seconds <= max_gap:
             return None
         event = {
-            "type": "tick_gap",
+            "type": "token_inactivity",
             "instrument_token": int(tick.instrument_token),
             "gap_start": previous_time.isoformat(sep=" "),
             "gap_end": current_time.isoformat(sep=" "),
             "gap_duration_seconds": round(gap_seconds, 3),
-            "reason": "tick_gap_detected",
+            "reason": "token_tick_inactivity_detected",
+            "scope": "token",
+            "entry_blocking": False,
+            "diagnostic_only": True,
             "backfill_status": "queued" if settings.enable_websocket_gap_backfill else "disabled",
         }
         self._record_gap_locked(event)
@@ -1262,6 +1437,8 @@ class KiteWebSocketPriceFeed:
                 "gap_end": None,
                 "gap_duration_seconds": None,
                 "reason": reason,
+                "scope": "connection",
+                "entry_blocking": True,
                 "backfill_status": "pending",
             }
             self._record_gap_locked(event)
@@ -1282,6 +1459,9 @@ class KiteWebSocketPriceFeed:
                 "gap_end": end.isoformat(sep=" "),
                 "gap_duration_seconds": round(gap_seconds, 3),
                 "reason": reason,
+                "scope": "connection",
+                "entry_blocking": False,
+                "recovered": True,
                 "backfill_status": "not_applicable_global_gap",
             }
             self._active_gap_started_at = None

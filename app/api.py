@@ -35,6 +35,7 @@ from app.services.active_price_feed import ActiveTradePriceFeed
 from app.services.after_market_research_service import AfterMarketResearchService
 from app.services.armed_entry_tracker_service import ArmedEntryTrackerService
 from app.services.banknifty_option_prewarm_service import BankNiftyOptionPrewarmService
+from app.services.banknifty_fast_rally_service import BankNiftyFastRallyService
 from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed
 from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.market_data_runtime_service import MarketDataRuntimeService
@@ -56,7 +57,7 @@ from app.services.strategy_version_registry import StrategyVersionRegistry
 from app.services.time_bucket_edge_service import TimeBucketEdgeService
 from app.services.trade_exit_service import TradeExitService
 from app.services.trade_repository import TradeRepository
-from app.services.trade_setup_service import OptionContract
+from app.services.trade_setup_service import OptionContract, TradeSetupService
 from app.services.time_utils import format_ist, ist_now_naive
 from app.providers.kite_provider import KiteProvider
 from app.providers.kite_auth_state import kite_auth_state
@@ -211,6 +212,7 @@ market_session_service = MarketSessionService()
 kite_websocket_price_feed = KiteWebSocketPriceFeed(market_session_service=market_session_service)
 active_trade_price_feed = ActiveTradePriceFeed(kite_websocket_price_feed)
 banknifty_option_prewarm_service = BankNiftyOptionPrewarmService(kite_websocket_price_feed)
+shared_trade_setup_service = TradeSetupService()
 market_data_runtime_service = MarketDataRuntimeService(
     websocket_feed=kite_websocket_price_feed,
     active_price_feed=active_trade_price_feed,
@@ -298,6 +300,7 @@ def get_scanner_service() -> ScannerService:
     return ScannerService(
         strategy_edge_service=strategy_edge_service,
         feed=shared_kite_feed,
+        trade_setup_service=shared_trade_setup_service,
         option_premium_confirmation_service=OptionPremiumConfirmationService(kite_websocket_price_feed, live_gap_backfill_service=data_ingestion_service),
         rejected_opportunity_repository=rejected_opportunity_repository,
         banknifty_option_prewarm_service=banknifty_option_prewarm_service,
@@ -335,6 +338,16 @@ auto_trader_service = AutoTraderService(
     risk_management_service=risk_management_service,
     notification_service=notification_service,
 )
+banknifty_fast_rally_service = BankNiftyFastRallyService(auto_trader_service.request_fast_rescan)
+
+
+def _dispatch_strategy_tick(tick: object) -> None:
+    if armed_entry_tracker_service is not None:
+        armed_entry_tracker_service.on_tick(tick)
+    banknifty_fast_rally_service.on_tick(tick)
+
+
+kite_websocket_price_feed.tick_handler = _dispatch_strategy_tick
 trade_exit_service = TradeExitService(
     trade_repository=trade_repository,
     kite_provider_factory=get_kite_provider,
@@ -390,6 +403,20 @@ def _run_startup_maintenance() -> None:
     if settings.enable_kite_websocket:
         try:
             application_context.market_data_runtime_service.start()
+            instruments = get_kite_provider().instruments("NSE")
+            banknifty = next(
+                (
+                    item
+                    for item in instruments
+                    if str(item.get("name") or "").upper() == "NIFTY BANK"
+                    or str(item.get("tradingsymbol") or "").upper() == "NIFTY BANK"
+                ),
+                None,
+            )
+            underlying_token = int(banknifty.get("instrument_token")) if banknifty and banknifty.get("instrument_token") else None
+            if underlying_token:
+                banknifty_fast_rally_service.set_underlying_token(underlying_token)
+                kite_websocket_price_feed.subscribe({underlying_token}, owner="core_market", mode="quote")
         except Exception:
             logger.exception("startup websocket start failed")
     try:
@@ -3548,6 +3575,7 @@ def kite_websocket_status() -> dict[str, object]:
     if armed_entry_tracker_service is not None:
         status.update(armed_entry_tracker_service.status())
         status["armed_entry"] = armed_entry_tracker_service.list_entries()
+    status["banknifty_fast_rally"] = banknifty_fast_rally_service.status()
     return status
 
 

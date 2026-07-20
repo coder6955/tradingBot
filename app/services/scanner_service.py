@@ -473,7 +473,7 @@ class ScannerService:
             if armed_entry_eval:
                 factor_scores = dict(factor_scores)
                 factor_scores["armed_entry"] = armed_entry_eval
-                if armed_entry_eval.get("early_arm"):
+                if armed_entry_eval.get("registered") and armed_entry_eval.get("early_arm") is True:
                     early_timing = self._early_entry_timing_payload(
                         contract=contract,
                         prices=prices,
@@ -944,7 +944,8 @@ class ScannerService:
         if int(quality_eval["score"]) < settings.min_option_quality_score or not quality_eval["passed"]:
             failures.extend(str(reason) for reason in quality_eval.get("reasons", []))
         if settings.enable_day_type_filter and not day_type_eval.get("passed", False):
-            failures.extend(str(reason) for reason in day_type_eval.get("reasons", ["day type filter failed"]))
+            day_reasons = [str(reason) for reason in day_type_eval.get("reasons", ["day type filter failed"])]
+            failures.extend(reason for reason in day_reasons if reason != "not enough intraday candles to classify day type")
         if settings.enable_option_premium_confirmation and not premium_eval.get("passed", False):
             failures.extend(str(reason) for reason in premium_eval.get("reasons", ["option premium confirmation failed"]))
         if settings.enable_time_bucket_filter and not time_bucket_eval.get("passed", False):
@@ -1019,7 +1020,8 @@ class ScannerService:
         blocking_gate_failures = self._blocking_gate_failures_for_arming(gate_failures) if early_arm else list(gate_failures)
         if blocking_gate_failures:
             return {"registered": False, "reason": "hard_gate_failed_before_arming", "gate_failures": list(gate_failures)}
-        if score < settings.min_signal_score:
+        required_score = settings.early_arm_min_score if early_arm else settings.min_signal_score
+        if score < required_score:
             return {"registered": False, "reason": "final weighted score is below threshold"}
         if not contract.instrument_token:
             return {"registered": False, "reason": "selected_option_token_missing"}

@@ -39,15 +39,26 @@ class BankNiftyOptionPrewarmService:
             self.last_reason = "near_atm_candidates_unavailable"
             return self.status(extra={"refreshed": False})
 
-        if not self._refresh_due(atm):
+        if not self._refresh_due(atm, spot_price=spot_price, candidates=candidates):
             self.last_reason = "prewarm_already_current"
             return self.status(extra={"refreshed": False})
 
+        replace = getattr(self.websocket_price_feed, "replace_owner_subscriptions", None)
         subscribe = getattr(self.websocket_price_feed, "subscribe", None)
-        if not callable(subscribe):
+        if not callable(replace) and not callable(subscribe):
             self.last_reason = "websocket_subscribe_unavailable"
             return self.status(extra={"refreshed": False})
-        self.last_subscription = dict(subscribe(tokens))
+        if callable(replace):
+            self.last_subscription = dict(
+                replace(
+                    owner="banknifty_prewarm",
+                    tokens=tokens,
+                    mode="quote",
+                    overlap_seconds=settings.banknifty_prewarm_overlap_seconds,
+                )
+            )
+        else:
+            self.last_subscription = dict(subscribe(tokens))
         self.last_refresh_at = ist_now_naive()
         self.last_atm_strike = atm
         self.last_tokens = set(tokens)
@@ -99,11 +110,16 @@ class BankNiftyOptionPrewarmService:
                 seen.add(key)
         return sorted(wanted, key=lambda item: (float(item.get("strike") or 0.0), str(item.get("instrument_type") or "")))
 
-    def _refresh_due(self, atm_strike: float | None) -> bool:
+    def _refresh_due(self, atm_strike: float | None, *, spot_price: float, candidates: list[dict[str, Any]]) -> bool:
         if self.last_refresh_at is None or not self.last_tokens:
             return True
         if atm_strike is not None and self.last_atm_strike is not None and atm_strike != self.last_atm_strike:
-            return True
+            strikes = sorted({self._safe_float(item.get("strike")) for item in candidates if self._safe_float(item.get("strike")) > 0})
+            steps = [strikes[index] - strikes[index - 1] for index in range(1, len(strikes)) if strikes[index] > strikes[index - 1]]
+            step = min(steps) if steps else abs(atm_strike - self.last_atm_strike)
+            threshold = step * max(0.5, settings.banknifty_prewarm_rotation_hysteresis_pct / 100.0)
+            if abs(spot_price - self.last_atm_strike) >= threshold:
+                return True
         elapsed = (ist_now_naive() - self.last_refresh_at).total_seconds()
         return elapsed >= max(1, settings.banknifty_prewarm_refresh_seconds)
 
