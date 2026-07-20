@@ -11,6 +11,7 @@ from app.services.time_utils import ist_now, ist_now_naive
 from app.providers.kite_provider import KiteProvider
 from app.services.active_price_feed import ActiveTradePriceFeed, KitePollingPriceFeed, PriceTick
 from app.services.market_data_coordinator import MarketDataCoordinator
+from app.services.executable_price_service import ExecutableExitPrice, ExecutablePriceService
 from app.services.paper_trading_service import PaperTradingService
 from app.services.trade_repository import TradeRepository
 
@@ -31,6 +32,8 @@ class TradeExitService:
         active_price_feed: ActiveTradePriceFeed | None = None,
         notification_service: Any | None = None,
         market_data_coordinator: MarketDataCoordinator | None = None,
+        executable_price_service: ExecutablePriceService | None = None,
+        latency_metrics: Any | None = None,
     ) -> None:
         self.trade_repository = trade_repository
         self.kite_provider_factory = kite_provider_factory
@@ -38,6 +41,8 @@ class TradeExitService:
         self.active_price_feed = active_price_feed
         self.notification_service = notification_service
         self.market_data_coordinator = market_data_coordinator
+        self.executable_price_service = executable_price_service or ExecutablePriceService()
+        self.latency_metrics = latency_metrics
         self._banknifty_underlying_token: int | None = None
         self._instrument_validation_cache: dict[int, dict[str, Any]] = {}
 
@@ -80,21 +85,43 @@ class TradeExitService:
                 "fallback_used": False,
                 "price_rejection_reason": reason,
             }
-        current_price = current_tick.price
         self._record_price_excursion(trade, current_tick)
+        quantity = int(trade.remaining_quantity or trade.filled_quantity or trade.placed_quantity or trade.requested_quantity or 0)
+        execution = self.executable_price_service.for_long_exit(current_tick, quantity=quantity)
+        current_price = execution.executable_price
+        if current_price is None:
+            return {
+                "trade_id": trade.id,
+                "tradingsymbol": trade.tradingsymbol,
+                "closed": False,
+                "reason": execution.rejection_reason or "executable_exit_price_unavailable",
+                **self._price_metadata(current_tick, execution=execution),
+            }
 
-        protective_stop = self._pending_or_filled_protective_stop(provider, trade, current_tick)
+        protective_stop = self._pending_or_filled_protective_stop(provider, trade, current_tick, price=current_price)
         if protective_stop is not None:
             return protective_stop
 
-        outcome = self._outcome_for_price(provider, trade, current_price)
+        decision = self._outcome_for_price(provider, trade, current_price, target_supported=execution.target_supported)
+        outcome = decision["first_triggered"]
         if outcome is None:
             return {
                 "trade_id": trade.id,
                 "tradingsymbol": trade.tradingsymbol,
                 "closed": False,
                 "current_price": current_price,
-                **self._price_metadata(current_tick),
+                **self._price_metadata(current_tick, execution=execution, decision=decision),
+            }
+
+        if str(trade.mode).lower() == "live" and not execution.live_safe:
+            return {
+                "trade_id": trade.id,
+                "tradingsymbol": trade.tradingsymbol,
+                "closed": False,
+                "current_price": current_price,
+                "outcome_detected": outcome,
+                "reason": "live_software_exit_blocked_without_quantity_supported_executable_price",
+                **self._price_metadata(current_tick, execution=execution, decision=decision),
             }
 
         if trade.mode == "live" and not settings.live_auto_squareoff:
@@ -104,16 +131,16 @@ class TradeExitService:
                 "closed": False,
                 "current_price": current_price,
                 "outcome_detected": outcome,
-                **self._price_metadata(current_tick),
+                **self._price_metadata(current_tick, execution=execution, decision=decision),
                 "reason": "live auto square-off is disabled",
             }
 
-        partial = self._maybe_partial_squareoff(provider, trade, current_tick, outcome)
+        partial = self._maybe_partial_squareoff(provider, trade, current_tick, outcome, execution=execution)
         if partial is not None:
             return partial
 
         if str(trade.mode).lower() == "live":
-            return self._submit_live_exit(provider, trade, current_tick, outcome)
+            return self._submit_live_exit(provider, trade, current_tick, outcome, execution=execution, decision=decision)
 
         squareoff = self._squareoff(provider, trade, current_price, outcome=outcome, tick=current_tick)
         close_price = current_price
@@ -126,9 +153,15 @@ class TradeExitService:
             outcome=outcome,
             exit_price=close_price,
             notes=f"Auto square-off: {outcome}; {squareoff}",
-            **self._price_metadata(current_tick, include_in_db=True),
+            **self._price_metadata(current_tick, execution=execution, decision=decision, include_in_db=True),
         )
         self._unsubscribe_closed_option_token(updated)
+        if self.latency_metrics is not None:
+            self.latency_metrics.record_between(
+                "exit_trigger_to_fill",
+                current_tick.timestamp,
+                detail={"trade_id": updated.id, "mode": "paper", "outcome": outcome},
+            )
         return {
             "trade_id": updated.id,
             "tradingsymbol": updated.tradingsymbol,
@@ -137,7 +170,7 @@ class TradeExitService:
             "outcome": outcome,
             "exit_price": close_price,
             "intended_exit_price": current_price,
-            **self._price_metadata(current_tick),
+            **self._price_metadata(current_tick, execution=execution, decision=decision),
             "gross_pnl": updated.gross_pnl,
             "net_pnl": updated.net_pnl if updated.net_pnl is not None else updated.pnl,
             "charges": updated.charges,
@@ -145,13 +178,13 @@ class TradeExitService:
             "squareoff": squareoff,
         }
 
-    def _pending_or_filled_protective_stop(self, provider: KiteProvider, trade: Any, tick: PriceTick) -> dict[str, Any] | None:
+    def _pending_or_filled_protective_stop(self, provider: KiteProvider, trade: Any, tick: PriceTick, *, price: float) -> dict[str, Any] | None:
         if str(trade.mode).lower() != "live":
             return None
         protective_order_id = str(getattr(trade, "protective_order_id", "") or "")
         if not protective_order_id:
             return None
-        if not self._stop_loss_crossed(trade, float(tick.price or 0.0)):
+        if not self._stop_loss_crossed(trade, price):
             return None
         return self._handle_protective_stop_exit(provider, trade, protective_order_id, tick, "stop_loss")
 
@@ -215,7 +248,16 @@ class TradeExitService:
         )
         return {"status": "live_partial_squareoff_submitted", "response": response}
 
-    def _submit_live_exit(self, provider: KiteProvider, trade: Any, tick: PriceTick, outcome: str) -> dict[str, Any]:
+    def _submit_live_exit(
+        self,
+        provider: KiteProvider,
+        trade: Any,
+        tick: PriceTick,
+        outcome: str,
+        *,
+        execution: ExecutableExitPrice,
+        decision: dict[str, Any],
+    ) -> dict[str, Any]:
         protective_order_id = str(getattr(trade, "protective_order_id", "") or "")
         if protective_order_id and outcome == "stop_loss":
             protective_result = self._handle_protective_stop_exit(provider, trade, protective_order_id, tick, outcome)
@@ -238,9 +280,9 @@ class TradeExitService:
         closing = self.trade_repository.try_mark_closing(
             int(trade.id),
             outcome=outcome,
-            exit_price=tick.price,
+            exit_price=float(execution.executable_price or tick.price),
             notes=f"Exit detected: {outcome}; awaiting live square-off submission",
-            **self._price_metadata(tick, include_in_db=True),
+            **self._price_metadata(tick, execution=execution, decision=decision, include_in_db=True),
         )
         if closing is None:
             return {
@@ -251,7 +293,21 @@ class TradeExitService:
                 **self._price_metadata(tick),
             }
         try:
-            squareoff = self._squareoff(provider, trade, tick.price)
+            submission_at = ist_now_naive()
+            if self.latency_metrics is not None:
+                self.latency_metrics.record_between(
+                    "exit_trigger_to_exit_submission",
+                    tick.timestamp,
+                    submission_at,
+                    detail={"trade_id": trade.id, "outcome": outcome},
+                )
+            squareoff = self._squareoff(provider, trade, float(execution.executable_price or tick.price))
+            if self.latency_metrics is not None:
+                self.latency_metrics.record_between(
+                    "exit_submission_to_broker_acknowledgement",
+                    submission_at,
+                    detail={"trade_id": trade.id, "outcome": outcome},
+                )
         except Exception as exc:
             reason = f"live square-off submission failed: {exc}"
             failed = self.trade_repository.mark_exit_failed(int(trade.id), reason=reason)
@@ -274,7 +330,14 @@ class TradeExitService:
             broker_payload={"squareoff": squareoff},
             notes=f"Live square-off submitted for {outcome}",
         )
-        confirmed = self._confirm_live_exit(provider, closing, exit_order_id=exit_order_id, outcome=outcome, exit_price=tick.price, price_tick=tick)
+        confirmed = self._confirm_live_exit(
+            provider,
+            closing,
+            exit_order_id=exit_order_id,
+            outcome=outcome,
+            exit_price=float(execution.executable_price or tick.price),
+            price_tick=tick,
+        )
         if confirmed.get("closed"):
             return confirmed
         return {
@@ -284,7 +347,7 @@ class TradeExitService:
             "closed": False,
             "status": "closing",
             "outcome_detected": outcome,
-            "exit_price": tick.price,
+            "exit_price": float(execution.executable_price or tick.price),
             "exit_order_id": exit_order_id,
             "squareoff": squareoff,
             "confirmation": confirmed,
@@ -500,6 +563,12 @@ class TradeExitService:
             **(self._price_metadata(price_tick, include_in_db=True) if price_tick else {}),
         )
         self._unsubscribe_closed_option_token(updated)
+        if self.latency_metrics is not None:
+            self.latency_metrics.record_between(
+                "exit_trigger_to_fill",
+                getattr(trade, "exit_requested_at", None) or getattr(trade, "price_timestamp", None),
+                detail={"trade_id": updated.id, "mode": "live", "outcome": outcome, "exit_order_id": exit_order_id},
+            )
         return {
             "trade_id": updated.id,
             "tradingsymbol": updated.tradingsymbol,
@@ -547,42 +616,50 @@ class TradeExitService:
         quantity = sum(int(self._float(row.get("quantity")) or 0) for row in matches)
         return {"position_zero": quantity == 0, "quantity": quantity, "matches": matches}
 
-    def _outcome_for_price(self, provider: KiteProvider, trade: Any, price: float) -> str | None:
-        timed_exit = self._time_exit_outcome(trade, price)
-        if timed_exit:
-            return timed_exit
-
-        invalidation = self._invalidation_exit_outcome(provider, trade, price)
-        if invalidation:
-            return invalidation
-
-        trailing_exit = self._trailing_exit_outcome(trade, price)
-        if trailing_exit:
-            return trailing_exit
-
+    def _outcome_for_price(self, provider: KiteProvider, trade: Any, price: float, *, target_supported: bool = True) -> dict[str, Any]:
+        triggered: list[str] = []
         if str(trade.side).upper() == "SELL":
             if trade.stop_loss is not None and price >= float(trade.stop_loss):
-                return "stop_loss"
+                triggered.append("stop_loss")
+        elif trade.stop_loss is not None and price <= float(trade.stop_loss):
+            triggered.append("stop_loss")
+        timed_exit = self._time_exit_outcome(trade, price)
+        if timed_exit:
+            triggered.append(timed_exit)
+        trailing_exit = self._trailing_exit_outcome(trade, price)
+        if trailing_exit:
+            triggered.append(trailing_exit)
+        invalidation = self._invalidation_exit_outcome(provider, trade, price)
+        if invalidation:
+            triggered.append(invalidation)
+        if str(trade.side).upper() == "SELL" and target_supported:
             if trade.target_3 is not None and price <= float(trade.target_3):
-                return "target_3"
+                triggered.append("target_3")
             if trade.target_2 is not None and price <= float(trade.target_2):
-                return "target_2"
+                triggered.append("target_2")
             if trade.target_1 is not None and price <= float(trade.target_1):
-                return "target_1"
-            return None
+                triggered.append("target_1")
+            return {"first_triggered": triggered[0] if triggered else None, "triggered_rules": list(dict.fromkeys(triggered))}
+        if target_supported:
+            if trade.target_3 is not None and price >= float(trade.target_3):
+                triggered.append("target_3")
+            if trade.target_2 is not None and price >= float(trade.target_2):
+                triggered.append("target_2")
+            if trade.target_1 is not None and price >= float(trade.target_1):
+                triggered.append("target_1")
+        unique = list(dict.fromkeys(triggered))
+        return {"first_triggered": unique[0] if unique else None, "triggered_rules": unique}
 
-        if trade.stop_loss is not None and price <= float(trade.stop_loss):
-            return "stop_loss"
-        if trade.target_3 is not None and price >= float(trade.target_3):
-            return "target_3"
-        if trade.target_2 is not None and price >= float(trade.target_2):
-            return "target_2"
-        if trade.target_1 is not None and price >= float(trade.target_1):
-            return "target_1"
-        return None
-
-    def _maybe_partial_squareoff(self, provider: KiteProvider, trade: Any, tick: PriceTick, outcome: str) -> dict[str, Any] | None:
-        price = tick.price
+    def _maybe_partial_squareoff(
+        self,
+        provider: KiteProvider,
+        trade: Any,
+        tick: PriceTick,
+        outcome: str,
+        *,
+        execution: ExecutableExitPrice,
+    ) -> dict[str, Any] | None:
+        price = float(execution.executable_price or tick.price)
         if outcome != "target_1" or not settings.enable_partial_booking:
             return None
         quantity = int(trade.remaining_quantity or trade.filled_quantity or trade.placed_quantity or trade.requested_quantity or 0)
@@ -885,7 +962,14 @@ class TradeExitService:
             "reason": None if valid else "token_symbol_exchange_mismatch",
         }
 
-    def _price_metadata(self, tick: PriceTick | None, *, include_in_db: bool = False) -> dict[str, Any]:
+    def _price_metadata(
+        self,
+        tick: PriceTick | None,
+        *,
+        execution: ExecutableExitPrice | None = None,
+        decision: dict[str, Any] | None = None,
+        include_in_db: bool = False,
+    ) -> dict[str, Any]:
         if tick is None:
             return {}
         age = tick.age_seconds
@@ -897,12 +981,31 @@ class TradeExitService:
             "price_age_seconds": round(float(age), 3),
         }
         if include_in_db:
-            return payload
+            return {
+                **payload,
+                "exit_rule_first_triggered": decision.get("first_triggered") if decision else None,
+                "exit_triggered_rules": decision.get("triggered_rules", []) if decision else [],
+                "exit_ltp": execution.ltp if execution else tick.price,
+                "exit_best_bid": execution.best_bid if execution else tick.bid,
+                "exit_best_ask": execution.best_ask if execution else tick.ask,
+                "exit_executable_price": execution.executable_price if execution else None,
+                "exit_depth_coverage": execution.depth_coverage if execution else None,
+                "exit_spread_pct": execution.spread_pct if execution else None,
+                "exit_execution_source": execution.price_source if execution else None,
+                "exit_quote_timestamp": execution.quote_timestamp if execution else tick.timestamp,
+            }
         return {
             **payload,
             "instrument_token": tick.instrument_token,
             "bid": tick.bid,
             "ask": tick.ask,
+            "ltp": execution.ltp if execution else tick.price,
+            "executable_price": execution.executable_price if execution else None,
+            "depth_coverage": execution.depth_coverage if execution else None,
+            "spread_pct": execution.spread_pct if execution else None,
+            "execution_price_source": execution.price_source if execution else None,
+            "triggered_rules": decision.get("triggered_rules", []) if decision else [],
+            "first_triggered_rule": decision.get("first_triggered") if decision else None,
             "fallback_used": tick.source == "kite_polling",
             "price_rejection_reason": None,
             "price_timestamp_source": tick.timestamp_source,

@@ -268,6 +268,16 @@ class TradeRepository:
         price_source: str | None = None,
         price_timestamp: datetime | None = None,
         price_age_seconds: float | None = None,
+        exit_rule_first_triggered: str | None = None,
+        exit_triggered_rules: list[str] | None = None,
+        exit_ltp: float | None = None,
+        exit_best_bid: float | None = None,
+        exit_best_ask: float | None = None,
+        exit_executable_price: float | None = None,
+        exit_depth_coverage: float | None = None,
+        exit_spread_pct: float | None = None,
+        exit_execution_source: str | None = None,
+        exit_quote_timestamp: datetime | None = None,
         notes: str | None = None,
     ) -> TradeRecord | None:
         """Atomically claim a trade for live exit submission.
@@ -292,6 +302,16 @@ class TradeRepository:
                         TradeRecord.price_source: price_source,
                         TradeRecord.price_timestamp: price_timestamp,
                         TradeRecord.price_age_seconds: price_age_seconds,
+                        TradeRecord.exit_rule_first_triggered: exit_rule_first_triggered,
+                        TradeRecord.exit_triggered_rules_json: json.dumps(exit_triggered_rules or []),
+                        TradeRecord.exit_ltp: exit_ltp,
+                        TradeRecord.exit_best_bid: exit_best_bid,
+                        TradeRecord.exit_best_ask: exit_best_ask,
+                        TradeRecord.exit_executable_price: exit_executable_price,
+                        TradeRecord.exit_depth_coverage: exit_depth_coverage,
+                        TradeRecord.exit_spread_pct: exit_spread_pct,
+                        TradeRecord.exit_execution_source: exit_execution_source,
+                        TradeRecord.exit_quote_timestamp: exit_quote_timestamp,
                         TradeRecord.exit_attempt_count: func.coalesce(TradeRecord.exit_attempt_count, 0) + 1,
                         TradeRecord.exit_last_error: None,
                         TradeRecord.updated_at: now,
@@ -402,6 +422,16 @@ class TradeRepository:
         price_source: str | None = None,
         price_timestamp: datetime | None = None,
         price_age_seconds: float | None = None,
+        exit_rule_first_triggered: str | None = None,
+        exit_triggered_rules: list[str] | None = None,
+        exit_ltp: float | None = None,
+        exit_best_bid: float | None = None,
+        exit_best_ask: float | None = None,
+        exit_executable_price: float | None = None,
+        exit_depth_coverage: float | None = None,
+        exit_spread_pct: float | None = None,
+        exit_execution_source: str | None = None,
+        exit_quote_timestamp: datetime | None = None,
         exit_order_id: str | None = None,
         exit_order_status: str | None = None,
         exit_order_response: dict[str, Any] | None = None,
@@ -417,6 +447,17 @@ class TradeRepository:
             record.price_source = price_source or record.price_source
             record.price_timestamp = price_timestamp or record.price_timestamp
             record.price_age_seconds = price_age_seconds if price_age_seconds is not None else record.price_age_seconds
+            record.exit_rule_first_triggered = exit_rule_first_triggered or record.exit_rule_first_triggered
+            if exit_triggered_rules is not None:
+                record.exit_triggered_rules_json = json.dumps(exit_triggered_rules, default=str)
+            record.exit_ltp = exit_ltp if exit_ltp is not None else record.exit_ltp
+            record.exit_best_bid = exit_best_bid if exit_best_bid is not None else record.exit_best_bid
+            record.exit_best_ask = exit_best_ask if exit_best_ask is not None else record.exit_best_ask
+            record.exit_executable_price = exit_executable_price if exit_executable_price is not None else record.exit_executable_price
+            record.exit_depth_coverage = exit_depth_coverage if exit_depth_coverage is not None else record.exit_depth_coverage
+            record.exit_spread_pct = exit_spread_pct if exit_spread_pct is not None else record.exit_spread_pct
+            record.exit_execution_source = exit_execution_source or record.exit_execution_source
+            record.exit_quote_timestamp = exit_quote_timestamp or record.exit_quote_timestamp
             record.exit_order_id = exit_order_id or record.exit_order_id
             record.exit_order_status = exit_order_status or record.exit_order_status
             record.exit_confirmed_at = ist_now_naive()

@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from datetime import date
 
 from app.services.banknifty_intelligence_service import BankNiftyIntelligenceService
 from app.services.database import init_db
@@ -18,6 +19,7 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
 
         self._original_first_trade_time = banknifty_intelligence_service.settings.banknifty_first_trade_time
         object.__setattr__(banknifty_intelligence_service.settings, "banknifty_first_trade_time", "00:00")
+        self.service = BankNiftyIntelligenceService(today=lambda: date(2026, 7, 20))
         self._seed_banknifty_candles(last_close=58220)
 
     def tearDown(self) -> None:
@@ -44,6 +46,8 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
         snapshots = self._market_snapshots(bank_move=0.6, nifty_move=0.2, bank_constituent_move=0.7)
         snapshots["HDFCBANK"] = self._snapshot(-0.4)
         snapshots["ICICIBANK"] = self._snapshot(-0.3)
+        snapshots["AXISBANK"] = self._snapshot(-0.3)
+        snapshots["KOTAKBANK"] = self._snapshot(-0.3)
         snapshots["SBIN"] = self._snapshot(0.1)
 
         result = self._evaluate(trend="bullish", market_snapshots=snapshots)
@@ -109,6 +113,66 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("range day blocks option buying", result["hard_reasons"])
 
+    def test_incomplete_data_is_measured_by_available_index_weight(self) -> None:
+        snapshots = self._market_snapshots(0.6, 0.2, 0.7)
+        for symbol in ["HDFCBANK", "ICICIBANK", "SBIN"]:
+            snapshots.pop(symbol)
+
+        result = self._evaluate(market_snapshots=snapshots)
+        alignment = result["details"]["topBankAlignment"]
+
+        self.assertLess(alignment["coverage_by_weight"], 0.70)
+        self.assertFalse(alignment["hard_gate_eligible"])
+        self.assertIn("top bank constituent live weight coverage is incomplete", result["soft_reasons"])
+
+    def test_opposing_heavyweights_block_even_when_small_banks_support(self) -> None:
+        snapshots = self._market_snapshots(0.6, 0.2, 0.7)
+        snapshots["HDFCBANK"] = self._snapshot(-0.5)
+        snapshots["ICICIBANK"] = self._snapshot(-0.5)
+
+        result = self._evaluate(market_snapshots=snapshots)
+
+        self.assertFalse(result["passed"])
+        self.assertIn("opposing heavyweight bank participation is too large", result["hard_reasons"])
+
+    def test_broad_participation_reports_full_weight_coverage(self) -> None:
+        result = self._evaluate(market_snapshots=self._market_snapshots(0.6, 0.2, 0.7))
+        alignment = result["details"]["topBankAlignment"]
+
+        self.assertEqual(alignment["available"], 14)
+        self.assertAlmostEqual(alignment["coverage_by_weight"], 1.0, places=3)
+        self.assertTrue(alignment["broad_based"])
+
+    def test_stale_snapshot_is_reported_and_not_used_as_hard_gate(self) -> None:
+        stale_service = BankNiftyIntelligenceService(today=lambda: date(2026, 9, 1))
+        snapshots = self._market_snapshots(0.6, 0.2, -0.7)
+
+        result = self._evaluate(service=stale_service, market_snapshots=snapshots)
+
+        alignment = result["details"]["topBankAlignment"]
+        self.assertTrue(alignment["snapshot"]["stale"])
+        self.assertFalse(alignment["hard_gate_eligible"])
+        self.assertIn("Bank Nifty constituent weights are stale", result["soft_reasons"])
+
+    def test_snapshot_contains_current_official_constituent_change(self) -> None:
+        symbols = set(self.service.constituent_symbols())
+
+        self.assertEqual(len(symbols), 14)
+        self.assertIn("UNIONBANK", symbols)
+        self.assertIn("YESBANK", symbols)
+        self.assertNotIn("BANDHANBNK", symbols)
+
+    def test_snapshot_status_is_dashboard_safe_and_complete(self) -> None:
+        status = self.service.snapshot_status()
+
+        self.assertEqual(status["status"], "ok")
+        self.assertEqual(status["source_date"], "2026-06-30")
+        self.assertEqual(status["constituent_count"], 14)
+        self.assertTrue(status["valid"])
+        self.assertFalse(status["stale"])
+        self.assertEqual(len(status["constituents"]), 14)
+        self.assertNotIn("weight", status["constituents"][0])
+
     def _evaluate(self, **overrides):  # type: ignore[no-untyped-def]
         contract = overrides.get("contract") or OptionContract(
             tradingsymbol="BANKNIFTY26JUL58200CE",
@@ -134,7 +198,8 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
         }
         day_type_eval = overrides.get("day_type_eval") or {"passed": True, "score": 90, "reasons": [], "details": {"day_type": "trend_expansion"}}
         snapshot = {"price": 58220, "vwap": 58120, **overrides.get("snapshot", {})}
-        return BankNiftyIntelligenceService().evaluate(
+        service = overrides.get("service") or self.service
+        return service.evaluate(
             trend=overrides.get("trend", "bullish"),
             snapshot=snapshot,
             market_snapshots=overrides.get("market_snapshots") or self._market_snapshots(0.6, 0.2, 0.7),
@@ -150,7 +215,7 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
             "BANKNIFTY": self._snapshot(bank_move),
             "NIFTY": self._snapshot(nifty_move),
         }
-        for symbol in ["HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK"]:
+        for symbol in self.service.constituent_symbols():
             snapshots[symbol] = self._snapshot(bank_constituent_move)
         return snapshots
 

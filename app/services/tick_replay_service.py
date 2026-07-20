@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from typing import Any, Callable, Iterable
 
 from app.services.database import RawTickRecord, get_session
@@ -50,6 +51,7 @@ class TickReplayService:
                     "price": row.last_price,
                     "bid": row.bid,
                     "ask": row.ask,
+                    "depth": json.loads(row.depth_json or "{}"),
                     "volume": row.cumulative_volume,
                     "timestamp": row.exchange_timestamp or row.receive_timestamp,
                     "receive_timestamp": row.receive_timestamp,
@@ -78,7 +80,8 @@ class TickReplayService:
                     {"strategy_version": strategy_version, "config_hash": hash_value}
                     for strategy_version, hash_value in lineage_values
                 ],
-                "mixed_lineage": len(lineage_values) > 1,
+            "mixed_lineage": len(lineage_values) > 1,
+                "sequence_gap_count": self._sequence_gap_count(rows) if not tokens else None,
             }
         )
         return result
@@ -95,6 +98,8 @@ class TickReplayService:
             volume=float(event["volume"]) if event.get("volume") is not None else None,
             bid=float(event["bid"]) if event.get("bid") is not None else None,
             ask=float(event["ask"]) if event.get("ask") is not None else None,
+            buy_depth=tuple(dict(level) for level in event.get("depth", {}).get("buy", []) if isinstance(level, dict)),
+            sell_depth=tuple(dict(level) for level in event.get("depth", {}).get("sell", []) if isinstance(level, dict)),
             receive_timestamp=receive,
             timestamp_source=str(event.get("timestamp_source") or "replay"),
             packet_type=str(event.get("packet_type") or "replay"),
@@ -107,3 +112,8 @@ class TickReplayService:
 
     def _timestamp(self, tick: WebSocketTick) -> str:
         return (tick.receive_timestamp or tick.timestamp).isoformat(sep=" ")
+
+    def _sequence_gap_count(self, rows: list[RawTickRecord]) -> int:
+        if len(rows) < 2:
+            return 0
+        return sum(1 for previous, current in zip(rows, rows[1:]) if int(current.sequence) != int(previous.sequence) + 1)

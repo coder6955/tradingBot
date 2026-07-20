@@ -13,6 +13,7 @@ from app.services.database import Candle, OpportunityRecord, RejectedOpportunity
 from app.services.greeks_service import GreeksService
 from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.market_data_service import MarketDataService
+from app.services.market_session_service import MarketSessionService
 from app.services.option_history_repository import OptionHistoryRepository
 from app.services.time_utils import ist_now_naive, ist_today
 
@@ -37,12 +38,14 @@ class DataIngestionService:
         option_history_repository: OptionHistoryRepository | None = None,
         greeks_service: GreeksService | None = None,
         market_data_coordinator: MarketDataCoordinator | None = None,
+        market_session_service: MarketSessionService | None = None,
     ) -> None:
         self.kite_provider_factory = kite_provider_factory
         self.market_data_service = market_data_service or MarketDataService()
         self.option_history_repository = option_history_repository or OptionHistoryRepository()
         self.greeks_service = greeks_service or GreeksService()
         self.market_data_coordinator = market_data_coordinator
+        self.market_session_service = market_session_service or MarketSessionService()
         self._live_backfill_last_attempts: dict[tuple[str, str], datetime] = {}
 
     def ingest_candles(
@@ -77,8 +80,16 @@ class DataIngestionService:
                     use_checkpoint=use_checkpoint,
                     overlap_minutes=overlap_minutes,
                 )
-                fetched = provider.historical_data(token, from_dt, to_dt, timeframe)
+                fetched, historical_calls = self._historical_data_chunked(
+                    provider,
+                    token=int(token),
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                    timeframe=timeframe,
+                )
                 candles = [self._kite_candle_to_row(item) for item in fetched]
+                if normalized == "BANKNIFTY" and timeframe in {"1minute", "5minute"}:
+                    candles = self._canonical_banknifty_rows(candles, timeframe=timeframe, instrument_token=token, completed_through=to_dt)
                 inserted = self.market_data_service.save_candles(normalized, timeframe, candles)
                 results.append(
                     {
@@ -90,6 +101,7 @@ class DataIngestionService:
                         "to": to_dt.isoformat(sep=" "),
                         "fetched": len(candles),
                         "inserted": inserted,
+                        "historical_calls": historical_calls,
                     }
                 )
             except Exception as exc:
@@ -103,6 +115,41 @@ class DataIngestionService:
             "use_checkpoint": use_checkpoint,
             "overlap_minutes": overlap_minutes,
             "results": results,
+        }
+
+    def bootstrap_canonical_banknifty(
+        self,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        days: int = 90,
+        use_checkpoint: bool = True,
+    ) -> dict[str, Any]:
+        results = {
+            timeframe: self.ingest_candles(
+                symbols=["BANKNIFTY"],
+                timeframe=timeframe,
+                from_date=from_date,
+                to_date=to_date,
+                days=days,
+                use_checkpoint=use_checkpoint,
+            )
+            for timeframe in ("1minute", "5minute")
+        }
+        failures = [
+            row
+            for result in results.values()
+            for row in result.get("results", [])
+            if row.get("status") != "ok"
+        ]
+        return {
+            "status": "error" if failures else "ok",
+            "symbol": "BANKNIFTY",
+            "canonical_only": True,
+            "timestamp_authority": "broker_exchange_timestamp",
+            "timeframes": results,
+            "failures": failures,
+            "note": "Historical rows are broker-provided only; the bootstrap does not fabricate gaps or convert option/WS_TOKEN candles.",
         }
 
     def capture_option_snapshots(
@@ -1020,6 +1067,35 @@ class DataIngestionService:
         from_dt = self._parse_date(from_date) if from_date else to_dt - timedelta(days=days)
         return from_dt, to_dt
 
+    def _historical_data_chunked(
+        self,
+        provider: KiteProvider,
+        *,
+        token: int,
+        from_dt: datetime,
+        to_dt: datetime,
+        timeframe: str,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Fetch broker history within Kite interval limits, with boundary overlap.
+
+        Boundary overlap is intentional and safe because canonical conversion and
+        database persistence both de-duplicate timestamps.
+        """
+        max_days = 55 if timeframe == "1minute" else 90
+        if to_dt <= from_dt:
+            return [], 0
+        cursor = from_dt
+        rows: list[dict[str, Any]] = []
+        calls = 0
+        while cursor < to_dt:
+            chunk_end = min(to_dt, cursor + timedelta(days=max_days))
+            rows.extend(provider.historical_data(token, cursor, chunk_end, timeframe))
+            calls += 1
+            if chunk_end >= to_dt:
+                break
+            cursor = chunk_end
+        return rows, calls
+
     def _checkpoint_from_dt(
         self,
         *,
@@ -1162,6 +1238,47 @@ class DataIngestionService:
             "close": item.get("close"),
             "volume": item.get("volume") or 0,
         }
+
+    def _canonical_banknifty_rows(
+        self,
+        candles: list[dict[str, Any]],
+        *,
+        timeframe: str,
+        instrument_token: int,
+        completed_through: datetime,
+    ) -> list[dict[str, Any]]:
+        minutes = 1 if timeframe == "1minute" else 5
+        rows: list[dict[str, Any]] = []
+        seen: set[datetime] = set()
+        for candle in candles:
+            timestamp = self._parse_optional_datetime(candle.get("timestamp"))
+            if timestamp is None or timestamp in seen:
+                continue
+            if not self.market_session_service.is_market_open(timestamp):
+                continue
+            if timestamp + timedelta(minutes=minutes) > completed_through.replace(tzinfo=None):
+                continue
+            try:
+                open_price = float(candle.get("open") or 0.0)
+                high_price = float(candle.get("high") or 0.0)
+                low_price = float(candle.get("low") or 0.0)
+                close_price = float(candle.get("close") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if min(open_price, high_price, low_price, close_price) <= 0 or high_price < low_price:
+                continue
+            seen.add(timestamp)
+            rows.append(
+                {
+                    **candle,
+                    "timestamp": timestamp,
+                    "instrument_token": int(instrument_token),
+                    "timestamp_source": "broker_exchange_timestamp",
+                    "is_generated": False,
+                    "data_quality": "broker_historical_complete",
+                }
+            )
+        return sorted(rows, key=lambda row: row["timestamp"])
 
     def _instrument_matches(self, item: dict[str, Any], symbol: str) -> bool:
         target = symbol.upper().replace(" ", "")

@@ -45,7 +45,31 @@ class LiveKiteProvider:
         return {"order_id": "test-order"}
 
     def order_history(self, order_id):  # type: ignore[no-untyped-def]
-        return [{"order_id": order_id, "status": "COMPLETE", "filled_quantity": 100, "quantity": 100, "average_price": 100}]
+        quantity = int(self.orders[0]["quantity"]) if self.orders else 0
+        return [{"order_id": order_id, "status": "COMPLETE", "filled_quantity": quantity, "quantity": quantity, "average_price": 100}]
+
+    def cancel_order(self, order_id, variety="regular"):  # type: ignore[no-untyped-def]
+        return {"order_id": order_id, "status": "cancelled", "variety": variety}
+
+
+class ProtectiveFailureProvider(LiveKiteProvider):
+    def place_order(self, **kwargs):  # type: ignore[no-untyped-def]
+        if kwargs.get("order_type") == "SL-M":
+            raise RuntimeError("protective rejected by broker")
+        return super().place_order(**kwargs)
+
+
+class PartialFillProvider(LiveKiteProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.cancelled_entry = False
+
+    def order_history(self, order_id):  # type: ignore[no-untyped-def]
+        return [{"order_id": order_id, "status": "OPEN", "filled_quantity": 30, "quantity": 90, "average_price": 101}]
+
+    def cancel_order(self, order_id, variety="regular"):  # type: ignore[no-untyped-def]
+        self.cancelled_entry = True
+        return super().cancel_order(order_id, variety=variety)
 
 
 class CountingQuoteProvider(FailingKiteProvider):
@@ -163,13 +187,16 @@ class OrderServiceTests(unittest.TestCase):
 
         original_live = order_service.settings.live_trading_mode
         original_paper = order_service.settings.paper_trading_mode
+        original_protection = order_service.settings.enable_broker_emergency_sl
         try:
             object.__setattr__(order_service.settings, "live_trading_mode", True)
             object.__setattr__(order_service.settings, "paper_trading_mode", False)
+            object.__setattr__(order_service.settings, "enable_broker_emergency_sl", True)
             result = service.place_signal_order(signal, confirm_live=True, order_mode="live")
         finally:
             object.__setattr__(order_service.settings, "live_trading_mode", original_live)
             object.__setattr__(order_service.settings, "paper_trading_mode", original_paper)
+            object.__setattr__(order_service.settings, "enable_broker_emergency_sl", original_protection)
 
         self.assertEqual(result["status"], "live")
         self.assertEqual(result["requested_quantity"], 150)
@@ -210,6 +237,84 @@ class OrderServiceTests(unittest.TestCase):
         self.assertEqual(provider.orders[1]["order_type"], "SL-M")
         self.assertEqual(provider.orders[1]["trigger_price"], 80)
         self.assertEqual(repo.protective["status"], "submitted")
+
+    def test_live_order_is_blocked_when_required_broker_protection_is_disabled(self) -> None:
+        provider = LiveKiteProvider()
+        service = OrderService(
+            kite_provider=provider,  # type: ignore[arg-type]
+            risk_management_service=PassingRiskService(),  # type: ignore[arg-type]
+        )
+        from app.services import order_service
+
+        originals = {
+            "live_trading_mode": order_service.settings.live_trading_mode,
+            "paper_trading_mode": order_service.settings.paper_trading_mode,
+            "enable_broker_emergency_sl": order_service.settings.enable_broker_emergency_sl,
+            "require_broker_protective_stop_for_live_entry": order_service.settings.require_broker_protective_stop_for_live_entry,
+        }
+        try:
+            object.__setattr__(order_service.settings, "live_trading_mode", True)
+            object.__setattr__(order_service.settings, "paper_trading_mode", False)
+            object.__setattr__(order_service.settings, "enable_broker_emergency_sl", False)
+            object.__setattr__(order_service.settings, "require_broker_protective_stop_for_live_entry", True)
+            with self.assertRaisesRegex(ValueError, "protective stop is required"):
+                service.place_signal_order(self._signal(), confirm_live=True, order_mode="live")
+        finally:
+            for key, value in originals.items():
+                object.__setattr__(order_service.settings, key, value)
+        self.assertEqual(provider.orders, [])
+
+    def test_protective_placement_failure_blocks_later_live_entries(self) -> None:
+        provider = ProtectiveFailureProvider()
+        service = OrderService(
+            kite_provider=provider,  # type: ignore[arg-type]
+            risk_management_service=PassingRiskService(),  # type: ignore[arg-type]
+        )
+        from app.services import order_service
+
+        originals = {
+            "live_trading_mode": order_service.settings.live_trading_mode,
+            "paper_trading_mode": order_service.settings.paper_trading_mode,
+            "enable_broker_emergency_sl": order_service.settings.enable_broker_emergency_sl,
+        }
+        try:
+            object.__setattr__(order_service.settings, "live_trading_mode", True)
+            object.__setattr__(order_service.settings, "paper_trading_mode", False)
+            object.__setattr__(order_service.settings, "enable_broker_emergency_sl", True)
+            first = service.place_signal_order(self._signal(), confirm_live=True, order_mode="live")
+            self.assertFalse(first["broker_emergency_sl"]["submitted"])
+            with self.assertRaisesRegex(ValueError, "previous protective stop failure"):
+                service.place_signal_order(self._signal(), confirm_live=True, order_mode="live")
+        finally:
+            for key, value in originals.items():
+                object.__setattr__(order_service.settings, key, value)
+
+    def test_partial_entry_is_cancelled_then_only_filled_quantity_is_protected(self) -> None:
+        provider = PartialFillProvider()
+        service = OrderService(
+            kite_provider=provider,  # type: ignore[arg-type]
+            risk_management_service=PassingRiskService(),  # type: ignore[arg-type]
+        )
+        from app.services import order_service
+
+        originals = {
+            "live_trading_mode": order_service.settings.live_trading_mode,
+            "paper_trading_mode": order_service.settings.paper_trading_mode,
+            "enable_broker_emergency_sl": order_service.settings.enable_broker_emergency_sl,
+        }
+        try:
+            object.__setattr__(order_service.settings, "live_trading_mode", True)
+            object.__setattr__(order_service.settings, "paper_trading_mode", False)
+            object.__setattr__(order_service.settings, "enable_broker_emergency_sl", True)
+            result = service.place_signal_order(self._signal(quantity=90), confirm_live=True, order_mode="live")
+        finally:
+            for key, value in originals.items():
+                object.__setattr__(order_service.settings, key, value)
+
+        self.assertTrue(provider.cancelled_entry)
+        self.assertTrue(result["broker_emergency_sl"]["submitted"])
+        self.assertEqual(result["broker_emergency_sl"]["quantity"], 30)
+        self.assertEqual(provider.orders[-1]["quantity"], 30)
 
     def test_execution_quality_uses_market_data_coordinator_cache(self) -> None:
         provider = CountingQuoteProvider()

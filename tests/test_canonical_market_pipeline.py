@@ -1,12 +1,14 @@
 import os
 import tempfile
 import unittest
+import json
 from datetime import datetime, timedelta
 
 from app.config import settings
 from app.providers.kite_feed import KiteFeed
 from app.providers.kite_provider import KiteProvider
 from app.services.database import Candle, RawTickRecord, get_session, init_db
+from app.services.data_ingestion_service import DataIngestionService
 from app.services.kite_websocket_price_feed import WebSocketTick
 from app.services.latency_metrics_service import LatencyMetricsService
 from app.services.raw_tick_capture_service import RawTickCaptureService
@@ -118,6 +120,89 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
         self.assertEqual(service.dropped_risk_count, 0)
         self.assertTrue(service._queue.get_nowait()["risk_sensitive"])
 
+    def test_raw_tick_capture_preserves_five_level_depth(self) -> None:
+        service = RawTickCaptureService(queue_size=10)
+        service.start()
+        tick = WebSocketTick(
+            **{
+                **self._tick(15, 100, token=123).__dict__,
+                "bid": 99.5,
+                "ask": 100.5,
+                "buy_depth": ({"price": 99.5, "quantity": 15}, {"price": 99.0, "quantity": 30}),
+                "sell_depth": ({"price": 100.5, "quantity": 15},),
+            }
+        )
+        service.capture(tick, symbol="BANKNIFTY26JUL58000CE", owners=["active_trade"])
+        service.stop()
+
+        session = get_session()
+        try:
+            row = session.query(RawTickRecord).one()
+            depth = json.loads(row.depth_json)
+        finally:
+            session.close()
+        self.assertEqual(depth["buy"][1]["quantity"], 30)
+        self.assertEqual(depth["sell"][0]["price"], 100.5)
+
+    def test_canonical_historical_bootstrap_filters_after_hours_and_is_idempotent(self) -> None:
+        class Provider:
+            def instruments(self, exchange=None):
+                return [{"tradingsymbol": "NIFTY BANK", "name": "NIFTY BANK", "instrument_token": 260105}]
+
+            def historical_data(self, token, from_dt, to_dt, timeframe):
+                minute = 1 if timeframe == "1minute" else 5
+                return [
+                    {"date": datetime(2026, 7, 3, 8, 59), "open": 57900, "high": 57910, "low": 57890, "close": 57900, "volume": 10},
+                    {"date": datetime(2026, 7, 3, 9, 15), "open": 58000, "high": 58020, "low": 57990, "close": 58010, "volume": 100},
+                    {"date": datetime(2026, 7, 3, 9, 15) + timedelta(minutes=minute), "open": 58010, "high": 58030, "low": 58000, "close": 58020, "volume": 120},
+                    {"date": datetime(2026, 7, 3, 15, 30), "open": 58100, "high": 58110, "low": 58090, "close": 58100, "volume": 50},
+                ]
+
+        service = DataIngestionService(kite_provider_factory=Provider)
+        kwargs = {"from_date": "2026-07-03 09:15:00", "to_date": "2026-07-03 15:31:00", "use_checkpoint": False}
+        first = service.bootstrap_canonical_banknifty(**kwargs)
+        second = service.bootstrap_canonical_banknifty(**kwargs)
+
+        session = get_session()
+        try:
+            rows = session.query(Candle).filter(Candle.symbol == "BANKNIFTY").order_by(Candle.timeframe, Candle.timestamp).all()
+        finally:
+            session.close()
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(second["status"], "ok")
+        self.assertEqual(len(rows), 5)
+        self.assertEqual({row.timeframe for row in rows}, {"1minute", "5minute"})
+        self.assertTrue(all(row.timestamp_source == "broker_exchange_timestamp" for row in rows))
+        self.assertTrue(all(row.data_quality == "broker_historical_complete" for row in rows))
+        self.assertTrue(all(row.timestamp.time() >= datetime(2026, 7, 3, 9, 15).time() for row in rows))
+
+    def test_one_minute_bootstrap_chunks_ranges_below_broker_limit(self) -> None:
+        calls = []
+
+        class Provider:
+            def instruments(self, exchange=None):
+                return [{"tradingsymbol": "NIFTY BANK", "name": "NIFTY BANK", "instrument_token": 260105}]
+
+            def historical_data(self, token, from_dt, to_dt, timeframe):
+                calls.append((from_dt, to_dt, timeframe))
+                if (to_dt - from_dt).days > 60:
+                    raise AssertionError("broker interval limit exceeded")
+                return []
+
+        service = DataIngestionService(kite_provider_factory=Provider)
+        result = service.ingest_candles(
+            symbols=["BANKNIFTY"],
+            timeframe="1minute",
+            from_date="2026-03-01 09:15:00",
+            to_date="2026-07-01 15:30:00",
+            use_checkpoint=False,
+        )
+
+        self.assertEqual(result["results"][0]["status"], "ok")
+        self.assertEqual(result["results"][0]["historical_calls"], 3)
+        self.assertEqual(len(calls), 3)
+        self.assertTrue(all((end - start).days <= 55 for start, end, _ in calls))
+
     def test_latency_report_has_tail_percentiles(self) -> None:
         service = LatencyMetricsService(sample_limit=20)
         for value in range(1, 11):
@@ -128,6 +213,17 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
         self.assertEqual(metric["p95_ms"], 10.0)
         self.assertEqual(metric["p99_ms"], 10.0)
         self.assertEqual(metric["max_ms"], 10.0)
+
+    def test_latency_report_exposes_all_required_metrics_and_missing_samples(self) -> None:
+        service = LatencyMetricsService(sample_limit=20)
+        service.record_missing("exchange_tick_to_application_receive", detail={"reason": "exchange_timestamp_unavailable"})
+
+        report = service.report()
+
+        self.assertTrue(set(LatencyMetricsService.REQUIRED_METRICS).issubset(report["metrics"]))
+        self.assertEqual(report["metrics"]["exchange_tick_to_application_receive"]["sample_count"], 0)
+        self.assertEqual(report["metrics"]["exchange_tick_to_application_receive"]["missing_sample_count"], 1)
+        self.assertIsNone(report["metrics"]["exit_trigger_to_fill"]["p99_ms"])
 
     def test_persisted_tick_replay_preserves_capture_sequence(self) -> None:
         stamp = datetime(2026, 7, 3, 10, 0)

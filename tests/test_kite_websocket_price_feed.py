@@ -1,5 +1,7 @@
 import os
 import tempfile
+import threading
+import time
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import patch
@@ -10,6 +12,7 @@ from app.providers.kite_auth_state import kite_auth_state
 from app.services.active_price_feed import ActiveTradePriceFeed, PriceTick
 from app.services.database import Candle, get_session, init_db
 from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed, WebSocketTick
+from app.services.latency_metrics_service import LatencyMetricsService
 from app.services.paper_trading_service import PaperTradingService
 from app.services.trade_exit_service import TradeExitService
 from app.services.trade_repository import TradeRepository
@@ -114,6 +117,10 @@ class FakeActiveFeed:
             timestamp=ist_now_naive(),
             source="kite_websocket",
             instrument_token=instrument_token,
+            bid=self.price,
+            ask=self.price + 0.5,
+            buy_depth=({"price": self.price, "quantity": 100},),
+            sell_depth=({"price": self.price + 0.5, "quantity": 100},),
         )
 
     def subscribe(self, tokens):
@@ -231,6 +238,40 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0].instrument_token, 123)
         self.assertEqual(seen[0].price, 88.5)
+
+    def test_latency_instrumentation_and_slow_consumer_do_not_block_websocket_callback(self) -> None:
+        consumer_started = threading.Event()
+        release_consumer = threading.Event()
+
+        def slow_consumer(_tick):  # type: ignore[no-untyped-def]
+            consumer_started.set()
+            release_consumer.wait(timeout=1.0)
+
+        latency = LatencyMetricsService(sample_limit=20)
+        feed = KiteWebSocketPriceFeed(
+            api_key="k",
+            access_token="t",
+            ticker_factory=FakeTicker,
+            tick_handler=slow_consumer,
+            latency_metrics=latency,
+            clock=regular_market_now,
+        )
+        feed.running = True
+        feed._ensure_event_worker()
+        exchange_time = regular_market_now() - timedelta(milliseconds=20)
+        started = time.perf_counter()
+        try:
+            feed._on_ticks(
+                None,
+                [{"instrument_token": 123, "last_price": 88.5, "exchange_timestamp": exchange_time}],
+            )
+            elapsed = time.perf_counter() - started
+            self.assertLess(elapsed, 0.15)
+            self.assertTrue(consumer_started.wait(timeout=0.5))
+            self.assertEqual(latency.report()["metrics"]["exchange_tick_to_application_receive"]["sample_count"], 1)
+        finally:
+            release_consumer.set()
+            feed.stop()
 
     def test_websocket_ticks_create_and_update_one_minute_candles(self) -> None:
         feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker)

@@ -164,3 +164,38 @@ This file records decisions that should survive individual conversations and cod
 **Decision:** Strategy/config lineage is recorded on decision and execution artifacts. Mixed hashes are reported rather than silently combined; live routing blocks when the active registered version has config drift.  
 **Why:** Evidence from materially different policies is not interchangeable.  
 **Consequence:** Paper mode can continue with a warning. Operators must register/activate the next version after reviewing `.env.example`; the machine-specific `.env` is never overwritten.
+
+## D024 — Use a reviewed official constituent snapshot, never a hot-path download
+
+**Status:** Accepted
+**Decision:** Bank Nifty participation uses all 14 members and official weights from a locally versioned NSE Indices snapshot with effective date, source, lineage, staleness and available-weight coverage.
+**Why:** Hardcoded legacy weights and count-only coverage can overstate alignment, while network/PDF retrieval in the entry path is slow and fragile.
+**Consequence:** Stale snapshots remain diagnostic but lose hard-gate authority. Refresh tooling validates totals and requires manual review for membership changes.
+
+## D025 — Exit long options against executable bids
+
+**Status:** Accepted
+**Decision:** Stops, targets, time exits and invalidations use a conservative sell-side executable price. Full bid depth is quantity-weighted; partial depth cannot prove a target; LTP-only spikes never fill exits.
+**Why:** A last trade is not necessarily available when selling, especially in fast or thin option markets.
+**Consequence:** Paper and live decisions retain LTP for diagnostics but persist bid/depth evidence. Live software exits fail closed without full quantity-safe depth.
+
+## D026 — Give overlapping exit rules deterministic priority and honest attribution
+
+**Status:** Accepted
+**Decision:** Priority is stop, time/near-close, trailing, invalidation, then targets. The first rule and every simultaneous trigger are stored; analytics do not infer causal improvement without counterfactual paths.
+**Why:** Iteration order otherwise changes outcomes and makes multiple-trigger trades look attributable to the most convenient label.
+**Consequence:** Optional exits remain disabled, shadow-only or unchanged until purged out-of-sample evidence supports them.
+
+## D027 — Require broker-side disaster protection for confirmed live fills
+
+**Status:** Accepted
+**Decision:** Live entry is blocked when broker protection is required but disabled. Complete or partial fills must receive a reconciled broker SL-M order; remaining partial-entry quantity is cancelled first. Missing IDs, rejection, cancellation or placement failure persistently blocks new live entries.
+**Why:** A process, network or WebSocket failure must not leave a live long-option position without a broker-resident loss boundary.
+**Consequence:** `ENABLE_BROKER_EMERGENCY_SL=false` keeps live trading blocked by default. Software/protective exits coordinate to prevent duplicate sells.
+
+## D028 — Make professional readiness multi-fold, after-cost and regime-aware
+
+**Status:** Accepted
+**Decision:** Readiness requires at least 100 independent out-of-sample trades, 20 sessions, three purged/embargoed folds, positive after-cost expectancy, minimum profit factor, bounded drawdown, and sufficient stable evidence in traded trend/range/volatile/event/expiry regimes. Zero-trade evidence fails explicitly.
+**Why:** Scanner observations are dependent, and one aggregate split can conceal leakage, regime concentration or costs.
+**Consequence:** Missing regimes or insufficient samples keep readiness and live scaling blocked; thresholds are not optimized on evaluation folds.

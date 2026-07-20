@@ -12,6 +12,7 @@ from app.services.opportunity_repository import OpportunityRepository
 from app.services.signal_service import SignalService
 from app.services.time_bucket_edge_service import TimeBucketEdgeService
 from app.services.auto_trader_service import AutoTraderService
+from app.services.professional_readiness_service import ProfessionalReadinessService
 
 
 class ValidationAndHotPathTests(unittest.TestCase):
@@ -145,6 +146,36 @@ class ValidationAndHotPathTests(unittest.TestCase):
             if previous_validation_end is not None:
                 self.assertGreater(validation_start, previous_validation_end)
             previous_validation_end = datetime.fromisoformat(fold["validation_end"])
+
+    def test_zero_trade_validation_fails_with_evidence_reasons(self) -> None:
+        passed, reasons = BacktestService()._validation_passed(
+            {"trades": 0, "expectancy_pct": 0.0, "profit_factor": None, "max_drawdown_pct": 0.0, "win_rate": 0.0}
+        )
+
+        self.assertFalse(passed)
+        self.assertIn("not enough out-of-sample trades", reasons)
+        self.assertIn("out-of-sample profit factor is below threshold", reasons)
+
+    def test_professional_readiness_rejects_zero_trades_and_missing_regimes(self) -> None:
+        service = ProfessionalReadinessService.__new__(ProfessionalReadinessService)
+        checks = service._checks(
+            option_coverage={"snapshots": 0},
+            opportunities={"overall": {"trades": 0, "expectancy": 0.0}, "mixed_lineage": False},
+            execution={"overall": {"trades": 0}, "execution_quality": {}, "mixed_lineage": False},
+            option_backtest={"status": "ok", "summary": {"trades": 0, "expectancy_pct": 0.0}},
+            walk_forward={
+                "status": "ok",
+                "passed": False,
+                "fold_count": 0,
+                "out_of_sample_sessions": 0,
+                "summary": {"trades": 0, "expectancy_pct": 0.0, "profit_factor": None, "max_drawdown_pct": 0.0},
+                "regime_stability": {"passed": False, "reasons": ["no regime evidence"]},
+            },
+        )
+
+        self.assertFalse(checks["walk_forward_after_cost_expectancy"]["passed"])
+        self.assertFalse(checks["walk_forward_drawdown"]["passed"])
+        self.assertFalse(checks["walk_forward_regime_stability"]["passed"])
 
 
 if __name__ == "__main__":

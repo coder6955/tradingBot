@@ -292,6 +292,12 @@ class ArmedEntryTrackerService:
                 confirmed_at,
                 detail={"setup_id": setup.setup_id, "timestamp_source": tick.timestamp_source},
             )
+            self.latency_metrics.record_between(
+                "armed_state_to_confirmation",
+                setup.armed_at,
+                confirmed_at,
+                detail={"setup_id": setup.setup_id, "timestamp_source": tick.timestamp_source},
+            )
 
         session = self._market_session()
         if session != "REGULAR_MARKET":
@@ -435,6 +441,17 @@ class ArmedEntryTrackerService:
                 "deviation_pct": 0.0,
             },
         }
+        if self.latency_metrics is not None:
+            submission_at = self.clock().replace(tzinfo=None)
+            if queued_at is None:
+                self.latency_metrics.record_missing("confirmation_to_order_submission", detail={"setup_id": setup_id, "reason": "confirmation_timestamp_missing"})
+            else:
+                self.latency_metrics.record_between(
+                    "confirmation_to_order_submission",
+                    queued_at,
+                    submission_at,
+                    detail={"setup_id": setup_id, "mode": "paper"},
+                )
         result = self.order_service_factory().place_signal_order(
             signal,
             confirm_live=False,

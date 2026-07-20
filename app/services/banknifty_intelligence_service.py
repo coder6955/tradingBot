@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, time
-from typing import Any
+import json
+from datetime import date, datetime, time
+from pathlib import Path
+from typing import Any, Callable
 
 from app.config import settings
 from app.services.database import Candle, get_session
@@ -12,17 +14,41 @@ from app.services.trade_setup_service import OptionContract
 class BankNiftyIntelligenceService:
     """Bank Nifty-specific quality filters around the generic scanner flow."""
 
-    TOP_BANKS = [
-        {"symbol": "HDFCBANK", "name": "HDFC Bank", "weight": 0.29, "group": "private"},
-        {"symbol": "ICICIBANK", "name": "ICICI Bank", "weight": 0.24, "group": "private"},
-        {"symbol": "SBIN", "name": "SBI", "weight": 0.10, "group": "psu"},
-        {"symbol": "AXISBANK", "name": "Axis Bank", "weight": 0.09, "group": "private"},
-        {"symbol": "KOTAKBANK", "name": "Kotak Bank", "weight": 0.08, "group": "private"},
-        {"symbol": "INDUSINDBK", "name": "IndusInd Bank", "weight": 0.03, "group": "private"},
-        {"symbol": "BANKBARODA", "name": "Bank of Baroda", "weight": 0.03, "group": "psu"},
-        {"symbol": "PNB", "name": "PNB", "weight": 0.02, "group": "psu"},
-        {"symbol": "CANBK", "name": "Canara Bank", "weight": 0.02, "group": "psu"},
-    ]
+    def __init__(self, *, snapshot_path: str | Path | None = None, today: Callable[[], date] | None = None) -> None:
+        self.snapshot_path = Path(snapshot_path or settings.banknifty_constituent_snapshot_file)
+        self._today = today or date.today
+        self.constituent_snapshot = self._load_constituent_snapshot()
+        self.constituents = list(self.constituent_snapshot["constituents"])
+
+    def constituent_symbols(self) -> list[str]:
+        return [str(row["symbol"]) for row in self.constituents]
+
+    def snapshot_status(self) -> dict[str, Any]:
+        """Return dashboard-safe metadata for the reviewed constituent snapshot."""
+        snapshot = self.constituent_snapshot
+        return {
+            "status": "ok" if snapshot.get("valid") and not snapshot.get("stale") else "attention",
+            "snapshot_file": str(self.snapshot_path),
+            "source_date": snapshot.get("source_date"),
+            "effective_date": snapshot.get("effective_date"),
+            "strategy_version": snapshot.get("strategy_version"),
+            "constituent_count": len(self.constituents),
+            "total_weight": snapshot.get("total_weight"),
+            "age_days": snapshot.get("age_days"),
+            "stale": bool(snapshot.get("stale")),
+            "valid": bool(snapshot.get("valid")),
+            "validation_errors": list(snapshot.get("validation_errors") or []),
+            "source": dict(snapshot.get("source") or {}),
+            "constituents": [
+                {
+                    "symbol": row.get("symbol"),
+                    "name": row.get("name"),
+                    "group": row.get("group"),
+                    "weight_pct": row.get("weight_pct"),
+                }
+                for row in self.constituents
+            ],
+        }
 
     def evaluate(
         self,
@@ -53,17 +79,19 @@ class BankNiftyIntelligenceService:
 
         hard_reasons: list[str] = []
         soft_reasons: list[str] = []
-        if top_banks["available"] >= 3:
+        if top_banks["hard_gate_eligible"]:
             if top_banks["alignment"] < settings.banknifty_top_bank_min_alignment:
                 hard_reasons.append("top banks are mixed against Bank Nifty direction")
+            if top_banks["against_weight"] >= settings.banknifty_opposing_heavyweight_weight:
+                hard_reasons.append("opposing heavyweight bank participation is too large")
             if top_banks["direction_count"] < settings.banknifty_top_bank_min_direction_count:
-                hard_reasons.append("not enough top banks support the trade direction")
+                soft_reasons.append("constituent participation is too narrow")
             if top_banks["one_bank_pull"]:
                 soft_reasons.append("Bank Nifty move appears concentrated in one heavyweight")
-            if private_psu["hdfcIciciCombinedImpact"] < -0.05:
-                hard_reasons.append("HDFC and ICICI are opposite to the trade direction")
         else:
-            soft_reasons.append("top bank constituent live data is incomplete")
+            soft_reasons.append(str(top_banks["hard_gate_ineligible_reason"]))
+            if top_banks["hard_gate_ineligible_reason"] == "top bank constituent live data is incomplete":
+                soft_reasons.append("top bank constituent live weight coverage is incomplete")
 
         if relative["extreme_against"]:
             hard_reasons.append(relative["reason"])
@@ -138,7 +166,11 @@ class BankNiftyIntelligenceService:
         available_weight = 0.0
         direction_count = 0
         opposite_count = 0
-        for bank in self.TOP_BANKS:
+        capped_support_weight = 0.0
+        capped_against_weight = 0.0
+        capped_available_weight = 0.0
+        cap = max(0.01, float(settings.banknifty_constituent_hard_gate_weight_cap))
+        for bank in self.constituents:
             snapshot = market_snapshots.get(str(bank["symbol"]), {})
             move = self._pct_move(snapshot)
             if move is None:
@@ -149,24 +181,102 @@ class BankNiftyIntelligenceService:
             contribution = move * weight
             rows.append({**bank, "move_pct": round(move, 3), "supports": supports, "contribution": round(contribution, 4)})
             available_weight += weight
+            capped_weight = min(weight, cap)
+            capped_available_weight += capped_weight
             if supports:
                 direction_count += 1
                 support_weight += weight
+                capped_support_weight += capped_weight
             elif opposes:
                 opposite_count += 1
                 against_weight += weight
-        alignment = support_weight / available_weight if available_weight else 0.0
+                capped_against_weight += capped_weight
+        alignment = capped_support_weight / capped_available_weight if capped_available_weight else 0.0
         top_contribution = max((abs(float(row["contribution"])) for row in rows), default=0.0)
         total_contribution = sum(abs(float(row["contribution"])) for row in rows)
+        total_weight = float(self.constituent_snapshot["total_weight"])
+        coverage = available_weight / total_weight if total_weight else 0.0
+        stale = bool(self.constituent_snapshot["stale"])
+        valid = bool(self.constituent_snapshot["valid"])
+        hard_gate_eligible = valid and not stale and coverage >= settings.banknifty_constituent_min_weight_coverage
+        if stale:
+            ineligible_reason = "Bank Nifty constituent weights are stale"
+        elif not valid:
+            ineligible_reason = "Bank Nifty constituent weights failed validation"
+        else:
+            ineligible_reason = "top bank constituent live data is incomplete"
         return {
             "available": len(rows),
             "alignment": round(alignment, 3),
+            "uncapped_alignment": round(support_weight / available_weight, 3) if available_weight else 0.0,
+            "available_weight": round(available_weight, 4),
+            "coverage_by_weight": round(coverage, 4),
+            "support_weight": round(support_weight, 4),
+            "against_weight": round(against_weight, 4),
             "weightedDirectionalContribution": round(sum(float(row["contribution"]) for row in rows), 4),
             "direction_count": direction_count,
             "opposite_count": opposite_count,
             "broad_based": direction_count >= settings.banknifty_top_bank_min_direction_count and alignment >= settings.banknifty_top_bank_min_alignment,
             "one_bank_pull": total_contribution > 0 and top_contribution / total_contribution > 0.55,
+            "hard_gate_eligible": hard_gate_eligible,
+            "hard_gate_ineligible_reason": ineligible_reason,
+            "snapshot": {key: value for key, value in self.constituent_snapshot.items() if key != "constituents"},
             "banks": rows,
+        }
+
+    def _load_constituent_snapshot(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self.snapshot_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            return {
+                "source_date": None,
+                "effective_date": None,
+                "strategy_version": settings.strategy_version,
+                "source": {},
+                "constituents": [],
+                "total_weight": 0.0,
+                "age_days": None,
+                "stale": True,
+                "valid": False,
+                "validation_errors": [f"snapshot_load_failed:{exc}"],
+            }
+        errors: list[str] = []
+        rows: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in payload.get("constituents", []):
+            symbol = str(item.get("symbol") or "").upper().strip()
+            try:
+                weight = float(item.get("weight_pct")) / 100.0
+            except (TypeError, ValueError):
+                weight = 0.0
+            if not symbol or symbol in seen or weight <= 0 or weight > 0.25:
+                errors.append(f"invalid_constituent:{symbol or 'missing'}")
+                continue
+            seen.add(symbol)
+            rows.append({**item, "symbol": symbol, "weight": weight})
+        total_weight = sum(float(row["weight"]) for row in rows)
+        if len(rows) != 14:
+            errors.append(f"expected_14_constituents_found_{len(rows)}")
+        if not 0.995 <= total_weight <= 1.005:
+            errors.append(f"weight_total_{total_weight:.6f}")
+        try:
+            source_date = date.fromisoformat(str(payload.get("source_date")))
+            age_days = (self._today() - source_date).days
+        except ValueError:
+            source_date = None
+            age_days = None
+            errors.append("invalid_source_date")
+        return {
+            "source_date": source_date.isoformat() if source_date else None,
+            "effective_date": payload.get("effective_date"),
+            "strategy_version": payload.get("strategy_version"),
+            "source": payload.get("source", {}),
+            "constituents": rows,
+            "total_weight": round(total_weight, 6),
+            "age_days": age_days,
+            "stale": age_days is None or age_days > settings.banknifty_constituent_max_age_days,
+            "valid": not errors,
+            "validation_errors": errors,
         }
 
     def _private_psu_strength(self, top_banks: dict[str, Any]) -> dict[str, Any]:

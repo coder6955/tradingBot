@@ -426,6 +426,8 @@ class AfterMarketResearchService:
             "message",
             "summary",
             "thresholds",
+            "verdict",
+            "checks",
         ]
         return {key: result[key] for key in keys if key in result}
 

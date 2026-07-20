@@ -129,6 +129,14 @@ kite_health, kite_error = api_get("/kite/health")
 auto_status, auto_error = api_get("/auto-trader/status")
 monitor_status, monitor_error = api_get("/opportunity-monitor/status")
 performance, performance_error = api_get("/opportunities/performance")
+pipeline, pipeline_error = api_get("/market-data/pipeline-status")
+runtime_status, runtime_status_error = api_get("/runtime/status")
+strategy_status, strategy_status_error = api_get("/strategy/versions/current")
+armed_entries, armed_entries_error = api_get("/scanner/armed-entries")
+constituent_status, constituent_status_error = api_get("/market-data/banknifty-constituents/status")
+reconciliation_status, reconciliation_status_error = api_get("/broker/reconciliation/status")
+protection_status, protection_status_error = api_get("/broker/emergency-protection/status")
+after_market_status, after_market_status_error = api_get("/research/after-market/status")
 
 top_cols = st.columns(5)
 with top_cols[0]:
@@ -231,8 +239,8 @@ with links_col:
     for label, path in links:
         st.markdown(f'<div class="quick-link"><a href="{API_BASE_URL}{path}" target="_blank">{label}</a></div>', unsafe_allow_html=True)
 
-tab_latest, tab_journal, tab_failures, tab_orders, tab_account = st.tabs(
-    ["Latest Scan", "Opportunity Journal", "Failure Analysis", "Orders & Paper", "Account"]
+tab_latest, tab_journal, tab_failures, tab_orders, tab_account, tab_v3 = st.tabs(
+    ["Latest Scan", "Opportunity Journal", "Failure Analysis", "Orders & Paper", "Account", "V3 Operations"]
 )
 
 with tab_latest:
@@ -307,5 +315,44 @@ with tab_account:
     st.error(margins_error) if margins_error else st.json(margins, expanded=False)
     st.markdown("##### Positions")
     st.error(positions_error) if positions_error else st.json(positions, expanded=False)
+
+with tab_v3:
+    st.subheader("Strategy, Session and Readiness")
+    strategy = (strategy_status or {}).get("version", {})
+    session = (runtime_status or {}).get("session", {})
+    v3_cols = st.columns(4)
+    v3_cols[0].metric("Strategy", strategy.get("version") or "-")
+    v3_cols[1].metric("Config drift", "YES" if strategy.get("config_drift_detected") else "NO")
+    v3_cols[2].metric("Market session", session.get("runtime_mode") or "-")
+    v3_cols[3].metric("Live modules expected", "YES" if session.get("should_run_live_modules") else "NO")
+
+    st.subheader("Market Data and WebSocket")
+    pipeline_payload = pipeline or {}
+    canonical = pipeline_payload.get("canonical_underlying_candles", {})
+    raw_ticks = pipeline_payload.get("raw_tick_capture", {})
+    websocket = pipeline_payload.get("websocket", {})
+    pipe_cols = st.columns(4)
+    pipe_cols[0].metric("Canonical ticks", canonical.get("accepted_ticks", 0))
+    pipe_cols[1].metric("Persisted candles", canonical.get("persisted_candles", 0))
+    pipe_cols[2].metric("Raw ticks", raw_ticks.get("captured_count", 0))
+    pipe_cols[3].metric("WS subscriptions", len(websocket.get("subscribed_tokens", [])))
+
+    st.subheader("Armed Entries, Constituents and Broker Safety")
+    safety_cols = st.columns(4)
+    safety_cols[0].metric("Active armed", len((armed_entries or {}).get("active", [])))
+    safety_cols[1].metric("Constituent snapshot", (constituent_status or {}).get("source_date") or "-")
+    safety_cols[2].metric("Reconciliation", "BLOCKED" if (reconciliation_status or {}).get("blocked") else "CLEAR")
+    safety_cols[3].metric("Broker protection", "ENABLED" if (protection_status or {}).get("enabled") else "OFF")
+
+    for label, payload, error in (
+        ("Pipeline and latency", pipeline, pipeline_error),
+        ("Armed-entry lifecycle", armed_entries, armed_entries_error),
+        ("Constituent intelligence", constituent_status, constituent_status_error),
+        ("Broker reconciliation", reconciliation_status, reconciliation_status_error),
+        ("Broker protection", protection_status, protection_status_error),
+        ("After-market readiness cache", after_market_status, after_market_status_error),
+    ):
+        with st.expander(label):
+            st.error(error) if error else st.json(payload)
 
 st.caption("Tip: keep this dashboard open while auto-trader runs. Use the status cards and Last scan value to confirm activity.")

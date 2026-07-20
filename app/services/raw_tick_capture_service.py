@@ -87,6 +87,10 @@ class RawTickCaptureService:
             "last_price": float(tick.price),
             "bid": float(tick.bid) if tick.bid is not None else None,
             "ask": float(tick.ask) if tick.ask is not None else None,
+            "depth_json": json.dumps(
+                {"buy": list(tick.buy_depth), "sell": list(tick.sell_depth)},
+                default=str,
+            ),
             "cumulative_volume": float(tick.volume) if tick.volume is not None else None,
             "exchange_timestamp": exchange,
             "receive_timestamp": receive,

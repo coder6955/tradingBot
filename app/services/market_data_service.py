@@ -49,6 +49,11 @@ class MarketDataService:
                         low_price=float(candle["low"]),
                         close_price=float(candle["close"]),
                         volume=float(candle.get("volume", 0.0)),
+                        instrument_token=int(candle["instrument_token"]) if candle.get("instrument_token") is not None else None,
+                        receive_timestamp=self._parse_timestamp(candle.get("receive_timestamp")),
+                        timestamp_source=str(candle.get("timestamp_source")) if candle.get("timestamp_source") else None,
+                        is_generated=1 if candle.get("is_generated") else 0,
+                        data_quality=str(candle.get("data_quality")) if candle.get("data_quality") else None,
                     )
                 )
                 inserted += 1

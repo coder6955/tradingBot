@@ -20,9 +20,9 @@ class Settings:
     app_name: str = "AI Option Trader"
     app_environment: str = os.getenv("APP_ENV", "development")
     strategy_name: str = os.getenv("STRATEGY_NAME", "banknifty_option_buying")
-    strategy_version: str = os.getenv("STRATEGY_VERSION", "banknifty_option_buying_v2")
-    strategy_version_note: str = os.getenv("STRATEGY_VERSION_NOTE", "Canonical market-data, replay, latency, and validation architecture")
-    strategy_change_reason: str = os.getenv("STRATEGY_CHANGE_REASON", "Accuracy, timestamp provenance, fast-path, and validation hardening")
+    strategy_version: str = os.getenv("STRATEGY_VERSION", "banknifty_option_buying_v3")
+    strategy_version_note: str = os.getenv("STRATEGY_VERSION_NOTE", "Executable exits, official constituent intelligence, full-path latency, and protective-stop readiness")
+    strategy_change_reason: str = os.getenv("STRATEGY_CHANGE_REASON", "Make entry evidence and exits executable, attributable, replayable, and fail-closed for live trading")
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
     python_version: str = "3.12"
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./app.db")
@@ -113,6 +113,9 @@ class Settings:
     readiness_min_oos_trades: int = int(os.getenv("READINESS_MIN_OOS_TRADES", "100"))
     readiness_min_oos_sessions: int = int(os.getenv("READINESS_MIN_OOS_SESSIONS", "20"))
     readiness_min_validation_folds: int = int(os.getenv("READINESS_MIN_VALIDATION_FOLDS", "3"))
+    readiness_max_drawdown_pct: float = float(os.getenv("READINESS_MAX_DRAWDOWN_PCT", "15.0"))
+    readiness_min_regime_trades: int = int(os.getenv("READINESS_MIN_REGIME_TRADES", "10"))
+    readiness_volatile_day_range_pct: float = float(os.getenv("READINESS_VOLATILE_DAY_RANGE_PCT", "1.0"))
     probability_calibration_min_samples: int = int(os.getenv("PROBABILITY_CALIBRATION_MIN_SAMPLES", "200"))
     enable_execution_realism: bool = os.getenv("ENABLE_EXECUTION_REALISM", "true").lower() == "true"
     realism_entry_buy_slippage_pct: float = float(os.getenv("REALISM_ENTRY_BUY_SLIPPAGE_PCT", "0.30"))
@@ -150,6 +153,14 @@ class Settings:
     enable_banknifty_intelligence: bool = os.getenv("ENABLE_BANKNIFTY_INTELLIGENCE", "true").lower() == "true"
     banknifty_top_bank_min_alignment: float = float(os.getenv("BANKNIFTY_TOP_BANK_MIN_ALIGNMENT", "0.55"))
     banknifty_top_bank_min_direction_count: int = int(os.getenv("BANKNIFTY_TOP_BANK_MIN_DIRECTION_COUNT", "3"))
+    banknifty_constituent_snapshot_file: str = os.getenv(
+        "BANKNIFTY_CONSTITUENT_SNAPSHOT_FILE",
+        str(BASE_DIR / "app" / "data" / "banknifty_constituents_2026-06-30.json"),
+    )
+    banknifty_constituent_max_age_days: int = int(os.getenv("BANKNIFTY_CONSTITUENT_MAX_AGE_DAYS", "45"))
+    banknifty_constituent_min_weight_coverage: float = float(os.getenv("BANKNIFTY_CONSTITUENT_MIN_WEIGHT_COVERAGE", "0.70"))
+    banknifty_constituent_hard_gate_weight_cap: float = float(os.getenv("BANKNIFTY_CONSTITUENT_HARD_GATE_WEIGHT_CAP", "0.20"))
+    banknifty_opposing_heavyweight_weight: float = float(os.getenv("BANKNIFTY_OPPOSING_HEAVYWEIGHT_WEIGHT", "0.30"))
     banknifty_extreme_divergence_pct: float = float(os.getenv("BANKNIFTY_EXTREME_DIVERGENCE_PCT", "0.35"))
     banknifty_opening_range_start: str = os.getenv("BANKNIFTY_OPENING_RANGE_START", "09:15")
     banknifty_opening_range_end: str = os.getenv("BANKNIFTY_OPENING_RANGE_END", "09:30")
@@ -336,6 +347,7 @@ class Settings:
     enable_underlying_invalidation_exit: bool = os.getenv("ENABLE_UNDERLYING_INVALIDATION_EXIT", "true").lower() == "true"
     enable_premium_invalidation_exit: bool = os.getenv("ENABLE_PREMIUM_INVALIDATION_EXIT", "true").lower() == "true"
     enable_broker_emergency_sl: bool = os.getenv("ENABLE_BROKER_EMERGENCY_SL", "false").lower() == "true"
+    require_broker_protective_stop_for_live_entry: bool = os.getenv("REQUIRE_BROKER_PROTECTIVE_STOP_FOR_LIVE_ENTRY", "true").lower() == "true"
     enable_partial_booking: bool = os.getenv("ENABLE_PARTIAL_BOOKING", "false").lower() == "true"
     partial_target1_pct: float = float(os.getenv("PARTIAL_TARGET1_PCT", "50.0"))
     partial_move_sl_to_cost: bool = os.getenv("PARTIAL_MOVE_SL_TO_COST", "true").lower() == "true"

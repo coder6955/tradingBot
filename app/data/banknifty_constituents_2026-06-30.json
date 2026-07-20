@@ -1,0 +1,28 @@
+{
+  "index": "NIFTY BANK",
+  "source_date": "2026-06-30",
+  "effective_date": "2026-06-30",
+  "strategy_version": "banknifty_option_buying_v3",
+  "source": {
+    "factsheet_url": "https://www.niftyindices.com/Factsheet/ind_nifty_bank.pdf",
+    "constituent_url": "https://www.niftyindices.com/IndexConstituent/ind_niftybanklist.csv",
+    "weight_url": "https://liveindexsa.niftyindices.com/jsonfiles/Sector/SectorialIndexDataNIFTY%20BANK_Sector.js",
+    "publisher": "NSE Indices Limited"
+  },
+  "constituents": [
+    {"symbol": "AUBANK", "name": "AU Small Finance Bank Ltd.", "weight_pct": 4.64, "group": "private"},
+    {"symbol": "AXISBANK", "name": "Axis Bank Ltd.", "weight_pct": 9.59, "group": "private"},
+    {"symbol": "BANKBARODA", "name": "Bank of Baroda", "weight_pct": 4.00, "group": "psu"},
+    {"symbol": "CANBK", "name": "Canara Bank", "weight_pct": 3.31, "group": "psu"},
+    {"symbol": "FEDERALBNK", "name": "Federal Bank Ltd.", "weight_pct": 6.67, "group": "private"},
+    {"symbol": "HDFCBANK", "name": "HDFC Bank Ltd.", "weight_pct": 19.30, "group": "private"},
+    {"symbol": "ICICIBANK", "name": "ICICI Bank Ltd.", "weight_pct": 14.16, "group": "private"},
+    {"symbol": "IDFCFIRSTB", "name": "IDFC First Bank Ltd.", "weight_pct": 4.36, "group": "private"},
+    {"symbol": "INDUSINDBK", "name": "IndusInd Bank Ltd.", "weight_pct": 4.99, "group": "private"},
+    {"symbol": "KOTAKBANK", "name": "Kotak Mahindra Bank Ltd.", "weight_pct": 9.31, "group": "private"},
+    {"symbol": "PNB", "name": "Punjab National Bank", "weight_pct": 3.17, "group": "psu"},
+    {"symbol": "SBIN", "name": "State Bank of India", "weight_pct": 10.02, "group": "psu"},
+    {"symbol": "UNIONBANK", "name": "Union Bank of India", "weight_pct": 2.92, "group": "psu"},
+    {"symbol": "YESBANK", "name": "Yes Bank Ltd.", "weight_pct": 3.56, "group": "private"}
+  ]
+}

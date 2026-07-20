@@ -92,6 +92,11 @@ SETTING_PURPOSES: dict[str, str] = {
     "enable_banknifty_intelligence": "Enables Bank Nifty specialized filters such as top-bank alignment and zone room.",
     "banknifty_top_bank_min_alignment": "Minimum top-bank constituent alignment required for Bank Nifty confidence.",
     "banknifty_top_bank_min_direction_count": "Minimum number of top banks that should support the chosen direction.",
+    "banknifty_constituent_snapshot_file": "Locally reviewed NSE Indices constituent-weight snapshot used outside the trade-entry network path.",
+    "banknifty_constituent_max_age_days": "Maximum official constituent snapshot age before alignment becomes stale diagnostic context.",
+    "banknifty_constituent_min_weight_coverage": "Minimum available official index weight required before constituent alignment can gate an entry.",
+    "banknifty_constituent_hard_gate_weight_cap": "Defensive per-bank cap used only in the alignment hard-gate calculation.",
+    "banknifty_opposing_heavyweight_weight": "Opposing official index weight that is considered materially unsafe for directional participation.",
     "banknifty_expected_move_min_coverage": "Expected move coverage guard for whether target distance is realistic.",
     "banknifty_zone_risk_points": "Distance near major zones where Bank Nifty trades become riskier.",
     "enable_banknifty_regime_filter": "Enables Bank Nifty option-buying no-trade regime filters.",
@@ -110,6 +115,10 @@ SETTING_PURPOSES: dict[str, str] = {
     "enable_partial_booking": "Whether target 1 should book partial quantity instead of full exit.",
     "partial_target1_pct": "Percentage of quantity booked at target 1 when partial booking is enabled.",
     "partial_move_sl_to_cost": "Whether remaining quantity stop should move to cost after partial booking.",
+    "require_broker_protective_stop_for_live_entry": "Fails live entry closed unless every filled Bank Nifty option position receives broker-side disaster-stop protection.",
+    "readiness_max_drawdown_pct": "Maximum combined and regime-level out-of-sample drawdown accepted by the readiness gate.",
+    "readiness_min_regime_trades": "Minimum independent out-of-sample trades required in each traded validation regime.",
+    "readiness_volatile_day_range_pct": "Fixed reporting threshold used to label volatile validation days; it is not an entry indicator.",
     "max_daily_loss_pct": "Maximum daily loss guard for live trading risk control.",
     "max_trades_per_day": "Maximum trades per day to prevent overtrading.",
     "max_stop_losses_per_day": "Maximum stop-loss hits allowed before cooling down for the day.",
@@ -343,6 +352,11 @@ class StrategyVersionRegistry:
                 "enable_banknifty_intelligence",
                 "banknifty_top_bank_min_alignment",
                 "banknifty_top_bank_min_direction_count",
+                "banknifty_constituent_snapshot_file",
+                "banknifty_constituent_max_age_days",
+                "banknifty_constituent_min_weight_coverage",
+                "banknifty_constituent_hard_gate_weight_cap",
+                "banknifty_opposing_heavyweight_weight",
                 "banknifty_expected_move_min_coverage",
                 "banknifty_zone_risk_points",
                 "banknifty_major_zone_points",
@@ -367,6 +381,8 @@ class StrategyVersionRegistry:
                 "enable_partial_booking",
                 "partial_target1_pct",
                 "partial_move_sl_to_cost",
+                "enable_broker_emergency_sl",
+                "require_broker_protective_stop_for_live_entry",
             ),
             "risk_rules": self._values(
                 "max_daily_loss_pct",
@@ -469,6 +485,9 @@ class StrategyVersionRegistry:
                 "readiness_min_oos_trades",
                 "readiness_min_oos_sessions",
                 "readiness_min_validation_folds",
+                "readiness_max_drawdown_pct",
+                "readiness_min_regime_trades",
+                "readiness_volatile_day_range_pct",
                 "probability_calibration_min_samples",
             ),
         }
@@ -498,8 +517,9 @@ class StrategyVersionRegistry:
         exit_rules = config_snapshot.get("exit_rules", {})
         partial = "partial target-1 booking" if exit_rules.get("enable_partial_booking") else "full target-1 square-off"
         return (
-            "Open trades are monitored for stop loss, target hits, trailing stop, time stop, near-close exit, "
-            f"underlying invalidation, and premium invalidation. Current target-1 behavior is {partial}."
+            "Long-option exits use executable sell-side bid/depth pricing, with LTP retained only for diagnostics. "
+            "Priority is stop, time, trailing, invalidation, then targets; live software exits fail closed without safe executable depth. "
+            f"Current target-1 behavior is {partial}."
         )
 
     def stoploss_logic_summary(self, config_snapshot: dict[str, Any]) -> str:
@@ -513,7 +533,7 @@ class StrategyVersionRegistry:
     def target_logic_summary(self, config_snapshot: dict[str, Any]) -> str:
         exit_rules = config_snapshot.get("exit_rules", {})
         return (
-            "Targets are evaluated against live/paper option premium. "
+            "Targets are evaluated against executable sell-side bid/depth rather than LTP-only touches. "
             f"Target 1 currently {'books ' + str(exit_rules.get('partial_target1_pct')) + '% when partial booking is enabled' if exit_rules.get('enable_partial_booking') else 'closes the full position'}; "
             f"trailing lock is {exit_rules.get('option_trailing_stop_lock_pct')}% after target progress."
         )

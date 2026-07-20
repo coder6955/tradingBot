@@ -99,6 +99,10 @@ class FixedActiveFeed:
             timestamp=ist_now_naive(),
             source="kite_websocket",
             instrument_token=instrument_token,
+            bid=self.price,
+            ask=self.price + 0.5,
+            buy_depth=({"price": self.price, "quantity": 100},),
+            sell_depth=({"price": self.price + 0.5, "quantity": 100},),
         )
 
     def subscribe(self, tokens):
@@ -347,6 +351,24 @@ class LiveExitSafetyTests(unittest.TestCase):
         self.assertEqual(calls, [record.id])
         self.assertEqual(updated.status, "closing")
         self.assertEqual(updated.exit_order_id, "protective-1")
+
+    def test_cancelled_protective_stop_blocks_all_later_live_entries(self) -> None:
+        record = self._create_live_trade()
+        self.repo.update_protective_order(
+            int(record.id),
+            status="TRIGGER PENDING",
+            protective_order_id="protective-1",
+            trigger_price=90,
+            broker_payload={"status": "TRIGGER PENDING"},
+        )
+        provider = ProtectiveExitProvider(protective_status="CANCELLED", position_quantity=15)
+        service = BrokerSyncService(self.repo, kite_provider_factory=lambda: provider)
+
+        result = service.handle_order_postback({"order_id": "protective-1", "status": "CANCELLED"})
+
+        self.assertTrue(result["handled"])
+        self.assertTrue(service.live_block_status()["blocked"])
+        self.assertIn("protective stop order cancelled", service.live_block_status()["reason"])
 
 
 if __name__ == "__main__":

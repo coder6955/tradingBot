@@ -10,7 +10,7 @@ from unittest.mock import patch
 import app.api as api
 from app.models import Signal
 from app.services.active_price_feed import ActiveTradePriceFeed
-from app.services.database import init_db
+from app.services.database import TradeRecord, init_db
 from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
 from app.services.trade_repository import TradeRepository
@@ -213,6 +213,14 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("Active Trade / Exit Watch", html)
         self.assertIn("Latest Watch", html)
         self.assertIn("System Thought Feed", html)
+        self.assertIn("V3 Strategy &amp; Market Session", html)
+        self.assertIn("Market Data Pipeline", html)
+        self.assertIn("WebSocket &amp; Subscription Ownership", html)
+        self.assertIn("Armed Entry Lifecycle", html)
+        self.assertIn("Trading-Path Latency", html)
+        self.assertIn("Bank Nifty Constituent Intelligence", html)
+        self.assertIn("Broker Protection &amp; Reconciliation", html)
+        self.assertIn("Professional Readiness", html)
         self.assertIn("After-Market Research", html)
         self.assertIn("Research Engine", html)
         self.assertIn("Thresholds", html)
@@ -229,6 +237,26 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("getReviewJsonCached(\"learning\", \"/research/outcome-learning\"", html)
         self.assertIn("/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300", html)
         self.assertIn("dashboard_skip", html)
+        self.assertIn("/market-data/pipeline-status", html)
+        self.assertIn("/runtime/status", html)
+        self.assertIn("/strategy/versions/current", html)
+        self.assertIn("/scanner/armed-entries", html)
+        self.assertIn("/market-data/banknifty-constituents/status", html)
+        self.assertIn("/broker/reconciliation/status", html)
+        self.assertIn("/broker/emergency-protection/status", html)
+        self.assertIn("should_run_live_modules", html)
+        self.assertIn("System Safe — Live Modules Idle", html)
+        self.assertIn("exit_executable_price", html)
+
+    def test_banknifty_constituent_status_endpoint(self) -> None:
+        response = self.client.get("/market-data/banknifty-constituents/status")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["source_date"], "2026-06-30")
+        self.assertEqual(payload["constituent_count"], 14)
+        self.assertTrue(payload["valid"])
+        self.assertEqual(len(payload["constituents"]), 14)
 
     def test_runtime_trading_config_switches_live_and_paper_modes(self) -> None:
         preview = self.client.get("/runtime/trading-config/preview?mode=live")
@@ -582,6 +610,39 @@ class ApiIntegrationTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("trades", response.json())
+
+    def test_trade_serialization_exposes_executable_exit_and_lineage(self) -> None:
+        trade = TradeRecord(
+            symbol="BANKNIFTY",
+            tradingsymbol="BANKNIFTY26JUL58000CE",
+            exchange="NFO",
+            action="BUY_CE",
+            side="BUY",
+            mode="paper",
+            status="open",
+            requested_quantity=15,
+            placed_quantity=15,
+            filled_quantity=15,
+            exit_ltp=105.0,
+            exit_best_bid=104.5,
+            exit_best_ask=105.5,
+            exit_executable_price=104.25,
+            exit_depth_coverage=1.0,
+            exit_spread_pct=0.95,
+            exit_execution_source="bid_depth_vwap",
+            exit_triggered_rules_json='["stop_loss"]',
+            strategy_version="banknifty_option_buying_v3",
+            config_hash="abc123",
+        )
+
+        payload = api.trade_record_to_dict(trade)
+
+        self.assertEqual(payload["exit_executable_price"], 104.25)
+        self.assertEqual(payload["exit_best_bid"], 104.5)
+        self.assertEqual(payload["exit_triggered_rules"], ["stop_loss"])
+        self.assertEqual(payload["exit_execution_source"], "bid_depth_vwap")
+        self.assertEqual(payload["strategy_version"], "banknifty_option_buying_v3")
+        self.assertEqual(payload["config_hash"], "abc123")
 
     def test_evaluate_exits_endpoint(self) -> None:
         with patch.object(api, "trade_exit_service", FakeExitService()):

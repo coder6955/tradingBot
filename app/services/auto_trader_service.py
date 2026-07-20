@@ -138,6 +138,7 @@ class AutoTraderService:
             self._scan_lock.release()
 
     def _scan_once_impl(self) -> dict[str, Any]:
+        scan_started = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
         scanner = self.scanner_factory()
         symbols = self.config.get("symbols")
         opportunities = scanner.scan_symbols(
@@ -146,7 +147,16 @@ class AutoTraderService:
             order_mode=str(self.config.get("order_mode") or "paper"),
             rejection_source="automation_scan",
         )
-        return self._finalize_opportunities(opportunities, source="automation_scan")
+        scan_completed = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+        if self.latency_metrics is not None:
+            self.latency_metrics.record_between(
+                "scheduled_scan_duration",
+                scan_started,
+                scan_completed,
+                detail={"accepted_candidates": len(opportunities), "scan_source": "scheduled"},
+            )
+        result = self._finalize_opportunities(opportunities, source="automation_scan")
+        return result
 
     def _finalize_opportunities(self, opportunities: list[Signal], *, source: str) -> dict[str, Any]:
         limited = opportunities[: int(self.config.get("limit", 5))]
@@ -242,6 +252,7 @@ class AutoTraderService:
             rally_at = self._parse_event_time(event.get("timestamp"))
             if self.latency_metrics is not None:
                 self.latency_metrics.record_between("rally_detection_to_scan_start", rally_at, scan_started, detail=context)
+                self.latency_metrics.record_between("fast_rally_detection_to_scan_start", rally_at, scan_started, detail=context)
             with self._scan_lock:
                 scanner = self.scanner_factory()
                 opportunities = scanner.scan_symbols(
@@ -251,9 +262,16 @@ class AutoTraderService:
                     order_mode=str(self.config.get("order_mode") or "paper"),
                     rejection_source="fast_rally_candidate_validation",
                 )
+                scan_completed = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+                if self.latency_metrics is not None:
+                    self.latency_metrics.record_between("scan_start_to_scan_completion", scan_started, scan_completed, detail={"accepted_candidates": len(opportunities)})
+                    self.latency_metrics.record_between(
+                        "fast_rally_scan_duration",
+                        scan_started,
+                        scan_completed,
+                        detail={"accepted_candidates": len(opportunities), "scan_source": "fast_rally"},
+                    )
                 result = self._finalize_opportunities(opportunities, source="fast_rally_candidate_validation")
-            if self.latency_metrics is not None:
-                self.latency_metrics.record_between("scan_start_to_scan_completion", scan_started, detail={"accepted_candidates": len(opportunities)})
             result["rally_event"] = dict(event)
             if self.latency_metrics is not None:
                 event_time = self._parse_event_time(event.get("receive_timestamp") or event.get("timestamp"))

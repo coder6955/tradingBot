@@ -8,6 +8,7 @@ from typing import Any, Callable
 from app.config import settings
 from app.services.kite_websocket_price_feed import WebSocketTick
 from app.services.strategy_lineage_service import current_strategy_lineage
+from app.services.time_utils import ist_now_naive
 
 
 class BankNiftyFastRallyService:
@@ -47,6 +48,7 @@ class BankNiftyFastRallyService:
             direction = "bullish" if move_pct >= threshold else "bearish" if move_pct <= -threshold else None
             if direction is None:
                 return None
+            detected_at = ist_now_naive()
             event = {
                 "type": "banknifty_fast_rally",
                 "direction": direction,
@@ -55,7 +57,7 @@ class BankNiftyFastRallyService:
                 "base_price": round(base, 2),
                 "move_pct": round(move_pct, 4),
                 "window_seconds": window_seconds,
-                "timestamp": now.isoformat(sep=" "),
+                "timestamp": detected_at.isoformat(sep=" "),
                 "exchange_timestamp": tick.timestamp.isoformat(sep=" "),
                 "receive_timestamp": (tick.receive_timestamp or now).isoformat(sep=" "),
                 "timestamp_source": tick.timestamp_source,
@@ -66,11 +68,21 @@ class BankNiftyFastRallyService:
         if self.callback is not None:
             self.callback(dict(event))
         if self.latency_metrics is not None:
-            self.latency_metrics.record_between(
-                "local_receipt_to_fast_rally_detection",
-                tick.receive_timestamp,
-                detail={"direction": direction, "move_pct": event["move_pct"]},
-            )
+            if tick.receive_timestamp is None:
+                self.latency_metrics.record_missing("receive_to_fast_rally_detection", detail={"direction": direction, "reason": "receive_timestamp_missing"})
+            else:
+                self.latency_metrics.record_between(
+                    "local_receipt_to_fast_rally_detection",
+                    tick.receive_timestamp,
+                    detected_at,
+                    detail={"direction": direction, "move_pct": event["move_pct"]},
+                )
+                self.latency_metrics.record_between(
+                    "receive_to_fast_rally_detection",
+                    tick.receive_timestamp,
+                    detected_at,
+                    detail={"direction": direction, "move_pct": event["move_pct"]},
+                )
         return event
 
     def status(self) -> dict[str, Any]:

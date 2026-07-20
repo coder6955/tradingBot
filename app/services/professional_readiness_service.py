@@ -149,6 +149,29 @@ class ProfessionalReadinessService:
                 "out_of_sample_sessions": walk_forward.get("out_of_sample_sessions"),
                 "minimum_out_of_sample_sessions": settings.readiness_min_oos_sessions,
             },
+            "walk_forward_after_cost_expectancy": {
+                "passed": int(walk_summary.get("trades") or 0) > 0 and float(walk_summary.get("expectancy_pct") or 0.0) > 0,
+                "value": walk_summary.get("expectancy_pct"),
+                "minimum_exclusive": 0,
+                "message": "Zero-trade or non-positive after-cost expectancy cannot pass readiness.",
+            },
+            "walk_forward_profit_factor": {
+                "passed": walk_summary.get("profit_factor") is not None
+                and float(walk_summary.get("profit_factor")) >= settings.min_strategy_profit_factor,
+                "value": walk_summary.get("profit_factor"),
+                "minimum": settings.min_strategy_profit_factor,
+            },
+            "walk_forward_drawdown": {
+                "passed": int(walk_summary.get("trades") or 0) > 0
+                and float(walk_summary.get("max_drawdown_pct") or 0.0) <= settings.readiness_max_drawdown_pct,
+                "value": walk_summary.get("max_drawdown_pct"),
+                "maximum": settings.readiness_max_drawdown_pct,
+            },
+            "walk_forward_regime_stability": {
+                "passed": bool((walk_forward.get("regime_stability") or {}).get("passed")),
+                "value": walk_forward.get("regime_stability"),
+                "required_regimes": ["trend", "range", "volatile", "event_day", "expiry_day_when_enabled"],
+            },
         }
 
     def _verdict(self, checks: dict[str, Any]) -> dict[str, Any]:

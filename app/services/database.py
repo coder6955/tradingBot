@@ -200,6 +200,16 @@ class TradeRecord(Base):
     price_source = Column(String(50), nullable=True)
     price_timestamp = Column(DateTime, nullable=True)
     price_age_seconds = Column(Float, nullable=True)
+    exit_rule_first_triggered = Column(String(50), nullable=True, index=True)
+    exit_triggered_rules_json = Column(Text, nullable=True)
+    exit_ltp = Column(Float, nullable=True)
+    exit_best_bid = Column(Float, nullable=True)
+    exit_best_ask = Column(Float, nullable=True)
+    exit_executable_price = Column(Float, nullable=True)
+    exit_depth_coverage = Column(Float, nullable=True)
+    exit_spread_pct = Column(Float, nullable=True)
+    exit_execution_source = Column(String(60), nullable=True, index=True)
+    exit_quote_timestamp = Column(DateTime, nullable=True)
     highest_price_during_trade = Column(Float, nullable=True)
     lowest_price_during_trade = Column(Float, nullable=True)
     mfe_points = Column(Float, nullable=True)
@@ -284,6 +294,7 @@ class RawTickRecord(Base):
     last_price = Column(Float, nullable=False)
     bid = Column(Float, nullable=True)
     ask = Column(Float, nullable=True)
+    depth_json = Column(Text, nullable=True)
     cumulative_volume = Column(Float, nullable=True)
     exchange_timestamp = Column(DateTime, nullable=True, index=True)
     receive_timestamp = Column(DateTime, nullable=False, index=True)
@@ -349,6 +360,7 @@ def init_db(database_url: Optional[str] = None) -> None:
     _ensure_strategy_validation_columns()
     _ensure_strategy_version_columns()
     _ensure_runtime_job_run_columns()
+    _ensure_raw_tick_columns()
     _mark_legacy_rejected_outcomes_low_confidence()
 
 
@@ -433,6 +445,16 @@ def _ensure_trade_columns() -> None:
         "price_source": "VARCHAR(50)",
         "price_timestamp": "DATETIME",
         "price_age_seconds": "FLOAT",
+        "exit_rule_first_triggered": "VARCHAR(50)",
+        "exit_triggered_rules_json": "TEXT",
+        "exit_ltp": "FLOAT",
+        "exit_best_bid": "FLOAT",
+        "exit_best_ask": "FLOAT",
+        "exit_executable_price": "FLOAT",
+        "exit_depth_coverage": "FLOAT",
+        "exit_spread_pct": "FLOAT",
+        "exit_execution_source": "VARCHAR(60)",
+        "exit_quote_timestamp": "DATETIME",
         "highest_price_during_trade": "FLOAT",
         "lowest_price_during_trade": "FLOAT",
         "mfe_points": "FLOAT",
@@ -561,6 +583,20 @@ def _ensure_runtime_job_run_columns() -> None:
                 connection.execute(text(f"ALTER TABLE runtime_job_runs ADD COLUMN {column} {column_type}"))
 
 
+def _ensure_raw_tick_columns() -> None:
+    if engine is None:
+        return
+    inspector = inspect(engine)
+    if "raw_ticks" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("raw_ticks")}
+    required = {"depth_json": "TEXT"}
+    with engine.begin() as connection:
+        for column, column_type in required.items():
+            if column not in existing:
+                connection.execute(text(f"ALTER TABLE raw_ticks ADD COLUMN {column} {column_type}"))
+
+
 def _mark_legacy_rejected_outcomes_low_confidence() -> None:
     if engine is None:
         return
@@ -595,4 +631,5 @@ def get_session():
         _ensure_strategy_validation_columns()
         _ensure_strategy_version_columns()
         _ensure_runtime_job_run_columns()
+        _ensure_raw_tick_columns()
     return SessionLocal()

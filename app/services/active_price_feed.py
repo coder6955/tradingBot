@@ -21,6 +21,8 @@ class PriceTick:
     volume: float | None = None
     bid: float | None = None
     ask: float | None = None
+    buy_depth: tuple[dict[str, Any], ...] = ()
+    sell_depth: tuple[dict[str, Any], ...] = ()
     age_seconds: float | None = None
     timestamp_source: str | None = None
 
@@ -81,6 +83,8 @@ class KitePollingPriceFeed:
                         volume=self._float(data.get("volume") or data.get("volume_traded")),
                         bid=self._float(buy_depth[0].get("price")) if buy_depth else None,
                         ask=self._float(sell_depth[0].get("price")) if sell_depth else None,
+                        buy_depth=tuple(dict(level) for level in buy_depth if isinstance(level, dict)),
+                        sell_depth=tuple(dict(level) for level in sell_depth if isinstance(level, dict)),
                         age_seconds=0.0,
                         timestamp_source="local_receive_time",
                     )
@@ -245,6 +249,8 @@ class ActiveTradePriceFeed:
             volume=tick.volume,
             bid=tick.bid,
             ask=tick.ask,
+            buy_depth=tick.buy_depth,
+            sell_depth=tick.sell_depth,
             age_seconds=round(max(0.0, (ist_now_naive() - tick.timestamp.replace(tzinfo=None)).total_seconds()), 3),
             timestamp_source=tick.timestamp_source,
         )

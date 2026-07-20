@@ -27,6 +27,10 @@ class MfeMaeFeed:
             timestamp=datetime(2026, 7, 6, 10, 1),
             source="test_websocket",
             instrument_token=instrument_token,
+            bid=self.price,
+            ask=self.price + 0.5,
+            buy_depth=({"price": self.price, "quantity": 100},),
+            sell_depth=({"price": self.price + 0.5, "quantity": 100},),
         )
 
     def subscribe(self, tokens):

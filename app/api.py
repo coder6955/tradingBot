@@ -36,6 +36,7 @@ from app.services.after_market_research_service import AfterMarketResearchServic
 from app.services.armed_entry_tracker_service import ArmedEntryTrackerService
 from app.services.banknifty_option_prewarm_service import BankNiftyOptionPrewarmService
 from app.services.banknifty_fast_rally_service import BankNiftyFastRallyService
+from app.services.banknifty_intelligence_service import BankNiftyIntelligenceService
 from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed
 from app.services.latency_metrics_service import LatencyMetricsService
 from app.services.raw_tick_capture_service import RawTickCaptureService
@@ -237,6 +238,7 @@ market_data_runtime_service = MarketDataRuntimeService(
 )
 strategy_validation_repository = StrategyValidationRepository()
 strategy_version_registry = StrategyVersionRegistry()
+banknifty_intelligence_service = BankNiftyIntelligenceService()
 strategy_edge_service = StrategyEdgeService(backtest_service=backtest_service, repository=strategy_validation_repository)
 day_type_service = DayTypeService()
 option_premium_confirmation_service = OptionPremiumConfirmationService()
@@ -323,6 +325,7 @@ def get_scanner_service() -> ScannerService:
         trade_setup_service=shared_trade_setup_service,
         option_premium_confirmation_service=OptionPremiumConfirmationService(kite_websocket_price_feed, live_gap_backfill_service=data_ingestion_service),
         rejected_opportunity_repository=rejected_opportunity_repository,
+        banknifty_intelligence_service=banknifty_intelligence_service,
         banknifty_option_prewarm_service=banknifty_option_prewarm_service,
         armed_entry_tracker=armed_entry_tracker_service,
         time_bucket_edge_service=time_bucket_edge_service,
@@ -399,6 +402,7 @@ trade_exit_service = TradeExitService(
     active_price_feed=active_trade_price_feed,
     notification_service=notification_service,
     market_data_coordinator=market_data_coordinator,
+    latency_metrics=latency_metrics_service,
 )
 opportunity_outcome_service = OpportunityOutcomeService(
     repository=opportunity_repository,
@@ -412,6 +416,7 @@ broker_sync_service = BrokerSyncService(
     trade_repository=trade_repository,
     kite_provider_factory=get_kite_provider,
     notification_service=notification_service,
+    latency_metrics=latency_metrics_service,
 )
 broker_sync_service.set_exit_confirmation_callback(trade_exit_service.confirm_live_exit_for_trade)
 kite_websocket_price_feed.order_update_handler = broker_sync_service.handle_order_postback
@@ -520,6 +525,15 @@ def market_data_pipeline_status() -> dict[str, object]:
         "fast_scan_context": fast_scan_context_service.status(),
         "websocket": kite_websocket_price_feed.status(),
     }
+
+
+@app.get(
+    "/market-data/banknifty-constituents/status",
+    tags=["09 Market Data"],
+    summary="Inspect the reviewed Bank Nifty constituent-weight snapshot",
+)
+def banknifty_constituent_status() -> dict[str, object]:
+    return banknifty_intelligence_service.snapshot_status()
 
 
 @app.get("/runtime/latency", tags=["01 System"], summary="Read end-to-end trading-path latency percentiles")
@@ -718,6 +732,7 @@ async def command_center_dashboard() -> HTMLResponse:
     .topbar { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(280px, .55fr); gap: 14px; align-items: stretch; }
     .control-grid { display: grid; grid-template-columns: minmax(340px, 420px) minmax(0, 1fr); gap: 14px; align-items: start; }
     .data-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+    .ops-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
     .panel { background: #ffffff; border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-width: 0; overflow: hidden; }
     .full { grid-column: 1 / -1; }
     .ready { min-height: 156px; border-left: 6px solid var(--warn); display: grid; gap: 12px; }
@@ -789,7 +804,7 @@ async def command_center_dashboard() -> HTMLResponse:
     .check-row.final { border-color: #99f6e4; background: #f0fdfa; }
     .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
     .error { color: var(--bad); font-weight: 700; font-size: 13px; min-height: 18px; margin-top: 8px; }
-    @media (max-width: 1180px) { .topbar,.control-grid,.data-grid,.raw-grid { grid-template-columns: 1fr; } .full { grid-column: auto; } .watch,.metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+    @media (max-width: 1180px) { .topbar,.control-grid,.data-grid,.ops-grid,.raw-grid { grid-template-columns: 1fr; } .full { grid-column: auto; } .watch,.metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
     @media (max-width: 680px) { main, header { padding-left: 12px; padding-right: 12px; } header { align-items: flex-start; flex-direction: column; } .status,.metrics,.links,.row,.watch { grid-template-columns: 1fr; } .actions { width: 100%; } }
   </style>
 </head>
@@ -864,6 +879,15 @@ async def command_center_dashboard() -> HTMLResponse:
         <a class="linkbtn secondary" href="/research/execution-realism" target="_blank">Execution Realism</a>
         <a class="linkbtn secondary" href="/research/daily-review" target="_blank">Daily Review</a>
         <a class="linkbtn secondary" href="/research/after-market/status" target="_blank">After-Market</a>
+        <a class="linkbtn secondary" href="/strategy/versions/current" target="_blank">Strategy V3</a>
+        <a class="linkbtn secondary" href="/runtime/status" target="_blank">Runtime</a>
+        <a class="linkbtn secondary" href="/market-data/pipeline-status" target="_blank">Pipeline</a>
+        <a class="linkbtn secondary" href="/runtime/latency" target="_blank">Latency</a>
+        <a class="linkbtn secondary" href="/scanner/armed-entries" target="_blank">Armed Entries</a>
+        <a class="linkbtn secondary" href="/market-data/banknifty-constituents/status" target="_blank">Constituents</a>
+        <a class="linkbtn secondary" href="/broker/reconciliation/status" target="_blank">Reconciliation</a>
+        <a class="linkbtn secondary" href="/broker/emergency-protection/status" target="_blank">Protection</a>
+        <a class="linkbtn secondary" href="/research/professional-readiness" target="_blank">Readiness</a>
         <a class="linkbtn secondary" href="/kite/websocket/status" target="_blank">WebSocket</a>
         <a class="linkbtn secondary" href="/market-data/cache/status" target="_blank">Data Cache</a>
         <a class="linkbtn secondary" href="/data/ingest/status" target="_blank">Ingestion</a>
@@ -872,6 +896,48 @@ async def command_center_dashboard() -> HTMLResponse:
         <a class="linkbtn secondary" href="/kite/margins" target="_blank">Margins</a>
         <a class="linkbtn secondary" href="/kite/positions" target="_blank">Positions</a>
         <a class="linkbtn secondary" href="/db/health" target="_blank">DB</a>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>V3 Strategy &amp; Market Session</h2>
+      <div class="status" id="strategyCards"></div>
+      <div class="summary-line" id="strategySummary"></div>
+    </section>
+    <section class="ops-grid">
+      <div class="panel">
+        <h2>Market Data Pipeline</h2>
+        <div class="metrics" id="pipelineMetrics"></div>
+        <div class="summary-line" id="pipelineSummary"></div>
+      </div>
+      <div class="panel">
+        <h2>WebSocket &amp; Subscription Ownership</h2>
+        <div class="metrics" id="websocketMetrics"></div>
+        <div class="summary-line" id="websocketSummary"></div>
+      </div>
+      <div class="panel full">
+        <h2>Armed Entry Lifecycle</h2>
+        <div class="metrics" id="armedMetrics"></div>
+        <div class="tablewrap"><table id="armedEntriesTable"></table></div>
+      </div>
+      <div class="panel full">
+        <h2>Trading-Path Latency</h2>
+        <div class="metrics" id="latencyMetrics"></div>
+        <div class="tablewrap"><table id="latencyTable"></table></div>
+      </div>
+      <div class="panel">
+        <h2>Bank Nifty Constituent Intelligence</h2>
+        <div class="metrics" id="constituentMetrics"></div>
+        <div class="summary-line" id="constituentSummary"></div>
+      </div>
+      <div class="panel">
+        <h2>Broker Protection &amp; Reconciliation</h2>
+        <div class="metrics" id="brokerSafetyMetrics"></div>
+        <div class="summary-line" id="brokerSafetySummary"></div>
+      </div>
+      <div class="panel full">
+        <h2>Professional Readiness</h2>
+        <div class="metrics" id="readinessMetrics"></div>
+        <div class="summary-line" id="readinessSummary"></div>
       </div>
     </section>
     <section class="data-grid">
@@ -972,6 +1038,165 @@ function timing(signal) {
 function watchItem(label, value) {
   return `<div class="watch-item"><span>${esc(label)}</span><strong>${esc(value ?? "-")}</strong></div>`;
 }
+function compactHash(value) {
+  const text = String(value || "");
+  return text ? `${text.slice(0, 10)}...` : "-";
+}
+function formatMs(value) {
+  return value === null || value === undefined ? "-" : `${Number(value).toFixed(2)} ms`;
+}
+function renderStrategy(strategy, runtimeStatus, runtimeConfig) {
+  const version = strategy.version || {};
+  const session = runtimeStatus.session || {};
+  const drift = Boolean(strategy.config_drift_detected || version.config_drift_detected);
+  document.getElementById("strategyCards").innerHTML =
+    pill("Strategy", drift ? "bad" : "ok", version.version || "unregistered") +
+    pill("Config lineage", drift ? "bad" : "ok", drift ? "DRIFT DETECTED" : compactHash(version.config_hash)) +
+    pill("Market session", session.should_run_live_modules ? "ok" : "warn", session.runtime_mode || "unknown") +
+    pill("Order mode", runtimeConfig.mode === "live" ? "bad" : "ok", (runtimeConfig.mode || "paper").toUpperCase());
+  document.getElementById("strategySummary").textContent =
+    `${version.human_note || "No strategy note"} | ${version.reason_for_change || "No change reason"}`;
+}
+function renderPipeline(pipeline) {
+  const candles = pipeline.canonical_underlying_candles || {};
+  const raw = pipeline.raw_tick_capture || {};
+  const fast = pipeline.fast_scan_context || {};
+  const rawDrops = Number(raw.dropped_warm_count || 0) + Number(raw.dropped_risk_count || 0);
+  document.getElementById("pipelineMetrics").innerHTML =
+    metric("Canonical candles", candles.running ? "RUNNING" : (candles.enabled ? "IDLE" : "DISABLED")) +
+    metric("Accepted ticks", candles.accepted_ticks || 0) +
+    metric("Persisted candles", candles.persisted_candles || 0) +
+    metric("Continuity fills", candles.generated_continuity_candles || 0) +
+    metric("Raw captured", raw.captured_count || 0) +
+    metric("Raw persisted", raw.persisted_count || 0) +
+    metric("Raw queue", `${raw.queue_size || 0}/${raw.queue_capacity || 0}`) +
+    metric("Critical gaps", raw.capture_gap_critical ? "YES" : "NO");
+  document.getElementById("pipelineSummary").textContent =
+    `Dropped candles ${candles.dropped_candles || 0}; raw drops ${rawDrops}; persist failures ${raw.persist_failure_count || 0}; ` +
+    `fast context ${fast.passed ? "ready" : (fast.reason || "not ready")}; coverage ${JSON.stringify(candles.coverage || {})}`;
+}
+function renderWebSocket(pipeline, runtimeStatus) {
+  const ws = pipeline.websocket || {};
+  const gap = ws.data_gap || {};
+  const owners = [...new Set(Object.values(ws.subscription_owners || {}).flat())];
+  const expected = Boolean((runtimeStatus.session || {}).should_run_live_modules);
+  document.getElementById("websocketMetrics").innerHTML =
+    metric("Connection", ws.websocket_connected ? "CONNECTED" : (expected ? "DISCONNECTED" : "IDLE")) +
+    metric("Subscribed", (ws.subscribed_tokens || []).length) +
+    metric("Desired", (ws.desired_tokens || []).length) +
+    metric("Verified live", (ws.verified_live_tokens || []).length) +
+    metric("Owners", owners.length ? owners.join(", ") : "-") +
+    metric("Reconnects", ws.reconnect_count || 0) +
+    metric("Data gaps", gap.gap_count || 0) +
+    metric("Event queue", `${ws.event_queue_size || 0}/${ws.event_queue_capacity || 0}`);
+  document.getElementById("websocketSummary").textContent =
+    `Status ${ws.websocket_status || "unknown"}; market ${ws.market_session || "unknown"}; active gap ${gap.active_gap ? "YES" : "no"}; ` +
+    `critical drops ${ws.event_queue_critical_drop_count || 0}; candle queue ${ws.candle_persist_queue_size || 0}/${ws.candle_persist_queue_capacity || 0}; ` +
+    `subscription failures ${ws.subscription_failure_count || 0}; ${ws.last_error || ws.critical_status || (expected ? "waiting for connection" : "idle outside live session")}`;
+}
+function renderArmedEntries(armed) {
+  const groups = ["active", "entered_paper", "too_late", "expired", "cancelled"];
+  const rows = groups.flatMap(group => (armed[group] || []).map(item => {
+    const quality = item.tick_quality || {};
+    const expires = item.valid_until ? Math.max(0, Math.round((new Date(item.valid_until.replace(" ", "T")) - Date.now()) / 1000)) : null;
+    return {
+      state: item.latest_state,
+      contract: item.tradingsymbol,
+      trigger: item.entry_trigger_price,
+      premium: item.latest_premium,
+      bid: item.latest_bid,
+      ask: item.latest_ask,
+      distance_pct: item.distance_to_trigger_pct,
+      ticks: quality.tick_count ?? item.tick_quality_count,
+      confirmed: quality.confirmed ?? item.tick_quality_confirmed,
+      ttl_seconds: expires,
+      blocker: item.tick_quality_reason || item.latest_reason || (item.reasons || []).join("; ")
+    };
+  })).slice(0, 20);
+  document.getElementById("armedMetrics").innerHTML =
+    metric("Active", (armed.active || []).length) + metric("Total tracked", armed.count || 0) +
+    metric("Entered paper", (armed.entered_paper || []).length) + metric("Too late", (armed.too_late || []).length) +
+    metric("Expired", (armed.expired || []).length) + metric("Cancelled", (armed.cancelled || []).length) +
+    metric("Paper event entry", armed.event_entry_enabled ? "ENABLED" : "DISABLED") +
+    metric("Live event entry", armed.live_event_entry_enabled ? "ENABLED" : "DISABLED");
+  table(document.getElementById("armedEntriesTable"), rows, ["state","contract","trigger","premium","bid","ask","distance_pct","ticks","confirmed","ttl_seconds","blocker"]);
+}
+function renderLatency(latency) {
+  const rows = Object.entries(latency.metrics || {}).map(([name, value]) => ({
+    stage: name.replaceAll("_", " "),
+    samples: value.sample_count || 0,
+    missing: value.missing_sample_count || 0,
+    p50_ms: value.p50_ms,
+    p95_ms: value.p95_ms,
+    p99_ms: value.p99_ms,
+    max_ms: value.max_ms
+  }));
+  const sampled = rows.filter(row => row.samples > 0);
+  const worst = sampled.reduce((current, row) => Number(row.p95_ms || 0) > Number(current?.p95_ms || 0) ? row : current, null);
+  document.getElementById("latencyMetrics").innerHTML =
+    metric("Status", latency.status || "unknown") + metric("Measured stages", sampled.length) +
+    metric("Worst p95", worst ? formatMs(worst.p95_ms) : "-") + metric("Worst stage", worst?.stage || "-") +
+    metric("Dropped events", latency.dropped_event_count || 0) + metric("Critical drops", latency.critical_dropped_event_count || 0) +
+    metric("Strategy", latency.strategy_version || "-") + metric("Config", compactHash(latency.config_hash));
+  table(document.getElementById("latencyTable"), rows, ["stage","samples","missing","p50_ms","p95_ms","p99_ms","max_ms"]);
+}
+function latestBankIntelligence(latest) {
+  const signal = latestSignal(latest || {});
+  return signal?.factor_scores?.banknifty_intelligence?.details?.topBankAlignment || null;
+}
+function renderConstituents(snapshot, latest) {
+  const live = latestBankIntelligence(latest);
+  document.getElementById("constituentMetrics").innerHTML =
+    metric("Snapshot", snapshot.source_date || "-") + metric("Age", snapshot.age_days == null ? "-" : `${snapshot.age_days} days`) +
+    metric("Members", snapshot.constituent_count || 0) + metric("Weight total", snapshot.total_weight == null ? "-" : `${(Number(snapshot.total_weight) * 100).toFixed(2)}%`) +
+    metric("Snapshot valid", snapshot.valid && !snapshot.stale ? "YES" : "NO") +
+    metric("Live coverage", live ? `${(Number(live.coverage_by_weight || 0) * 100).toFixed(1)}%` : "-") +
+    metric("Alignment", live ? `${(Number(live.alignment || 0) * 100).toFixed(1)}%` : "-") +
+    metric("Opposing weight", live ? `${(Number(live.against_weight || 0) * 100).toFixed(1)}%` : "-");
+  document.getElementById("constituentSummary").textContent = live
+    ? `Hard-gate eligible ${live.hard_gate_eligible ? "yes" : "no"}; supporting weight ${(Number(live.support_weight || 0) * 100).toFixed(1)}%; ${live.hard_gate_ineligible_reason || "live weighted participation available"}`
+    : `Official snapshot ${snapshot.status || "unknown"}; no current setup is available for direction-specific live alignment. ${(snapshot.validation_errors || []).join("; ")}`;
+}
+function renderBrokerSafety(reconciliation, protection, strategy, trades, runtimeConfig) {
+  const rec = reconciliation.last_reconciliation || {};
+  const version = strategy.version || {};
+  const exitRules = (version.latest_config_snapshot || version.config_snapshot || {}).exit_rules || {};
+  const required = Boolean(exitRules.require_broker_protective_stop_for_live_entry);
+  const open = firstOpenTrade(trades.trades || []);
+  const paper = (runtimeConfig.mode || "paper") !== "live";
+  document.getElementById("brokerSafetyMetrics").innerHTML =
+    metric("Reconciliation", reconciliation.blocked ? "BLOCKED" : "CLEAR") +
+    metric("Mismatches", rec.mismatch_count || 0) + metric("Local live", rec.local_open_live_trades || 0) +
+    metric("Broker positions", rec.broker_open_positions || 0) + metric("Protection required", required ? "YES" : "NO") +
+    metric("Protection enabled", protection.enabled ? "YES" : (paper ? "OFF (PAPER)" : "NO")) +
+    metric("Protective order", open?.protective_order_status || "-") + metric("Protective trigger", open?.protective_trigger_price || "-");
+  document.getElementById("brokerSafetySummary").textContent = reconciliation.reason || open?.protective_last_error ||
+    `${protection.mechanism || "Broker protection status unavailable"}; ${paper ? "broker-side stop is not needed for paper trades" : "live entry fails closed without required protection"}.`;
+}
+function readinessFromResearch(afterMarket) {
+  const current = afterMarket.last_result?.reports?.professional_readiness?.result;
+  const stored = afterMarket.job_run?.metadata?.result?.reports?.professional_readiness?.result;
+  return current || stored || null;
+}
+function renderReadiness(afterMarket) {
+  const readiness = readinessFromResearch(afterMarket);
+  const verdict = readiness?.verdict || {};
+  const checks = readiness?.checks || {};
+  const passed = Object.values(checks).filter(item => item?.passed).length;
+  const failed = Object.entries(checks).filter(([, item]) => !item?.passed).map(([name]) => name);
+  const walk = checks.walk_forward_passed || {};
+  const drawdown = checks.walk_forward_drawdown || {};
+  const regime = checks.walk_forward_regime_stability || {};
+  document.getElementById("readinessMetrics").innerHTML =
+    metric("Verdict", verdict.label || "NOT CACHED") + metric("Checks passed", Object.keys(checks).length ? `${passed}/${Object.keys(checks).length}` : "-") +
+    metric("OOS trades", walk.out_of_sample_trades ?? "-") + metric("OOS sessions", walk.out_of_sample_sessions ?? "-") +
+    metric("Validation folds", walk.fold_count ?? "-") + metric("Drawdown", drawdown.value == null ? "-" : `${drawdown.value}%`) +
+    metric("Regime stability", regime.passed == null ? "-" : (regime.passed ? "PASS" : "FAIL")) +
+    metric("Research run", afterMarket.last_run_date || afterMarket.job_run?.trading_date || "-");
+  document.getElementById("readinessSummary").textContent = readiness
+    ? (failed.length ? `Failed checks: ${failed.join(", ")}. ${verdict.message || "Keep paper trading."}` : (verdict.message || "All cached checks passed."))
+    : "No lightweight readiness result is cached yet. Run the staged After-Market Research job; the dashboard will display its verdict without blocking live refreshes.";
+}
 function renderActiveTrade(trade) {
   const el = document.getElementById("activeTrade");
   if (!trade) { el.innerHTML = `<div class="empty">No open trade.</div>`; return; }
@@ -982,6 +1207,12 @@ function renderActiveTrade(trade) {
     ${watchItem("SL", trade.stop_loss)}
     ${watchItem("Target 1", trade.target_1)}
     ${watchItem("Price source", trade.price_source || "-")}
+    ${watchItem("Executable exit", trade.exit_executable_price ?? "-")}
+    ${watchItem("Exit bid / ask", trade.exit_best_bid != null || trade.exit_best_ask != null ? `${trade.exit_best_bid ?? "-"} / ${trade.exit_best_ask ?? "-"}` : "-")}
+    ${watchItem("Exit depth", trade.exit_depth_coverage ?? "-")}
+    ${watchItem("Exit spread", trade.exit_spread_pct == null ? "-" : `${trade.exit_spread_pct}%`)}
+    ${watchItem("Exit quote", trade.exit_quote_timestamp || "-")}
+    ${watchItem("Protective stop", trade.protective_order_status || "-")}
     ${watchItem("Exit order", trade.exit_order_status || "-")}
     ${watchItem("Net P&L", trade.net_pnl ?? trade.pnl ?? "-")}
   </div>`;
@@ -1001,15 +1232,17 @@ function renderLatestWatch(signal) {
     ${watchItem("Reason", t.entry_timing_reason || "Qualified signal")}
   </div>`;
 }
-function renderReady(h, d, k, au, a, m, c, ws, risk, latest, trades, runtime) {
+function renderReady(h, d, k, au, a, m, c, ws, risk, latest, trades, runtime, runtimeStatus) {
   const blockers = [];
+  const session = runtimeStatus?.session || {};
+  const liveModulesExpected = Boolean(session.should_run_live_modules);
   if (h.status !== "ok") blockers.push("API");
   if (d.status !== "ok") blockers.push("Database");
   if (k.status !== "ok") blockers.push("Kite");
-  if (risk.passed === false) blockers.push("Risk");
-  if (!au.running && !a.running) blockers.push("Automation stopped");
-  if (!m.running) blockers.push("Exit monitor stopped");
-  if ((ws.websocket_enabled || ws.enabled) && ws.websocket_connected === false) blockers.push("WebSocket");
+  if (liveModulesExpected && risk.passed === false) blockers.push("Risk");
+  if (liveModulesExpected && !au.running && !a.running) blockers.push("Automation stopped");
+  if (liveModulesExpected && !m.running) blockers.push("Exit monitor stopped");
+  if (liveModulesExpected && (ws.websocket_enabled || ws.enabled) && ws.websocket_connected === false) blockers.push("WebSocket");
   const panel = document.getElementById("readyPanel");
   const mode = runtime?.mode || au.config?.order_mode || a.mode || "paper";
   const sig = latestSignal(latest);
@@ -1017,8 +1250,9 @@ function renderReady(h, d, k, au, a, m, c, ws, risk, latest, trades, runtime) {
   const state = timing(sig).entry_timing_state || sig?.setup_state || (sig ? "SIGNAL" : "NO_ACTIVE_SETUP");
   const panelState = blockers.length ? (blockers.length > 2 ? "bad" : "warn") : "ok";
   panel.className = `panel ready ${panelState}`;
-  document.getElementById("readyTitle").textContent = blockers.length ? "Needs Attention" : "System Ready";
-  document.getElementById("readySummary").textContent = blockers.length ? `Blocked by: ${blockers.join(", ")}` : `${state}${active ? " with active trade" : ""}`;
+  document.getElementById("readyTitle").textContent = blockers.length ? "Needs Attention" : (liveModulesExpected ? "System Ready" : "System Safe — Live Modules Idle");
+  document.getElementById("readySummary").textContent = blockers.length ? `Blocked by: ${blockers.join(", ")}` :
+    (liveModulesExpected ? `${state}${active ? " with active trade" : ""}` : `${session.runtime_mode || "OUTSIDE_MARKET"}: automation, exit monitor and WebSocket may remain stopped by design`);
   document.getElementById("modeChip").className = `chip ${mode === "live" ? "bad" : "ok"}`;
   document.getElementById("modeChip").textContent = mode.toUpperCase();
   document.getElementById("readyChips").innerHTML = [
@@ -1026,7 +1260,8 @@ function renderReady(h, d, k, au, a, m, c, ws, risk, latest, trades, runtime) {
     chip(m.running ? "Exit monitor running" : "Exit monitor stopped", m.running ? "ok" : "bad"),
     chip(k.status === "ok" ? "Kite OK" : "Kite issue", k.status === "ok" ? "ok" : "bad"),
     chip(ws.websocket_connected ? "WebSocket connected" : "WebSocket not connected", ws.websocket_connected ? "ok" : "warn"),
-    chip(risk.passed === false ? "Risk blocked" : "Risk allowed", risk.passed === false ? "bad" : "ok")
+    chip(!liveModulesExpected ? "Risk deferred" : (risk.passed === false ? "Risk blocked" : "Risk allowed"), liveModulesExpected && risk.passed === false ? "bad" : "ok"),
+    chip(session.runtime_mode || "session unknown", liveModulesExpected ? "ok" : "warn")
   ].join("");
   const t = timing(sig);
   document.getElementById("watchPanel").innerHTML =
@@ -1185,14 +1420,15 @@ function loadControls(config, runtime) {
   window.controlsLoaded = true;
 }
 async function refreshAll() {
-  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, runtimeConfig, collector, ingest, websocket, cache, decisionFeed, afterMarketResearch, gateEffectiveness, optionCandleCoverage] = await Promise.allSettled([
+  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, runtimeConfig, collector, ingest, websocket, cache, decisionFeed, afterMarketResearch, gateEffectiveness, optionCandleCoverage, pipelineStatus, runtimeStatusResult, strategyStatus, armedEntries, constituentStatus, reconciliationStatus, protectionStatus] = await Promise.allSettled([
     getJson("/health"), getJson("/db/health"), getJsonCached("kiteHealth", "/kite/health", DASHBOARD_BROKER_REFRESH_MS), getJson("/auto-trader/status"), getJson("/opportunity-monitor/status"),
     getJson("/opportunities/performance"), getJson("/auto-trader/latest"), getJsonCached("journal", "/opportunities?limit=50", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("failures", "/opportunities/failure-analysis", DASHBOARD_SLOW_REFRESH_MS),
     getReviewJsonCached("learning", "/research/outcome-learning", DASHBOARD_SLOW_REFRESH_MS), getJson("/auto-trader/executions"), getJson("/paper/trades"), getJsonCached("margins", "/kite/margins", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("positions", "/kite/positions", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("risk", "/risk/status", DASHBOARD_BROKER_REFRESH_MS), getJson("/trades?limit=50"),
-    getJson("/automation/status"), getJsonCached("runtimeConfig", "/runtime/trading-config", DASHBOARD_SLOW_REFRESH_MS), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30"), getJsonCached("afterMarketResearch", "/research/after-market/status", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("gateEffectiveness", "/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("optionCandleCoverage", "/data/option-candle-coverage?symbols=BANKNIFTY", DASHBOARD_SLOW_REFRESH_MS)
+    getJson("/automation/status"), getJsonCached("runtimeConfig", "/runtime/trading-config", DASHBOARD_SLOW_REFRESH_MS), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30"), getJsonCached("afterMarketResearch", "/research/after-market/status", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("gateEffectiveness", "/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("optionCandleCoverage", "/data/option-candle-coverage?symbols=BANKNIFTY", DASHBOARD_SLOW_REFRESH_MS),
+    getJson("/market-data/pipeline-status"), getJson("/runtime/status"), getJsonCached("strategyStatus", "/strategy/versions/current", DASHBOARD_SLOW_REFRESH_MS), getJson("/scanner/armed-entries"), getJsonCached("constituentStatus", "/market-data/banknifty-constituents/status", DASHBOARD_SLOW_REFRESH_MS), getJsonCached("reconciliationStatus", "/broker/reconciliation/status", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("protectionStatus", "/broker/emergency-protection/status", DASHBOARD_BROKER_REFRESH_MS)
   ]);
   const val = r => r.status === "fulfilled" ? r.value : {error: r.reason.message};
-  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), runtime=val(runtimeConfig), c=val(collector), ing=val(ingest), ws=val(websocket), cacheStatus=val(cache), feed=val(decisionFeed), researchJob=val(afterMarketResearch), gates=val(gateEffectiveness), candleCoverage=val(optionCandleCoverage);
+  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), runtime=val(runtimeConfig), c=val(collector), ing=val(ingest), ws=val(websocket), cacheStatus=val(cache), feed=val(decisionFeed), researchJob=val(afterMarketResearch), gates=val(gateEffectiveness), candleCoverage=val(optionCandleCoverage), pipeline=val(pipelineStatus), rtStatus=val(runtimeStatusResult), strategy=val(strategyStatus), armed=val(armedEntries), constituents=val(constituentStatus), reconciliation=val(reconciliationStatus), protection=val(protectionStatus);
   window.dashboardMarketOpen = Boolean(au.market_open) || researchJob.market_session === "REGULAR_MARKET";
   loadControls(au.config, runtime);
   document.getElementById("statusCards").innerHTML =
@@ -1204,15 +1440,23 @@ async function refreshAll() {
     pill("Collector", c.running ? "ok" : "warn", c.running ? "running" : "stopped") + pill("Exit Monitor", m.running ? "ok" : "bad", m.running ? "running" : "stopped") +
     pill("Research Job", researchJob.running ? "warn" : (researchJob.enabled ? "ok" : "warn"), researchJob.running ? "running" : (researchJob.last_run_date ? `last ${researchJob.last_run_date}` : researchJob.next_action || "idle")) +
     pill("Data Cache", cacheStatus.status === "ok" ? "ok" : "warn", cacheStatus.status || cacheStatus.error || "check");
-  renderReady(h, d, k, au, a, m, c, ws, r, l, t, runtime);
+  renderReady(h, d, k, au, a, m, c, ws, r, l, t, runtime, rtStatus);
+  renderStrategy(strategy, rtStatus, runtime);
+  renderPipeline(pipeline);
+  renderWebSocket(pipeline, rtStatus);
+  renderArmedEntries(armed);
+  renderLatency(pipeline.latency || {});
+  renderConstituents(constituents, l);
+  renderBrokerSafety(reconciliation, protection, strategy, t, runtime);
+  renderReadiness(researchJob);
   renderActiveTrade(firstOpenTrade(t.trades || []));
   renderLatestWatch(latestSignal(l));
   renderDecisionFeed(feed);
   document.getElementById("metrics").innerHTML =
     metric("Last scan", a.last_scan_at || "-") + metric("Latest found", a.latest_count || 0) + metric("Executions", a.execution_count || 0) +
     metric("Open", p.open || 0) + metric("Closed", p.closed || 0) + metric("Win rate", p.closed ? `${Math.round((p.wins || 0) / p.closed * 100)}%` : "0%") +
-    metric("P&L", p.pnl || 0) + metric("Risk", r.passed === false ? "Blocked" : "Allowed") + metric("Research", researchJob.last_run_date || researchJob.next_action || "-");
-  document.getElementById("activityJson").textContent = JSON.stringify({automation:au, runtime_config:runtime, auto_trader:a, collector:c, ingestion:ing, monitor:m, performance:p, risk:r, websocket:ws, cache:cacheStatus, after_market_research:researchJob, decision_feed:feed}, null, 2);
+    metric("P&L", p.pnl || 0) + metric("Risk", (rtStatus.session || {}).should_run_live_modules ? (r.passed === false ? "Blocked" : "Allowed") : "Deferred") + metric("Research", researchJob.last_run_date || researchJob.next_action || "-");
+  document.getElementById("activityJson").textContent = JSON.stringify({automation:au, runtime_config:runtime, runtime_status:rtStatus, strategy, auto_trader:a, collector:c, ingestion:ing, monitor:m, performance:p, risk:r, pipeline, armed_entries:armed, constituents, broker_reconciliation:reconciliation, broker_protection:protection, cache:cacheStatus, after_market_research:researchJob, decision_feed:feed}, null, 2);
   const rq = gates.rejected_summary || {};
   const cs = candleCoverage.summary || {};
   document.getElementById("optionCandleCoverageMetrics").innerHTML =
@@ -1450,6 +1694,16 @@ def trade_record_to_dict(record) -> dict[str, object]:
         "target_2": record.target_2,
         "target_3": record.target_3,
         "exit_price": record.exit_price,
+        "exit_rule_first_triggered": getattr(record, "exit_rule_first_triggered", None),
+        "exit_triggered_rules": _json_list(getattr(record, "exit_triggered_rules_json", None)),
+        "exit_ltp": getattr(record, "exit_ltp", None),
+        "exit_best_bid": getattr(record, "exit_best_bid", None),
+        "exit_best_ask": getattr(record, "exit_best_ask", None),
+        "exit_executable_price": getattr(record, "exit_executable_price", None),
+        "exit_depth_coverage": getattr(record, "exit_depth_coverage", None),
+        "exit_spread_pct": getattr(record, "exit_spread_pct", None),
+        "exit_execution_source": getattr(record, "exit_execution_source", None),
+        "exit_quote_timestamp": format_ist(getattr(record, "exit_quote_timestamp", None)),
         "exit_order_id": getattr(record, "exit_order_id", None),
         "exit_order_status": getattr(record, "exit_order_status", None),
         "exit_attempt_count": getattr(record, "exit_attempt_count", 0),
@@ -1484,6 +1738,8 @@ def trade_record_to_dict(record) -> dict[str, object]:
         "pnl": getattr(record, "net_pnl", None) if getattr(record, "net_pnl", None) is not None else record.pnl,
         "outcome": record.outcome,
         "notes": record.notes,
+        "strategy_version": getattr(record, "strategy_version", None),
+        "config_hash": getattr(record, "config_hash", None),
     }
 
 
@@ -1564,6 +1820,26 @@ def ingest_historical_candles(
             days=_bounded_int(payload.get("days"), 90, maximum=365),
             use_checkpoint=bool(payload.get("use_checkpoint", False)),
             overlap_minutes=int(payload.get("overlap_minutes") or settings.automation_checkpoint_overlap_minutes),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post(
+    "/data/ingest/banknifty-canonical-bootstrap",
+    tags=["11 Data Ingestion"],
+    summary="Safely bootstrap canonical Bank Nifty 1m/5m candles",
+    dependencies=PROTECTED_ROUTE,
+)
+def bootstrap_banknifty_canonical(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
+    payload = payload or {}
+    _require_manual_override_for_market_heavy_operation(payload, "Bank Nifty canonical candle bootstrap")
+    try:
+        return data_ingestion_service.bootstrap_canonical_banknifty(
+            from_date=str(payload.get("from")) if payload.get("from") else None,
+            to_date=str(payload.get("to")) if payload.get("to") else None,
+            days=_bounded_int(payload.get("days"), 90, maximum=365),
+            use_checkpoint=bool(payload.get("use_checkpoint", True)),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -71,7 +71,7 @@ The fast-rally event is stage A only. Stage B uses the same scanner gates, scori
 
 ## 3. Build the candidate
 
-The scanner gathers Bank Nifty market context, price action, regime, option chain, option quotes, premium candles, option quality, volatility context, time-bucket evidence, and learned/validated strategy context.
+The scanner gathers Bank Nifty market context, price action, regime, option chain, option quotes, premium candles, option quality, volatility context, time-bucket evidence, and learned/validated strategy context. Constituent participation uses the reviewed official 14-member local snapshot: availability is measured by official weight, hard-gate influence is capped per bank, and stale/incomplete coverage cannot claim reliable alignment.
 
 `TradeSetupService` then:
 
@@ -196,19 +196,24 @@ Without explicit live confirmation, the order is routed to paper even if `order_
 
 Only then can `OrderService` send a broker market order and persist the live trade record.
 
+For a confirmed live fill, broker-side disaster protection is mandatory. A complete fill receives an SL-M sell order for the filled quantity. If the entry is partial, the remaining entry quantity is cancelled before protecting only the actual fill. Missing acknowledgement/order ID, rejection, cancellation or placement failure marks protection failed and blocks subsequent live entries. Broker postbacks and REST reconciliation maintain the protection state.
+
 ## 10. Monitor and exit
 
 Open option tokens are subscribed under the `active_trade` owner in full mode. `ActiveTradePriceFeed` prefers fresh WebSocket ticks. For live trades, stale or disconnected WebSocket data blocks unsafe decisions unless the configured broker polling fallback obtains an acceptable price.
 
-`TradeExitService` evaluates open trades for:
+Before rule evaluation, `ExecutablePriceService` calculates the sell price available for the remaining quantity. Full five-level bid depth produces a conservative depth-weighted price. Partial depth uses the worst visible bid but cannot prove a target or authorize a live software exit. Best-bid-only data is paper-only; LTP-only data is diagnostic and cannot fill an exit.
+
+`TradeExitService` then evaluates open trades in explicit priority order:
 
 - Stop-loss crossing.
-- Target achievement.
+- Near-close/time stop.
+- Trailing stop.
 - Configured underlying or premium invalidation.
-- Optional partial booking and move-to-cost behavior.
-- Broker protective-stop state where configured.
+- Targets and optional partial booking/move-to-cost behavior.
+- Broker protective-stop coordination.
 
-Paper exits close the virtual position and trade record. Live exits require live auto-square-off to be enabled, submit the broker exit, and use broker updates/reconciliation to confirm lifecycle state. Exit failures and reconciliation mismatches remain visible rather than being silently marked closed.
+Paper exits use the same executable-price assumptions and close the virtual position/trade record. Live exits require full quantity-safe executable depth and live auto-square-off, cancel a non-triggered protective order when appropriate, submit one broker exit, and use broker updates/reconciliation to confirm lifecycle state. Exit failures and mismatches remain visible rather than being silently marked closed. LTP, book evidence, first rule and all simultaneous triggers are persisted for audit and analytics.
 
 ## 11. Feed failures and recovery
 
@@ -221,10 +226,12 @@ Paper exits close the virtual position and trade record. Live exits require live
 
 ## 12. Replay and calibration
 
-`TickReplayService` replays ad-hoc ticks deterministically and replays persisted sessions by their capture sequence without sleeping. Raw records include price, bid/ask, cumulative volume, exchange/receive timestamps, provenance, packet type, owners, and strategy/config lineage.
+`TickReplayService` replays ad-hoc ticks deterministically and replays persisted sessions by capture sequence without sleeping. Raw records include price, bid/ask, five-level depth, cumulative volume, exchange/receive timestamps, provenance, packet type, owners, and strategy/config lineage; full-session replay exposes missing capture sequences.
 
 Rejected-opportunity evaluation uses raw-tick first touch, then chronological candles. It never infers a hit from a later current quote. Same-candle stop/target paths stay ambiguous; incomplete paths are censored and excluded from learning. Repeated observations share a setup episode, so research counts independent episodes rather than scanner frequency.
 
 Research/backtests do not run from scheduled scans, fast callbacks, or order paths. Time-bucket evidence is precomputed after market hours, versioned by strategy/config, and rejected when missing, stale, or mismatched. Walk-forward validation uses multiple anchored folds with a purge/embargo at least as large as the trade horizon. Readiness requires at least the configured fold, independent out-of-sample trade, and session counts; zero-trade evidence cannot pass.
 
-Until a chronological out-of-sample calibration model has sufficient independent samples, API `probability` is `null`. The numeric score-derived value is exposed only as `heuristic_score_confidence` with an explicit source.
+Readiness additionally requires positive after-cost expectancy, minimum profit factor, bounded drawdown, and sufficient evidence across traded trend, range, volatile, event-day and expiry-day regimes. Expiry-day evidence is explicitly excluded when the entry policy blocks expiry-day buying; missing event/regime samples fail rather than being assumed stable. Until a chronological out-of-sample calibration model has sufficient independent samples, API `probability` is `null`. The numeric score-derived value is exposed only as `heuristic_score_confidence` with an explicit source.
+
+Latency telemetry spans exchange tick to receive, receive to rally detection, detection to scan, scan-to-arm, arm-to-confirmation, order submission/acknowledgement/fill and exit trigger/submission/fill. Scheduled and fast-rally scans are reported separately with p50/p95/p99, counts, missing samples and dropped events.

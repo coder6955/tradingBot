@@ -41,6 +41,8 @@ class OrderService:
         self.market_data_coordinator = market_data_coordinator
         self.latency_metrics = latency_metrics
         self._banknifty_underlying_token: int | None = None
+        self._protective_failure_blocked = False
+        self._protective_failure_reason: str | None = None
 
     def place_signal_order(
         self,
@@ -84,6 +86,10 @@ class OrderService:
 
         if not settings.live_trading_mode or settings.paper_trading_mode:
             raise ValueError("live order blocked: set LIVE_TRADING_MODE=true and PAPER_TRADING_MODE=false")
+        if settings.require_broker_protective_stop_for_live_entry and not settings.enable_broker_emergency_sl:
+            raise ValueError("live order blocked: broker-side protective stop is required but ENABLE_BROKER_EMERGENCY_SL is false")
+        if self._protective_failure_blocked:
+            raise ValueError(f"live order blocked: previous protective stop failure: {self._protective_failure_reason or 'unknown'}")
         safety = self.live_safety_checker() if self.live_safety_checker is not None else {"blocked": False}
         if safety.get("blocked"):
             raise ValueError(f"live order blocked by safety check: {safety.get('reason') or 'unknown'}")
@@ -106,6 +112,7 @@ class OrderService:
             product=settings.default_product,
         )
         self._record_latency("live_submission_to_broker_ack", submission_started, signal=signal, mode="live")
+        self._record_latency("order_submission_to_broker_acknowledgement", submission_started, signal=signal, mode="live")
         order_id = result.get("order_id") if isinstance(result, dict) else None
         record = self.trade_repository.create_trade(
             signal,
@@ -118,6 +125,9 @@ class OrderService:
             opportunity_id=opportunity_id,
         )
         broker_emergency_sl = self._broker_emergency_protection(signal, record=record, quantity=quantity, entry_order_id=str(order_id) if order_id else None)
+        if settings.require_broker_protective_stop_for_live_entry and broker_emergency_sl.get("enabled") and broker_emergency_sl.get("reason") not in {None, "entry order is not confirmed filled yet"} and not broker_emergency_sl.get("submitted"):
+            self._protective_failure_blocked = True
+            self._protective_failure_reason = str(broker_emergency_sl.get("reason") or "protective stop submission failed")
         self._subscribe_active_trade_tokens(signal)
         self._record_latency("order_service_start_to_ack", order_started, signal=signal, mode="live")
         return {
@@ -279,7 +289,8 @@ class OrderService:
             )
             return {"enabled": True, "submitted": False, "reason": "stop loss is missing"}
         entry_confirmation = self._confirm_entry_fill(entry_order_id)
-        if not entry_confirmation["complete"]:
+        partial_filled_quantity = int(entry_confirmation.get("filled_quantity") or 0)
+        if not entry_confirmation["complete"] and partial_filled_quantity <= 0:
             self.trade_repository.update_protective_order(
                 int(record.id),
                 status="pending_entry_confirmation",
@@ -293,7 +304,19 @@ class OrderService:
                 "entry_confirmation": entry_confirmation,
                 "trigger_price": trigger_price,
             }
-        filled_quantity = int(entry_confirmation.get("filled_quantity") or quantity)
+        if not entry_confirmation["complete"] and partial_filled_quantity > 0:
+            try:
+                self.kite_provider.cancel_order(str(entry_order_id), variety="regular")
+            except Exception as exc:
+                self.trade_repository.update_protective_order(
+                    int(record.id),
+                    status="failed",
+                    broker_payload={"reason": "partial entry cancellation failed", "entry_confirmation": entry_confirmation},
+                    trigger_price=trigger_price,
+                    error=str(exc),
+                )
+                return {"enabled": True, "submitted": False, "reason": f"partial entry cancellation failed: {exc}"}
+        filled_quantity = partial_filled_quantity or int(quantity)
         average_price = self._float(entry_confirmation.get("average_price"))
         self.trade_repository.update_broker_status(
             int(record.id),
@@ -322,6 +345,18 @@ class OrderService:
             )
             return {"enabled": True, "submitted": False, "reason": str(exc), "trigger_price": trigger_price}
         protective_order_id = str(response.get("order_id")) if isinstance(response, dict) and response.get("order_id") else None
+        response_status = str(response.get("status") or "submitted").lower() if isinstance(response, dict) else "submitted"
+        if not protective_order_id or response_status in {"rejected", "cancelled", "canceled", "failed"}:
+            reason = "protective stop broker acknowledgement is missing an order id" if not protective_order_id else f"protective stop order {response_status}"
+            self.trade_repository.update_protective_order(
+                int(record.id),
+                status="failed",
+                protective_order_id=protective_order_id,
+                trigger_price=trigger_price,
+                broker_payload={"protective_order": response, "entry_confirmation": entry_confirmation},
+                error=reason,
+            )
+            return {"enabled": True, "submitted": False, "reason": reason, "trigger_price": trigger_price}
         self.trade_repository.update_protective_order(
             int(record.id),
             status=str(response.get("status") or "submitted") if isinstance(response, dict) else "submitted",

@@ -34,6 +34,8 @@ class WebSocketTick:
     volume: float | None = None
     bid: float | None = None
     ask: float | None = None
+    buy_depth: tuple[dict[str, Any], ...] = ()
+    sell_depth: tuple[dict[str, Any], ...] = ()
     receive_timestamp: datetime | None = None
     timestamp_source: str = "local_receive_time"
     packet_type: str = "unknown"
@@ -916,12 +918,28 @@ class KiteWebSocketPriceFeed:
             logger.exception("raw tick capture handler failed")
 
     def _record_exchange_receipt_latency(self, tick: WebSocketTick) -> None:
-        if self.latency_metrics is None or tick.receive_timestamp is None:
+        if self.latency_metrics is None:
+            return
+        if tick.receive_timestamp is None:
+            self.latency_metrics.record_missing(
+                "exchange_tick_to_application_receive",
+                detail={"instrument_token": tick.instrument_token, "reason": "receive_timestamp_missing"},
+            )
             return
         if tick.timestamp_source not in {"exchange_timestamp", "last_trade_time"}:
+            self.latency_metrics.record_missing(
+                "exchange_tick_to_application_receive",
+                detail={"instrument_token": tick.instrument_token, "reason": "exchange_timestamp_unavailable", "timestamp_source": tick.timestamp_source},
+            )
             return
         self.latency_metrics.record_between(
             "exchange_timestamp_to_local_receipt",
+            tick.timestamp,
+            tick.receive_timestamp,
+            detail={"instrument_token": tick.instrument_token, "timestamp_source": tick.timestamp_source},
+        )
+        self.latency_metrics.record_between(
+            "exchange_tick_to_application_receive",
             tick.timestamp,
             tick.receive_timestamp,
             detail={"instrument_token": tick.instrument_token, "timestamp_source": tick.timestamp_source},
@@ -1103,6 +1121,8 @@ class KiteWebSocketPriceFeed:
             volume=self._safe_float(payload.get("volume") or payload.get("volume_traded")),
             bid=bid,
             ask=ask,
+            buy_depth=tuple(dict(level) for level in buy_depth if isinstance(level, dict)),
+            sell_depth=tuple(dict(level) for level in sell_depth if isinstance(level, dict)),
             receive_timestamp=self._now(),
             timestamp_source=timestamp_source,
             packet_type=packet_type,

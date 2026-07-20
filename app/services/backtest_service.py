@@ -52,6 +52,8 @@ class OptionBacktestTrade:
     spread_impact_pct: float
     bars_held: int
     reason: str
+    market_regime: str = "unknown"
+    event_day: bool = False
     intended_entry_price: float | None = None
     intended_exit_price: float | None = None
     execution_price_impact_pct: float = 0.0
@@ -472,6 +474,7 @@ class BacktestTradeSetupService(TradeSetupService):
 
 class BacktestBankNiftyIntelligenceService(BankNiftyIntelligenceService):
     def __init__(self, feed: HistoricalScannerReplayFeed) -> None:
+        super().__init__()
         self.feed = feed
 
     def _today_candles(self, symbol: str, timeframe: str = "5minute") -> list[Candle]:
@@ -797,6 +800,7 @@ class BacktestService:
                 }
             )
         aggregate = self._aggregate_walk_forward_summaries([fold["summary"] for fold in folds])
+        aggregate_segments = self._aggregate_walk_forward_segments([fold.get("segments", {}) for fold in folds])
         aggregate["expectancy_confidence_interval_95"] = self._fold_confidence_interval(
             [float(fold["summary"].get("expectancy_pct") or 0.0) for fold in folds]
         )
@@ -804,6 +808,16 @@ class BacktestService:
         if len(folds) < settings.readiness_min_validation_folds:
             passed = False
             reasons.append(f"requires at least {settings.readiness_min_validation_folds} completed validation folds")
+        if int(aggregate.get("trades") or 0) < settings.readiness_min_oos_trades:
+            passed = False
+            reasons.append(f"requires at least {settings.readiness_min_oos_trades} independent out-of-sample trades")
+        if len(validation_sessions) < settings.readiness_min_oos_sessions:
+            passed = False
+            reasons.append(f"requires at least {settings.readiness_min_oos_sessions} out-of-sample sessions")
+        regime_stability = self._walk_forward_regime_stability(aggregate_segments)
+        if not regime_stability["passed"]:
+            passed = False
+            reasons.extend(str(item) for item in regime_stability["reasons"])
         return {
             "status": "ok",
             "mode": "walk_forward_option",
@@ -819,6 +833,8 @@ class BacktestService:
             "fold_count": len(folds),
             "out_of_sample_sessions": len(validation_sessions),
             "folds": folds,
+            "segments": aggregate_segments,
+            "regime_stability": regime_stability,
             "embargo_candles": embargo,
             "passed": passed,
             "reasons": reasons,
@@ -827,8 +843,70 @@ class BacktestService:
                 "min_expectancy_pct": settings.min_strategy_expectancy_pct,
                 "min_profit_factor": settings.min_strategy_profit_factor,
                 "min_win_rate_pct": settings.min_strategy_win_rate_pct,
+                "max_drawdown_pct": settings.readiness_max_drawdown_pct,
+                "min_regime_trades": settings.readiness_min_regime_trades,
             },
         }
+
+    def _aggregate_walk_forward_segments(self, fold_segments: list[dict[str, Any]]) -> dict[str, Any]:
+        dimensions = {str(name) for segments in fold_segments for name in (segments or {})}
+        result: dict[str, Any] = {}
+        for dimension in sorted(dimensions):
+            groups = {
+                str(group)
+                for segments in fold_segments
+                for group in ((segments or {}).get(dimension, {}) or {})
+            }
+            result[dimension] = {
+                group: self._aggregate_walk_forward_summaries(
+                    [
+                        segments[dimension][group]
+                        for segments in fold_segments
+                        if isinstance((segments or {}).get(dimension), dict) and group in segments[dimension]
+                    ]
+                )
+                for group in sorted(groups)
+            }
+        return result
+
+    def _walk_forward_regime_stability(self, segments: dict[str, Any]) -> dict[str, Any]:
+        required: list[tuple[str, str]] = [
+            ("market_regime", "trend"),
+            ("market_regime", "range"),
+            ("market_regime", "volatile"),
+            ("event_day", "event_day"),
+        ]
+        if not settings.block_expiry_day_option_buying:
+            required.append(("expiry_day", "expiry_day"))
+        checks: dict[str, Any] = {}
+        reasons: list[str] = []
+        for dimension, bucket in required:
+            summary = ((segments.get(dimension) or {}).get(bucket) or {}) if isinstance(segments.get(dimension), dict) else {}
+            trades = int(summary.get("trades") or 0)
+            expectancy = float(summary.get("expectancy_pct") or 0.0)
+            profit_factor = summary.get("profit_factor")
+            drawdown = float(summary.get("max_drawdown_pct") or 0.0)
+            passed = (
+                trades >= settings.readiness_min_regime_trades
+                and expectancy > 0
+                and profit_factor is not None
+                and float(profit_factor) >= settings.min_strategy_profit_factor
+                and drawdown <= settings.readiness_max_drawdown_pct
+            )
+            key = f"{dimension}:{bucket}"
+            checks[key] = {
+                "passed": passed,
+                "trades": trades,
+                "minimum_trades": settings.readiness_min_regime_trades,
+                "after_cost_expectancy_pct": summary.get("expectancy_pct"),
+                "profit_factor": profit_factor,
+                "max_drawdown_pct": summary.get("max_drawdown_pct"),
+            }
+            if not passed:
+                reasons.append(f"regime stability is unproven for {key}")
+        if settings.block_expiry_day_option_buying:
+            checks["expiry_day:expiry_day"] = {"passed": True, "status": "excluded_by_entry_policy"}
+        return {"passed": not reasons, "checks": checks, "reasons": reasons}
 
     def _aggregate_walk_forward_summaries(self, summaries: list[dict[str, Any]]) -> dict[str, Any]:
         trades = sum(int(item.get("trades") or 0) for item in summaries)
@@ -1159,6 +1237,8 @@ class BacktestService:
         charges_pct = settings.backtest_charges_pct
         pnl_pct = gross_pnl_pct - charges_pct
         option_type = "CALL" if str(signal.action or "").upper().endswith("CE") else "PUT"
+        market_regime = self._validation_regime_from_signal(signal)
+        event_day = self._is_configured_event_timestamp(idx_timestamp)
         return OptionBacktestTrade(
             timestamp=idx_timestamp.isoformat(sep=" "),
             direction=option_type,
@@ -1174,6 +1254,8 @@ class BacktestService:
             spread_impact_pct=round(settings.paper_spread_impact_pct_per_side * 2, 3),
             bars_held=bars_held,
             reason=reason,
+            market_regime=market_regime,
+            event_day=event_day,
             intended_entry_price=round(entry_raw, 2),
             intended_exit_price=round(intended_exit, 2),
             execution_price_impact_pct=round(((entry - entry_raw) + (intended_exit - exit_price)) / max(entry_raw, 0.01) * 100, 3),
@@ -1585,6 +1667,8 @@ class BacktestService:
             spread_impact_pct=round(settings.paper_spread_impact_pct_per_side * 2, 3),
             bars_held=bars_held,
             reason=reason,
+            market_regime=self._validation_regime_from_candles(underlying, idx),
+            event_day=self._is_configured_event_timestamp(timestamp),
             intended_entry_price=round(entry_raw, 2),
             intended_exit_price=round(intended_exit, 2),
             execution_price_impact_pct=round(((entry - entry_raw) + (intended_exit - exit_price)) / max(entry_raw, 0.01) * 100, 3),
@@ -1792,10 +1876,64 @@ class BacktestService:
         return {
             "ce_vs_pe": self._summarize_groups(trades, lambda trade: "CE" if trade.direction == "CALL" else "PE", timeframe),
             "expiry_day": self._summarize_groups(trades, lambda trade: "expiry_day" if self._is_expiry_day_trade(trade) else "non_expiry_or_unknown", timeframe),
+            "event_day": self._summarize_groups(trades, lambda trade: "event_day" if trade.event_day else "non_event_day", timeframe),
+            "market_regime": self._summarize_groups(trades, lambda trade: trade.market_regime or "unknown", timeframe),
             "time_bucket": self._summarize_groups(trades, lambda trade: self._time_bucket(trade.timestamp), timeframe),
             "moneyness": self._summarize_groups(trades, self._moneyness_bucket, timeframe),
             "setup": self._summarize_groups(trades, lambda trade: trade.reason.split(":", 1)[0] if ":" in trade.reason else trade.reason[:60], timeframe),
         }
+
+    def _validation_regime_from_signal(self, signal: Signal) -> str:
+        factors = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+        day_type = factors.get("day_type") if isinstance(factors.get("day_type"), dict) else {}
+        details = day_type.get("details") if isinstance(day_type.get("details"), dict) else {}
+        try:
+            day_range_pct = float(details.get("day_range_pct") or 0.0)
+        except (TypeError, ValueError):
+            day_range_pct = 0.0
+        if day_range_pct >= settings.readiness_volatile_day_range_pct:
+            return "volatile"
+        label = str(details.get("day_type") or "").lower()
+        if label in {"trend_expansion", "directional_acceptance"}:
+            return "trend"
+        if label in {"range", "rotation_range", "mixed"}:
+            return "range"
+        return "unknown"
+
+    def _validation_regime_from_candles(self, candles: list[Candle], idx: int) -> str:
+        if idx < 0 or idx >= len(candles):
+            return "unknown"
+        timestamp = getattr(candles[idx], "timestamp", None)
+        if not isinstance(timestamp, datetime):
+            return "unknown"
+        same_day = [item for item in candles[: idx + 1] if isinstance(getattr(item, "timestamp", None), datetime) and item.timestamp.date() == timestamp.date()]
+        if len(same_day) < 3:
+            return "unknown"
+        day_open = float(same_day[0].open_price or 0.0)
+        high = max(float(item.high_price or 0.0) for item in same_day)
+        low = min(float(item.low_price or 0.0) for item in same_day)
+        close = float(same_day[-1].close_price or 0.0)
+        if day_open <= 0 or high <= low:
+            return "unknown"
+        range_pct = ((high - low) / day_open) * 100.0
+        if range_pct >= settings.readiness_volatile_day_range_pct:
+            return "volatile"
+        directional_efficiency = abs(close - day_open) / max(high - low, 0.01)
+        return "trend" if directional_efficiency >= 0.60 else "range"
+
+    def _is_configured_event_timestamp(self, timestamp: Any) -> bool:
+        if not isinstance(timestamp, datetime):
+            try:
+                timestamp = datetime.fromisoformat(str(timestamp))
+            except (TypeError, ValueError):
+                return False
+        event_dates = {
+            item.strip()
+            for raw in (settings.banknifty_event_dates, settings.blocked_event_dates)
+            for item in str(raw or "").split(",")
+            if item.strip()
+        }
+        return timestamp.date().isoformat() in event_dates
 
     def _summarize_groups(self, trades: list[OptionBacktestTrade], key_fn: Any, timeframe: str) -> dict[str, Any]:
         groups: dict[str, list[OptionBacktestTrade]] = {}
@@ -1873,6 +2011,8 @@ class BacktestService:
         profit_factor = summary.get("profit_factor")
         if profit_factor is None or float(profit_factor) < settings.min_strategy_profit_factor:
             reasons.append("out-of-sample profit factor is below threshold")
+        if float(summary.get("max_drawdown_pct") or 0.0) > settings.readiness_max_drawdown_pct:
+            reasons.append("out-of-sample drawdown is above readiness threshold")
         if float(summary.get("win_rate") or 0.0) < settings.min_strategy_win_rate_pct:
             reasons.append("out-of-sample win rate is below threshold")
         return not reasons, reasons

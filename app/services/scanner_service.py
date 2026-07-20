@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import List
 
 from app.models import Signal
@@ -23,6 +24,7 @@ from app.services.option_premium_confirmation_service import OptionPremiumConfir
 from app.services.option_quality_service import OptionQualityService
 from app.services.outcome_learning_service import OutcomeLearningService
 from app.services.price_action_service import PriceActionService
+from app.services.time_utils import ist_now_naive
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
 from app.services.setup_family_classifier_service import SetupFamilyClassifierService
 from app.services.signal_service import SignalService
@@ -141,6 +143,7 @@ class ScannerService:
         order_mode: str = "paper",
         rejection_source: str = "scanner",
     ) -> List[dict[str, object]]:
+        scan_started_at = ist_now_naive()
         diagnostics: List[dict[str, object]] = []
         scores = scores or {}
         confidences = confidences or {}
@@ -506,6 +509,7 @@ class ScannerService:
                 factor_scores=factor_scores,
                 order_mode=order_mode,
                 gate_failures=gate_failures,
+                scan_started_at=scan_started_at,
             )
             if armed_entry_eval:
                 factor_scores = dict(factor_scores)
@@ -687,8 +691,12 @@ class ScannerService:
         requested = {symbol.upper() for symbol in symbols or []}
         context_symbols = {"NIFTY", "BANKNIFTY", "INDIAVIX", *requested}
         if "BANKNIFTY" in requested:
-            context_symbols.update({"HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "INDUSINDBK", "BANKBARODA", "PNB", "CANBK"})
-        ordered = [symbol for symbol in ["NIFTY", "BANKNIFTY", "INDIAVIX", "HDFCBANK", "ICICIBANK", "SBIN", "AXISBANK", "KOTAKBANK", "INDUSINDBK", "BANKBARODA", "PNB", "CANBK"] if symbol in context_symbols]
+            context_symbols.update(self.banknifty_intelligence_service.constituent_symbols())
+        ordered = [
+            symbol
+            for symbol in ["NIFTY", "BANKNIFTY", "INDIAVIX", *self.banknifty_intelligence_service.constituent_symbols()]
+            if symbol in context_symbols
+        ]
         if hasattr(self.feed, "get_snapshots"):
             return self.feed.get_snapshots(ordered)  # type: ignore[no-any-return]
         return {symbol: self.feed.get_snapshot(symbol) for symbol in ordered}
@@ -1035,6 +1043,7 @@ class ScannerService:
         factor_scores: dict[str, object],
         order_mode: str,
         gate_failures: list[str],
+        scan_started_at: datetime | None = None,
     ) -> dict[str, object] | None:
         state = str(entry_timing_eval.get("entry_timing_state") or entry_timing_eval.get("state") or "")
         early_arm = False
@@ -1085,6 +1094,13 @@ class ScannerService:
             reasons=[str(reason) for reason in effective_entry_timing.get("reasons", [])],
         )
         result["early_arm"] = early_arm
+        latency_metrics = getattr(self.armed_entry_tracker, "latency_metrics", None)
+        if result.get("registered") and latency_metrics is not None:
+            latency_metrics.record_between(
+                "scan_start_to_armed_state",
+                scan_started_at,
+                detail={"symbol": symbol, "setup_id": result.get("setup_id"), "order_mode": order_mode},
+            )
         if early_arm:
             result["reason"] = result.get("reason") or "early_setup_armed_waiting_for_websocket_trigger"
             result["early_arm_policy"] = {
