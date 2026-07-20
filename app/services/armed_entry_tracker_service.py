@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from threading import RLock
@@ -17,6 +17,7 @@ from app.services.rejected_opportunity_repository import RejectedOpportunityRepo
 from app.services.risk_management_service import RiskManagementService
 from app.services.time_utils import ist_now_naive
 from app.services.trade_setup_service import OptionContract
+from app.services.armed_entry_repository import ArmedEntryRepository
 
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,7 @@ class ArmedEntryTrackerService:
         market_session_provider: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
         latency_metrics: Any | None = None,
+        armed_entry_repository: ArmedEntryRepository | None = None,
     ) -> None:
         self.order_service_factory = order_service_factory
         self.websocket_price_feed = websocket_price_feed
@@ -109,6 +111,7 @@ class ArmedEntryTrackerService:
         self.market_session_provider = market_session_provider
         self.clock = clock or ist_now_naive
         self.latency_metrics = latency_metrics
+        self.armed_entry_repository = armed_entry_repository
         self._setups: dict[str, ArmedEntrySetup] = {}
         self._setup_id_by_key: dict[str, str] = {}
         self._lock = RLock()
@@ -202,12 +205,32 @@ class ArmedEntryTrackerService:
             self._setups[setup.setup_id] = setup
             self._setup_id_by_key[key] = setup.setup_id
 
+        self._persist(setup)
+
         subscribe_result = self._subscribe_token(token, setup_id=setup.setup_id)
+        subscription_health = self._subscription_health(setup, subscribe_result)
+        if subscription_health["state"] == "failed":
+            with self._lock:
+                setup.latest_state = "CANCELLED"
+                setup.latest_reason = str(subscribe_result.get("reason") or "subscription_failed")
+                setup.cancelled_at = self.clock().replace(tzinfo=None)
+            self._persist(setup)
+            self._release_subscription(setup)
+            return {
+                **self._to_dict(setup),
+                "registered": False,
+                "reason": setup.latest_reason,
+                "subscription": subscribe_result,
+                "subscription_health": subscription_health,
+                "websocket_tracking_enabled": False,
+            }
         payload = self._to_dict(setup)
         payload.update(
             {
                 "registered": True,
-                "websocket_tracking_enabled": bool(settings.enable_kite_websocket),
+                "websocket_tracking_enabled": bool(subscription_health["tracking_ready"]),
+                "subscription_state": subscription_health["state"],
+                "subscription_health": subscription_health,
                 "paper_event_entry_enabled": settings.enable_event_driven_paper_entry,
                 "live_event_entry_blocked": setup.order_mode == "live" and not settings.enable_event_driven_live_entry,
                 "subscription": subscribe_result,
@@ -379,13 +402,59 @@ class ArmedEntryTrackerService:
             "cancelled": [row for row in rows if row["latest_state"] == "CANCELLED"],
         }
 
+    def recover_active(self) -> dict[str, Any]:
+        """Rehydrate valid armed setups and restore owner-based subscriptions."""
+        if not settings.armed_entry_recovery_enabled:
+            return {"recovered": 0, "reason": "armed_entry_recovery_disabled"}
+        if self.armed_entry_repository is None:
+            return {"recovered": 0, "reason": "armed_entry_repository_unavailable"}
+        now = self.clock().replace(tzinfo=None)
+        recovered: list[str] = []
+        failures: list[str] = []
+        try:
+            payloads = self.armed_entry_repository.active(now=now)
+        except Exception as exc:
+            logger.exception("armed_entry_recovery_load_failed")
+            return {"recovered": 0, "reason": "armed_entry_recovery_load_failed", "message": str(exc)}
+        field_names = {item.name for item in fields(ArmedEntrySetup)}
+        datetime_fields = {"armed_at", "valid_until", "tick_quality_started_at", "tick_quality_last_at", "entered_at", "cancelled_at", "risk_preflight_at"}
+        for payload in payloads:
+            try:
+                values = {key: value for key, value in payload.items() if key in field_names}
+                for key in datetime_fields:
+                    if values.get(key) and not isinstance(values[key], datetime):
+                        values[key] = datetime.fromisoformat(str(values[key])).replace(tzinfo=None)
+                if str(values.get("latest_state")) == "ORDER_PENDING":
+                    values["latest_state"] = EntryTimingService.ARMED_FOR_ENTRY
+                    values["latest_reason"] = "recovered_after_interrupted_order_queue"
+                setup = ArmedEntrySetup(**values)
+                if setup.valid_until < now:
+                    continue
+                key = self._key(order_mode=setup.order_mode, action=setup.action, token=setup.instrument_token, expiry=setup.expiry, strike=setup.strike)
+                with self._lock:
+                    self._setups[setup.setup_id] = setup
+                    self._setup_id_by_key[key] = setup.setup_id
+                subscription = self._subscribe_token(setup.instrument_token, setup_id=setup.setup_id)
+                if subscription.get("reason") == "subscription_failed":
+                    failures.append(setup.setup_id)
+                else:
+                    recovered.append(setup.setup_id)
+                self._persist(setup)
+            except Exception:
+                logger.exception("armed_entry_recovery_row_failed")
+                failures.append(str(payload.get("setup_id") or "unknown"))
+        return {"recovered": len(recovered), "setup_ids": recovered, "failures": failures}
+
     def status(self) -> dict[str, Any]:
         entries = self.list_entries()
         active = entries["active"]
+        operational = [row for row in active if row.get("subscription_health", {}).get("tracking_ready")]
         return {
             "event_entry_enabled": settings.enable_event_driven_paper_entry,
             "event_entry_live_enabled": settings.enable_event_driven_live_entry,
             "armed_entry_count": len(active),
+            "operational_armed_entry_count": len(operational),
+            "degraded_armed_entry_count": len(active) - len(operational),
             "armed_entry_tokens": sorted(self.active_tokens()),
             "event_entry_last_triggered_at": self.last_triggered_at.isoformat(sep=" ") if self.last_triggered_at else None,
             "event_entry_last_reason": self.last_reason,
@@ -467,6 +536,7 @@ class ArmedEntryTrackerService:
             current.entered_at = self.clock().replace(tzinfo=None)
             self.last_triggered_at = current.entered_at
             self.last_reason = current.latest_reason
+            self._persist(current)
         logger.info("armed_entry_entered_paper %s", {"setup_id": setup_id, "tradingsymbol": setup.tradingsymbol, "entry": executable_price})
         self._release_subscription(self._setups[setup_id])
         return self._to_dict(self._setups[setup_id])
@@ -514,6 +584,7 @@ class ArmedEntryTrackerService:
             self.last_reason = setup.latest_reason
             should_save = not setup.rejection_saved
             setup.rejection_saved = True
+            self._persist(setup)
         if should_save:
             self._save_rejection(setup, reasons)
         self._release_subscription(setup)
@@ -756,12 +827,63 @@ class ArmedEntryTrackerService:
         }
         payload["current_premium"] = setup.latest_premium
         payload["tick_quality"] = self._tick_quality_metadata(setup)
+        payload["subscription_health"] = self._subscription_health(setup)
+        payload["subscription_state"] = payload["subscription_health"]["state"]
+        payload["websocket_tracking_enabled"] = payload["subscription_health"]["tracking_ready"]
         payload["distance_to_trigger_pct"] = (
             round(((setup.entry_trigger_price - float(setup.latest_premium or 0.0)) / max(setup.entry_trigger_price, 0.01)) * 100, 3)
             if setup.latest_premium
             else None
         )
         return payload
+
+    def _subscription_health(self, setup: ArmedEntrySetup, result: dict[str, Any] | None = None) -> dict[str, Any]:
+        result = result or {}
+        reason = str(result.get("reason") or "")
+        if reason in {"subscription_failed", "websocket_feed_missing", "websocket_subscribe_unavailable", "token_missing"}:
+            return {"state": "failed", "tracking_ready": False, "live_verified": False, "owner_registered": False, "reason": reason}
+        live_verified = False
+        desired = False
+        owner_registered = False
+        if self.websocket_price_feed is not None:
+            live = getattr(self.websocket_price_feed, "is_live_verified", None)
+            subscribed = getattr(self.websocket_price_feed, "is_subscribed", None)
+            context = getattr(self.websocket_price_feed, "subscription_context", None)
+            try:
+                live_verified = bool(live(setup.instrument_token)) if callable(live) else False
+                desired = bool(subscribed(setup.instrument_token)) if callable(subscribed) else bool(result.get("subscribed"))
+                if callable(context):
+                    owners = context(setup.instrument_token).get("owners", [])
+                    owner_registered = f"armed:{setup.setup_id}" in owners
+                else:
+                    owner_registered = bool(result.get("subscribed"))
+            except Exception:
+                logger.exception("armed_entry_subscription_health_failed setup_id=%s", setup.setup_id)
+        queued = bool(result.get("queued")) or (desired and not bool(getattr(self.websocket_price_feed, "connected", False)) and not result.get("subscribed"))
+        if live_verified:
+            state = "live_verified"
+        elif queued:
+            state = "queued_waiting_for_websocket"
+        elif desired or result.get("subscribed"):
+            state = "subscribed_waiting_for_first_fresh_tick"
+        else:
+            state = "unknown"
+        return {
+            "state": state,
+            "tracking_ready": state in {"live_verified", "subscribed_waiting_for_first_fresh_tick"},
+            "live_verified": live_verified,
+            "owner_registered": owner_registered,
+            "desired": desired,
+            "reason": reason or None,
+        }
+
+    def _persist(self, setup: ArmedEntrySetup) -> None:
+        if self.armed_entry_repository is None:
+            return
+        try:
+            self.armed_entry_repository.upsert(asdict(setup))
+        except Exception:
+            logger.exception("armed_entry_persistence_failed setup_id=%s", setup.setup_id)
 
     def _key(self, *, order_mode: str, action: str, token: int, expiry: str, strike: float) -> str:
         return "|".join([settings.strategy_version, str(order_mode).lower(), action.upper(), str(token), str(expiry), str(strike)])

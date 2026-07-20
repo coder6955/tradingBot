@@ -2,15 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.config import settings
 from app.services.trade_setup_service import OptionContract
 
 
 class SetupFamilyClassifierService:
-    """Classify Bank Nifty option-buying setups for later research.
-
-    The classifier is intentionally descriptive. It does not approve, reject,
-    score, or alter trades; it only adds stable labels to saved decisions.
-    """
+    """Classify a setup and attach an explicit regime-specific trade policy."""
 
     def classify(
         self,
@@ -53,6 +50,10 @@ class SetupFamilyClassifierService:
             "banknifty_vwap_supports": vwap["banknifty_supports"],
             "premium_vwap_supports": vwap["premium_supports"],
             "contract": contract.tradingsymbol if contract else self._nested(factor_scores, "contract", "tradingsymbol"),
+            "market_state": self._nested(factor_scores, "market_regime", "regime"),
+            "market_state_confidence": self._nested(factor_scores, "market_regime", "confidence"),
+            "momentum_phase": self._nested(factor_scores, "momentum_phase", "phase"),
+            "mtf_alignment_score": self._nested(factor_scores, "multi_timeframe", "alignment_score"),
         }
 
         if dte.get("risk") == "near_expiry" and premium_score >= 75 and (premium_breakout or premium_volume):
@@ -83,11 +84,20 @@ class SetupFamilyClassifierService:
         return self._result(label, "normal_day", ["valid directional setup without a stronger specialized family"], evidence)
 
     def _result(self, name: str, group: str, reasons: list[str], evidence: dict[str, Any] | None = None) -> dict[str, Any]:
+        policy = self._policy(name, group, evidence or {})
         return {
             "name": name,
             "group": group,
             "reasons": reasons,
             "evidence": evidence or {},
+            "eligible": policy["eligible"],
+            "policy_score": policy["policy_score"],
+            "score_adjustment": policy["score_adjustment"],
+            "minimum_score": policy["minimum_score"],
+            "abstention_code": policy["abstention_code"],
+            "entry_policy": policy["entry_policy"],
+            "exit_profile": policy["exit_profile"],
+            "invalidation": policy["invalidation"],
             "taxonomy": [
                 "opening_breakout_continuation",
                 "vwap_reclaim_continuation",
@@ -101,6 +111,86 @@ class SetupFamilyClassifierService:
                 "normal_day_put_continuation",
             ],
         }
+
+    def _policy(self, name: str, group: str, evidence: dict[str, Any]) -> dict[str, Any]:
+        market_state = str(evidence.get("market_state") or "unknown")
+        momentum = str(evidence.get("momentum_phase") or "unknown")
+        confidence = self._float(evidence.get("market_state_confidence"))
+        mtf = self._float(evidence.get("mtf_alignment_score"))
+        base = {
+            "opening_drive": 78,
+            "compression_expansion": 76,
+            "vwap_continuation": 72,
+            "trend_day": 74,
+            "reversal": 66,
+            "expiry": 62,
+            "normal_day": 55,
+            "other": 35,
+        }.get(group, 50)
+        score = base
+        if market_state in {"trend_expansion", "directional_acceptance", "compression_breakout"}:
+            score += 8
+        elif market_state in {"balanced_rotation", "data_uncertain", "execution_untradable"}:
+            score -= 25
+        if momentum in {"confirmation", "acceleration", "continuation"}:
+            score += 8
+        elif momentum in {"exhaustion", "failure"}:
+            score -= 35
+        if mtf >= 65:
+            score += 5
+        if confidence and confidence < 0.45:
+            score -= 10
+        score = max(0, min(100, score))
+        unsuitable_state = market_state in {"balanced_rotation", "data_uncertain", "execution_untradable"}
+        exhausted = momentum in {"exhaustion", "failure"}
+        eligible = score >= settings.setup_policy_min_score and not unsuitable_state and not exhausted
+        abstention = None
+        if market_state == "balanced_rotation":
+            abstention = "SETUP_FAMILY_NOT_ALLOWED_IN_RANGE"
+        elif market_state == "data_uncertain":
+            abstention = "SETUP_CONTEXT_UNCERTAIN"
+        elif market_state == "execution_untradable":
+            abstention = "CONTRACT_NOT_EXECUTABLE"
+        elif exhausted:
+            abstention = "SETUP_PHASE_NO_LONGER_ACTIONABLE"
+        elif not eligible:
+            abstention = "SETUP_POLICY_SCORE_BELOW_THRESHOLD"
+
+        profiles = {
+            "opening_drive": {"time_stop_minutes": 12, "trail_after_r": 1.0, "target_style": "scale_on_expansion"},
+            "compression_expansion": {"time_stop_minutes": 15, "trail_after_r": 1.2, "target_style": "measured_move"},
+            "vwap_continuation": {"time_stop_minutes": 15, "trail_after_r": 1.0, "target_style": "vwap_structure"},
+            "trend_day": {"time_stop_minutes": 22, "trail_after_r": 1.5, "target_style": "runner"},
+            "reversal": {"time_stop_minutes": 10, "trail_after_r": 0.8, "target_style": "fast_mean_reversion"},
+            "expiry": {"time_stop_minutes": 7, "trail_after_r": 0.7, "target_style": "gamma_scalp"},
+            "normal_day": {"time_stop_minutes": 12, "trail_after_r": 1.0, "target_style": "fixed_structure"},
+        }
+        return {
+            "eligible": eligible,
+            "policy_score": score,
+            "score_adjustment": round((score - 50) * 0.2),
+            "minimum_score": settings.setup_policy_min_score,
+            "abstention_code": abstention,
+            "entry_policy": {
+                "allowed_market_states": self._allowed_states(group),
+                "allowed_momentum_phases": ["acceleration", "breakout", "confirmation", "continuation"],
+                "requires_premium_participation": True,
+                "requires_executable_ask": True,
+            },
+            "exit_profile": profiles.get(group, profiles["normal_day"]),
+            "invalidation": [
+                "underlying_structure_invalidates_setup_family",
+                "option_premium_loses_vwap_and_breakout_support",
+                "momentum_phase_changes_to_exhaustion_or_failure",
+            ],
+        }
+
+    def _allowed_states(self, group: str) -> list[str]:
+        if group == "reversal":
+            return ["failed_auction_reversal", "transition"]
+        if group == "compression_expansion":
+            return ["compression_breakout", "trend_expansion"]
+        return ["trend_expansion", "directional_acceptance", "compression_breakout"]
 
     def _vwap_context(self, snapshot: dict[str, Any], premium_details: dict[str, Any], bullish: bool) -> dict[str, bool]:
         price = self._float(snapshot.get("price"))

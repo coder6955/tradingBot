@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import List
+from typing import Any, List
 
 from app.models import Signal
 from app.config import settings
@@ -33,6 +33,9 @@ from app.services.time_bucket_edge_service import TimeBucketEdgeService
 from app.services.trade_setup_service import OptionContract, TradeSetupService
 from app.services.volatility_edge_service import VolatilityEdgeService
 from app.services.fast_scan_context_service import FastScanContextService
+from app.services.multi_timeframe_context_service import MultiTimeframeContextService
+from app.services.momentum_phase_service import MomentumPhaseService
+from app.services.trade_candidate_ranking_service import TradeCandidateRankingService
 
 
 logger = logging.getLogger(__name__)
@@ -70,6 +73,9 @@ class ScannerService:
         armed_entry_tracker: ArmedEntryTrackerService | None = None,
         setup_family_classifier: SetupFamilyClassifierService | None = None,
         fast_scan_context_service: FastScanContextService | None = None,
+        multi_timeframe_context_service: MultiTimeframeContextService | None = None,
+        momentum_phase_service: MomentumPhaseService | None = None,
+        candidate_ranking_service: TradeCandidateRankingService | None = None,
     ) -> None:
         self.signal_service = signal_service or SignalService()
         self.scoring_service = scoring_service or IndicatorScoringService()
@@ -94,6 +100,9 @@ class ScannerService:
         self.armed_entry_tracker = armed_entry_tracker
         self.setup_family_classifier = setup_family_classifier or SetupFamilyClassifierService()
         self.fast_scan_context_service = fast_scan_context_service
+        self.multi_timeframe_context_service = multi_timeframe_context_service or MultiTimeframeContextService()
+        self.momentum_phase_service = momentum_phase_service or MomentumPhaseService()
+        self.candidate_ranking_service = candidate_ranking_service or TradeCandidateRankingService()
 
         # Market data is independent from live order placement. When Kite data is
         # requested, fail closed instead of silently returning mock opportunities.
@@ -338,6 +347,9 @@ class ScannerService:
             )
             liquidity_score = self.trade_setup_service.liquidity_score(contract)
             chain_contracts = self.trade_setup_service.build_contracts(option_instruments, symbol, chain_quote_map)
+            multi_timeframe_eval = self.multi_timeframe_context_service.evaluate(symbol=symbol, trend=trend, snapshot=snapshot)
+            price_eval = self.price_action_service.evaluate(snapshot, trend, side)
+            day_type_eval = self.day_type_service.evaluate(symbol=symbol, trend=trend)
             market_eval = self.market_regime_service.evaluate(
                 symbol=symbol,
                 trend=trend,
@@ -345,8 +357,12 @@ class ScannerService:
                 nifty=market_snapshots.get("NIFTY"),
                 banknifty=market_snapshots.get("BANKNIFTY"),
                 vix=market_snapshots.get("INDIAVIX"),
+                snapshot=snapshot,
+                multi_timeframe=multi_timeframe_eval,
+                day_type_eval=day_type_eval,
+                price_action_eval=price_eval,
+                premium_eval=premium_eval,
             )
-            price_eval = self.price_action_service.evaluate(snapshot, trend, side)
             chain_eval = self.option_chain_service.analyze(
                 spot_price=float(snapshot["price"]),
                 trend=trend,
@@ -360,7 +376,6 @@ class ScannerService:
                 entry_price=prices["entry_price"],
                 side=side,
             )
-            day_type_eval = self.day_type_service.evaluate(symbol=symbol, trend=trend)
             time_bucket_eval = self.time_bucket_edge_service.evaluate(symbol=symbol, trend=trend)
             edge_eval = self._strategy_edge_eval(symbol, trend)
             banknifty_eval = self.banknifty_intelligence_service.evaluate(
@@ -397,6 +412,30 @@ class ScannerService:
                 banknifty_eval=banknifty_eval,
                 volatility_eval=volatility_eval,
             )
+            market_eval = self.market_regime_service.evaluate(
+                symbol=symbol,
+                trend=trend,
+                side=side,
+                nifty=market_snapshots.get("NIFTY"),
+                banknifty=market_snapshots.get("BANKNIFTY"),
+                vix=market_snapshots.get("INDIAVIX"),
+                snapshot=snapshot,
+                multi_timeframe=multi_timeframe_eval,
+                banknifty_eval=banknifty_eval,
+                volatility_eval=volatility_eval,
+                day_type_eval=day_type_eval,
+                price_action_eval=price_eval,
+                premium_eval=premium_eval,
+            )
+            momentum_phase_eval = self.momentum_phase_service.evaluate(
+                trend=trend,
+                snapshot=snapshot,
+                premium_eval=premium_eval,
+                price_action=price_eval,
+                banknifty_eval=banknifty_eval,
+                multi_timeframe=multi_timeframe_eval,
+                volatility_eval=volatility_eval,
+            )
             entry_timing_eval = self.entry_timing_service.evaluate(
                 contract=contract,
                 prices=prices,
@@ -423,6 +462,8 @@ class ScannerService:
                 "technical": score,
                 "score_breakdown": score_breakdown,
                 "market_regime": market_eval,
+                "multi_timeframe": multi_timeframe_eval,
+                "momentum_phase": momentum_phase_eval,
                 "price_action": price_eval,
                 "option_chain": chain_eval,
                 "option_quality": quality_eval,
@@ -452,6 +493,27 @@ class ScannerService:
                 snapshot=snapshot,
                 contract=contract,
             )
+            setup_family_eval = factor_scores.get("setup_family", {})
+            setup_family_eval = setup_family_eval if isinstance(setup_family_eval, dict) else {}
+            policy_adjustment = max(-5, min(5, int(setup_family_eval.get("score_adjustment") or 0)))
+            if policy_adjustment:
+                combined_score = max(0, min(100, combined_score + policy_adjustment))
+                score_breakdown = dict(score_breakdown)
+                score_breakdown["score_before_setup_policy"] = score_breakdown.get("score")
+                score_breakdown["setup_policy_adjustment"] = policy_adjustment
+                score_breakdown["score"] = combined_score
+                factor_scores["score_breakdown"] = score_breakdown
+            candidate_ranking_eval = self.candidate_ranking_service.evaluate(
+                contract=contract,
+                prices=prices,
+                combined_score=combined_score,
+                market_state=market_eval,
+                setup_family=setup_family_eval,
+                momentum_phase=momentum_phase_eval,
+                volatility_edge=volatility_eval,
+                probability=None,
+            )
+            factor_scores["candidate_ranking"] = candidate_ranking_eval
             outcome_learning_eval = self.outcome_learning_service.evaluate(
                 symbol=symbol,
                 action=self._action(side, trend),
@@ -491,6 +553,9 @@ class ScannerService:
                 outcome_learning_eval=outcome_learning_eval,
                 volatility_eval=volatility_eval,
                 banknifty_regime_eval=banknifty_regime_eval,
+                setup_family_eval=setup_family_eval,
+                momentum_phase_eval=momentum_phase_eval,
+                candidate_ranking_eval=candidate_ranking_eval,
                 enforce_budget=enforce_budget,
             )
             if not freshness_eval.get("passed", False):
@@ -979,6 +1044,9 @@ class ScannerService:
         outcome_learning_eval: dict[str, object],
         volatility_eval: dict[str, object] | None = None,
         banknifty_regime_eval: dict[str, object] | None = None,
+        setup_family_eval: dict[str, object] | None = None,
+        momentum_phase_eval: dict[str, object] | None = None,
+        candidate_ranking_eval: dict[str, object] | None = None,
         enforce_budget: bool = False,
     ) -> list[str]:
         failures = self.trade_setup_service.risk_checks(combined_score, contract, prices["entry_price"], side, enforce_budget=enforce_budget)
@@ -1008,6 +1076,17 @@ class ScannerService:
             failures.extend(str(reason) for reason in banknifty_eval.get("hard_reasons", ["Bank Nifty intelligence no-trade filter failed"]))
         if settings.enable_banknifty_regime_filter and banknifty_regime_eval and not banknifty_regime_eval.get("passed", False):
             failures.extend(str(reason) for reason in banknifty_regime_eval.get("hard_reasons", ["Bank Nifty option-buying regime filter failed"]))
+        # Policy blocks are limited to explicit option-buying-negative states.
+        # A merely mediocre weighted score remains a score, not a hard gate.
+        market_state = str(market_eval.get("regime") or "")
+        if market_state in {"data_uncertain", "execution_untradable"}:
+            failures.append(str(market_eval.get("abstention_code") or "market_state_untradable"))
+        momentum_phase = str((momentum_phase_eval or {}).get("phase") or "")
+        if momentum_phase in {"exhaustion", "failure"}:
+            failures.append(str((momentum_phase_eval or {}).get("abstention_code") or f"momentum_{momentum_phase}"))
+        family_code = str((setup_family_eval or {}).get("abstention_code") or "")
+        if family_code in {"SETUP_CONTEXT_UNCERTAIN", "CONTRACT_NOT_EXECUTABLE", "SETUP_PHASE_NO_LONGER_ACTIONABLE"}:
+            failures.append(family_code)
         if settings.enable_outcome_learning_guard and not outcome_learning_eval.get("passed", False):
             failures.extend(str(reason) for reason in outcome_learning_eval.get("reasons", ["outcome learning guard failed"]))
         return list(dict.fromkeys(failures))
@@ -1650,6 +1729,12 @@ class ScannerService:
         armed = armed if isinstance(armed, dict) else {}
         setup_family = factor_scores.get("setup_family", {}) if factor_scores else {}
         setup_family = setup_family if isinstance(setup_family, dict) else {}
+        market_state = factor_scores.get("market_regime", {}) if factor_scores else {}
+        market_state = market_state if isinstance(market_state, dict) else {}
+        momentum = factor_scores.get("momentum_phase", {}) if factor_scores else {}
+        momentum = momentum if isinstance(momentum, dict) else {}
+        candidate = factor_scores.get("candidate_ranking", {}) if factor_scores else {}
+        candidate = candidate if isinstance(candidate, dict) else {}
         return {
             "symbol": symbol,
             "score": score,
@@ -1689,6 +1774,15 @@ class ScannerService:
             "setup_family": setup_family.get("name"),
             "setup_family_group": setup_family.get("group"),
             "setup_family_reasons": setup_family.get("reasons", []),
+            "market_regime": market_state.get("regime"),
+            "market_regime_confidence": market_state.get("confidence"),
+            "market_regime_uncertainty": market_state.get("uncertainty"),
+            "market_regime_abstention_code": market_state.get("abstention_code"),
+            "momentum_phase": momentum.get("phase"),
+            "momentum_phase_score": momentum.get("score"),
+            "momentum_abstention_code": momentum.get("abstention_code"),
+            "candidate_utility_score": candidate.get("utility_score"),
+            "candidate_abstention_code": candidate.get("abstention_code"),
             "volatility_edge_score": volatility.get("score"),
             "volatility_edge_classification": volatility.get("classification"),
             "volatility_edge_for_option_buying": volatility.get("volatility_edge_for_option_buying"),

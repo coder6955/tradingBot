@@ -213,7 +213,7 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("Active Trade / Exit Watch", html)
         self.assertIn("Latest Watch", html)
         self.assertIn("System Thought Feed", html)
-        self.assertIn("V3 Strategy &amp; Market Session", html)
+        self.assertIn("V4 Strategy &amp; Market Session", html)
         self.assertIn("Market Data Pipeline", html)
         self.assertIn("WebSocket &amp; Subscription Ownership", html)
         self.assertIn("Armed Entry Lifecycle", html)
@@ -552,6 +552,41 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(run.status_code, 200)
         self.assertEqual(run.json()["status"], "ok")
         self.assertTrue(run.json()["force"])
+
+    def test_evidence_matrix_endpoint_is_read_only_and_bounded(self) -> None:
+        class FakeEvidence:
+            def report(self, *, group_by=None, limit=0):
+                return {"dimensions": group_by, "limit": limit, "groups": [], "accepted_outcomes": 0, "rejected_observations": 0}
+
+        with patch.object(api, "evidence_matrix_service", FakeEvidence()):
+            response = self.client.get("/research/evidence-matrix?group_by=setup_family,market_regime&limit=99999")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["dimensions"], ["setup_family", "market_regime"])
+        self.assertEqual(response.json()["limit"], 10000)
+
+    def test_professional_readiness_endpoint_serves_after_market_cache_only(self) -> None:
+        class FakeCachedResearch:
+            def status(self):
+                return {
+                    "last_run_date": "2026-07-20",
+                    "last_result": {
+                        "reports": {
+                            "professional_readiness": {
+                                "result": {"status": "ok", "ready_for_live": False, "checks": []}
+                            }
+                        }
+                    },
+                }
+
+        with patch.object(api, "after_market_research_service", FakeCachedResearch()), patch.object(
+            api.professional_readiness_service, "report", side_effect=AssertionError("hot-path report must not run")
+        ):
+            response = self.client.get("/research/professional-readiness")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["non_blocking"])
+        self.assertEqual(response.json()["source"], "after_market_research_cache")
 
     def test_research_engine_endpoint(self) -> None:
         response = self.client.get("/research/research-engine?symbol=BANKNIFTY&limit=10")

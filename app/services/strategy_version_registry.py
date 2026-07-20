@@ -12,6 +12,23 @@ from app.services.time_utils import ist_now_naive
 SETTING_PURPOSES: dict[str, str] = {
     "min_signal_score": "Minimum weighted score required before a trade can become an accepted opportunity.",
     "min_market_regime_score": "Minimum broader market context score used to avoid low-quality directional conditions.",
+    "enable_hierarchical_market_state": "Separates structure, volatility, participation, location, and execution before classifying the option-buying regime.",
+    "market_state_min_confidence": "Minimum hierarchical state confidence used to label a regime suitable for option buying.",
+    "market_state_max_uncertainty": "Maximum tolerated market-state uncertainty before enriched decisions fail closed.",
+    "mtf_min_timeframes": "Minimum completed-candle timeframes needed for multi-timeframe context.",
+    "mtf_min_alignment_score": "Minimum alignment score across independently responsible timeframes.",
+    "momentum_min_entry_score": "Minimum momentum phase quality for an actionable acceleration, breakout, confirmation, or continuation.",
+    "momentum_exhaustion_rsi": "Directional RSI extreme used as one exhaustion warning, never as a standalone entry signal.",
+    "setup_policy_min_score": "Minimum regime-specific setup-family policy score.",
+    "candidate_min_utility_score": "Minimum after-cost ordering utility; it is not a win probability.",
+    "candidate_round_trip_cost_pct": "Conservative non-spread round-trip cost estimate used in candidate utility.",
+    "contract_min_depth_quantity": "Minimum top-of-book quantity rewarded by executable contract ranking.",
+    "contract_max_ranked_candidates": "Maximum contract shortlist retained after ranking.",
+    "armed_entry_recovery_enabled": "Recovers valid persisted armed setups and their owner-based subscriptions after restart.",
+    "evidence_matrix_min_trades": "Minimum closed trades required before a setup/regime evidence cell is considered sufficient.",
+    "evidence_matrix_min_expectancy_pct": "Minimum independently validated expectancy percentage for promotion review.",
+    "evidence_matrix_min_profit_factor": "Minimum independently validated profit factor for promotion review.",
+    "evidence_matrix_max_drawdown_pct": "Maximum independently validated drawdown for promotion review.",
     "min_price_action_score": "Minimum price-action score used to avoid weak Bank Nifty structure.",
     "min_option_chain_score": "Minimum option-chain context score; PCR/max pain remain context, not standalone hard triggers.",
     "min_risk_reward": "Minimum reward-to-risk required after dynamic entry, stop, and target calculation.",
@@ -288,6 +305,18 @@ class StrategyVersionRegistry:
                 "min_risk_reward",
                 "max_trend_momentum_score",
             ),
+            "decision_policy": self._values(
+                "enable_hierarchical_market_state",
+                "market_state_min_confidence",
+                "market_state_max_uncertainty",
+                "mtf_min_timeframes",
+                "mtf_min_alignment_score",
+                "momentum_min_entry_score",
+                "momentum_exhaustion_rsi",
+                "setup_policy_min_score",
+                "candidate_min_utility_score",
+                "candidate_round_trip_cost_pct",
+            ),
             "option_quality": self._values(
                 "max_bid_ask_spread_pct",
                 "min_option_volume",
@@ -298,6 +327,8 @@ class StrategyVersionRegistry:
                 "min_option_buy_iv",
                 "max_option_buy_iv",
                 "min_option_quality_score",
+                "contract_min_depth_quantity",
+                "contract_max_ranked_candidates",
             ),
             "premium_confirmation": self._values(
                 "enable_option_premium_confirmation",
@@ -330,6 +361,7 @@ class StrategyVersionRegistry:
                 "enable_event_driven_paper_entry",
                 "enable_event_driven_live_entry",
                 "armed_entry_valid_seconds",
+                "armed_entry_recovery_enabled",
                 "enable_early_armed_entry",
                 "early_armed_entry_paper_only",
                 "early_arm_min_score",
@@ -489,6 +521,10 @@ class StrategyVersionRegistry:
                 "readiness_min_regime_trades",
                 "readiness_volatile_day_range_pct",
                 "probability_calibration_min_samples",
+                "evidence_matrix_min_trades",
+                "evidence_matrix_min_expectancy_pct",
+                "evidence_matrix_min_profit_factor",
+                "evidence_matrix_max_drawdown_pct",
             ),
         }
 
@@ -507,8 +543,9 @@ class StrategyVersionRegistry:
         entry = config_snapshot.get("entry_timing", {})
         premium = config_snapshot.get("premium_confirmation", {})
         return (
-            "Bank Nifty option-buying entries require real market data, weighted score above threshold, "
-            "tradable option quality, fresh premium confirmation, and entry timing that is not too early or too late. "
+            "Bank Nifty option-buying entries require real market data, a hierarchical market state, multi-timeframe alignment, "
+            "an actionable momentum phase, a regime-specific setup policy, tradable option quality, fresh premium confirmation, "
+            "after-cost candidate utility, and entry timing that is not too early or too late. "
             f"Current chase limit is {entry.get('max_entry_chase_pct')}% and premium confirmation is "
             f"{'enabled' if premium.get('enable_option_premium_confirmation') else 'disabled'}."
         )
@@ -517,7 +554,7 @@ class StrategyVersionRegistry:
         exit_rules = config_snapshot.get("exit_rules", {})
         partial = "partial target-1 booking" if exit_rules.get("enable_partial_booking") else "full target-1 square-off"
         return (
-            "Long-option exits use executable sell-side bid/depth pricing, with LTP retained only for diagnostics. "
+            "Long-option exits use the setup-family exit profile and executable sell-side bid/depth pricing, with LTP retained only for diagnostics. "
             "Priority is stop, time, trailing, invalidation, then targets; live software exits fail closed without safe executable depth. "
             f"Current target-1 behavior is {partial}."
         )

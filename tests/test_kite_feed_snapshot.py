@@ -1,7 +1,7 @@
 import os
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 from app.services.database import Candle, get_session, init_db
 from app.services.time_utils import ist_now_naive
@@ -54,6 +54,10 @@ class KiteFeedSnapshotTests(unittest.TestCase):
 
     def test_snapshot_uses_stored_candles_before_kite_historical_data(self) -> None:
         now = ist_now_naive().replace(second=0, microsecond=0)
+        session_day = now.date() - timedelta(days=1)
+        while session_day.weekday() >= 5:
+            session_day -= timedelta(days=1)
+        session_end = datetime.combine(session_day, time(12, 0))
         session = get_session()
         try:
             for index in range(30):
@@ -62,7 +66,7 @@ class KiteFeedSnapshotTests(unittest.TestCase):
                     Candle(
                         symbol="BANKNIFTY",
                         timeframe="5minute",
-                        timestamp=now - timedelta(minutes=(30 - index) * 5),
+                        timestamp=session_end - timedelta(minutes=(30 - index) * 5),
                         open_price=price - 5,
                         high_price=price + 10,
                         low_price=price - 10,

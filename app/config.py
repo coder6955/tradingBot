@@ -20,9 +20,9 @@ class Settings:
     app_name: str = "AI Option Trader"
     app_environment: str = os.getenv("APP_ENV", "development")
     strategy_name: str = os.getenv("STRATEGY_NAME", "banknifty_option_buying")
-    strategy_version: str = os.getenv("STRATEGY_VERSION", "banknifty_option_buying_v3")
-    strategy_version_note: str = os.getenv("STRATEGY_VERSION_NOTE", "Executable exits, official constituent intelligence, full-path latency, and protective-stop readiness")
-    strategy_change_reason: str = os.getenv("STRATEGY_CHANGE_REASON", "Make entry evidence and exits executable, attributable, replayable, and fail-closed for live trading")
+    strategy_version: str = os.getenv("STRATEGY_VERSION", "banknifty_option_buying_v4")
+    strategy_version_note: str = os.getenv("STRATEGY_VERSION_NOTE", "Hierarchical market state, setup policies, momentum phases, executable contract ranking, and evidence-gated promotion")
+    strategy_change_reason: str = os.getenv("STRATEGY_CHANGE_REASON", "Make option-buying decisions regime-aware, phase-aware, cost-aware, persistent, and independently measurable")
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
     python_version: str = "3.12"
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./app.db")
@@ -53,6 +53,23 @@ class Settings:
     default_product: str = os.getenv("KITE_DEFAULT_PRODUCT", "MIS")
     max_scan_symbols: int = int(os.getenv("MAX_SCAN_SYMBOLS", "40"))
     min_market_regime_score: int = int(os.getenv("MIN_MARKET_REGIME_SCORE", "55"))
+    enable_hierarchical_market_state: bool = os.getenv("ENABLE_HIERARCHICAL_MARKET_STATE", "true").lower() == "true"
+    market_state_min_confidence: float = float(os.getenv("MARKET_STATE_MIN_CONFIDENCE", "0.55"))
+    market_state_max_uncertainty: float = float(os.getenv("MARKET_STATE_MAX_UNCERTAINTY", "0.45"))
+    mtf_min_timeframes: int = int(os.getenv("MTF_MIN_TIMEFRAMES", "2"))
+    mtf_min_alignment_score: int = int(os.getenv("MTF_MIN_ALIGNMENT_SCORE", "55"))
+    momentum_min_entry_score: int = int(os.getenv("MOMENTUM_MIN_ENTRY_SCORE", "55"))
+    momentum_exhaustion_rsi: float = float(os.getenv("MOMENTUM_EXHAUSTION_RSI", "78.0"))
+    setup_policy_min_score: int = int(os.getenv("SETUP_POLICY_MIN_SCORE", "55"))
+    candidate_min_utility_score: float = float(os.getenv("CANDIDATE_MIN_UTILITY_SCORE", "50.0"))
+    candidate_round_trip_cost_pct: float = float(os.getenv("CANDIDATE_ROUND_TRIP_COST_PCT", "0.45"))
+    contract_min_depth_quantity: int = int(os.getenv("CONTRACT_MIN_DEPTH_QUANTITY", "15"))
+    contract_max_ranked_candidates: int = int(os.getenv("CONTRACT_MAX_RANKED_CANDIDATES", "5"))
+    armed_entry_recovery_enabled: bool = os.getenv("ARMED_ENTRY_RECOVERY_ENABLED", "true").lower() == "true"
+    evidence_matrix_min_trades: int = int(os.getenv("EVIDENCE_MATRIX_MIN_TRADES", "30"))
+    evidence_matrix_min_expectancy_pct: float = float(os.getenv("EVIDENCE_MATRIX_MIN_EXPECTANCY_PCT", "0.05"))
+    evidence_matrix_min_profit_factor: float = float(os.getenv("EVIDENCE_MATRIX_MIN_PROFIT_FACTOR", "1.15"))
+    evidence_matrix_max_drawdown_pct: float = float(os.getenv("EVIDENCE_MATRIX_MAX_DRAWDOWN_PCT", "15.0"))
     min_price_action_score: int = int(os.getenv("MIN_PRICE_ACTION_SCORE", "55"))
     min_option_chain_score: int = int(os.getenv("MIN_OPTION_CHAIN_SCORE", "55"))
     min_risk_reward: float = float(os.getenv("MIN_RISK_REWARD", "1.2"))

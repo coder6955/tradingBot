@@ -239,8 +239,8 @@ with links_col:
     for label, path in links:
         st.markdown(f'<div class="quick-link"><a href="{API_BASE_URL}{path}" target="_blank">{label}</a></div>', unsafe_allow_html=True)
 
-tab_latest, tab_journal, tab_failures, tab_orders, tab_account, tab_v3 = st.tabs(
-    ["Latest Scan", "Opportunity Journal", "Failure Analysis", "Orders & Paper", "Account", "V3 Operations"]
+tab_latest, tab_journal, tab_failures, tab_orders, tab_account, tab_v4 = st.tabs(
+    ["Latest Scan", "Opportunity Journal", "Failure Analysis", "Orders & Paper", "Account", "V4 Operations"]
 )
 
 with tab_latest:
@@ -316,15 +316,15 @@ with tab_account:
     st.markdown("##### Positions")
     st.error(positions_error) if positions_error else st.json(positions, expanded=False)
 
-with tab_v3:
+with tab_v4:
     st.subheader("Strategy, Session and Readiness")
     strategy = (strategy_status or {}).get("version", {})
     session = (runtime_status or {}).get("session", {})
-    v3_cols = st.columns(4)
-    v3_cols[0].metric("Strategy", strategy.get("version") or "-")
-    v3_cols[1].metric("Config drift", "YES" if strategy.get("config_drift_detected") else "NO")
-    v3_cols[2].metric("Market session", session.get("runtime_mode") or "-")
-    v3_cols[3].metric("Live modules expected", "YES" if session.get("should_run_live_modules") else "NO")
+    v4_cols = st.columns(4)
+    v4_cols[0].metric("Strategy", strategy.get("version") or "-")
+    v4_cols[1].metric("Config drift", "YES" if strategy.get("config_drift_detected") else "NO")
+    v4_cols[2].metric("Market session", session.get("runtime_mode") or "-")
+    v4_cols[3].metric("Live modules expected", "YES" if session.get("should_run_live_modules") else "NO")
 
     st.subheader("Market Data and WebSocket")
     pipeline_payload = pipeline or {}

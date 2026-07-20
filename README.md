@@ -8,6 +8,10 @@ This project is an AI-assisted options trading scanner for the Indian stock mark
 - Fall back to deterministic mock data when Kite credentials are not configured.
 - Check technical score, option liquidity, premium risk, stop loss, targets, quantity, and risk/reward before a trade.
 - Check market regime, India VIX, price action, CPR/pivots, previous-day levels, option-chain PCR, OI support/resistance, max-pain approximation, bid/ask spread, volume, OI, timing, and configured event blocks before a trade.
+- Classify multi-timeframe structure, five-dimensional market state, volatility edge, momentum phase, and a regime-specific setup family before entry.
+- Rank executable contracts and candidates using ask/bid, spread, depth, OI/volume, Greeks/DTE when available, reward/risk, costs, uncertainty, and contract stickiness.
+- Persist/recover armed entries with owner-based WebSocket subscriptions and expose whether each token is queued, subscribed, or fresh-tick verified.
+- Use setup-family time/trailing/target exit profiles while preserving hard stops, and keep research/evidence promotion outside the live scanner path.
 - Route orders to paper trading by default. Live Kite orders require `LIVE_TRADING_MODE=true`, `PAPER_TRADING_MODE=false`, and `confirm_live=true`.
 - `/scanner/opportunities` returns only real executable option contracts when Kite market data is enabled. It does not return placeholder strikes or fallback prices.
 

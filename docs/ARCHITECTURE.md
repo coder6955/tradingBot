@@ -37,8 +37,10 @@ flowchart LR
     Auto --> Scanner["ScannerService"]
     Coordinator --> Scanner
     Candles --> Scanner
-    Scanner --> Setup["TradeSetupService"]
-    Scanner --> Decision["Hard gates and weighted score"]
+    Scanner --> State["Hierarchical market state"]
+    State --> Phase["Momentum phase and setup policy"]
+    Phase --> Setup["Executable contract and candidate ranking"]
+    Setup --> Decision["Safety gates and capped weighted score"]
     Decision --> Armed["ArmedEntryTrackerService"]
     Armed --> Orders["OrderService"]
     Auto --> Orders
@@ -71,14 +73,19 @@ flowchart LR
 | `BankNiftyFastRallyService` | Detects short-window Bank Nifty acceleration and requests an immediate scan. |
 | `AutoTraderService` | Runs scheduled scans, serialized fast rescans, optional order routing, and duplicate live-order protection. |
 | `ScannerService` | Builds and evaluates Bank Nifty opportunities, records accepted/rejected outcomes, and registers early armed setups. |
-| `TradeSetupService` | Resolves expiry, selects a liquid contract, applies contract stickiness, and builds premium-based SL/targets/quantity. |
-| `ArmedEntryTrackerService` | Tracks a selected option tick by tick and executes confirmed paper entries. |
+| `MultiTimeframeContextService` | Assigns daily/30m/15m/5m/1m evidence to structure, bias, session character, regime, and trigger responsibilities; ticks remain execution-only. |
+| `MarketRegimeService` | Classifies structure, volatility, participation, location, and execution into a confidence/uncertainty-aware option-buying regime with invalidation. |
+| `MomentumPhaseService` / `SetupFamilyClassifierService` | Separates formation, acceleration, breakout, confirmation, continuation, exhaustion and failure, then applies a regime-specific setup/exit policy. |
+| `TradeCandidateRankingService` | Orders candidates using reward/risk, spread, costs, liquidity, uncertainty and policy quality without mislabeling utility as probability. |
+| `TradeSetupService` | Resolves expiry, ranks executable contracts using ask/bid, spread, depth, OI, volume, Greeks/DTE when available, applies stickiness, and builds premium-based SL/targets/quantity. |
+| `ArmedEntryTrackerService` | Persists and recovers selected option setups, reports subscription health truthfully, tracks ticks, and executes confirmed paper entries. |
 | `OrderService` | Validates scanner-originated Bank Nifty option-buying signals and routes them to paper or explicitly authorized live execution. |
 | `RiskManagementService` | Enforces account-level daily loss, trade count, stop count, cooldown, open-trade, and exposure limits. |
 | `ActiveTradePriceFeed` | Uses fresh WebSocket ticks first and controlled broker polling fallback for active trades. |
 | `TradeExitService` | Evaluates deterministic stop/time/trailing/invalidation/target priority against executable bid/depth, records simultaneous triggers, and performs paper/live square-off. |
 | `BrokerSyncService` | Reconciles local live trades, broker positions, entry/exit orders, and protective disaster stops; protection failures persistently block new live entries. |
-| Repository services | Persist candles, opportunities, rejections, trades, strategy versions, validations, and runtime jobs. |
+| `EvidenceMatrixService` / `StrategyPromotionService` | Segment independent outcomes and make manual, non-self-modifying promotion recommendations. |
+| Repository services | Persist candles, opportunities, rejections, armed entries, trades, strategy versions, validations, and runtime jobs. |
 
 The shared `TradeSetupService` is deliberate: its in-memory Bank Nifty contract stickiness must survive across scanner instances created for separate requests or scans.
 
@@ -86,7 +93,7 @@ The shared `TradeSetupService` is deliberate: its in-memory Bank Nifty contract 
 
 At application startup:
 
-1. Strategy-version registration, old WebSocket candle cleanup, and raw-tick retention cleanup run in background maintenance.
+1. Strategy-version registration, valid armed-entry recovery, old WebSocket candle cleanup, and raw-tick retention cleanup run in background maintenance.
 2. Broker order/trade synchronization and startup position reconciliation run separately.
 3. If WebSocket support is enabled, the market-data runtime starts.
 4. The `NIFTY BANK` instrument token is resolved from the broker's current NSE instrument list.
@@ -118,6 +125,14 @@ The event queue prioritizes:
 
 Order execution is moved off the WebSocket callback path so a broker/database operation does not stall tick ingestion.
 
+An armed setup is operational only when its subscription is broker-requested or fresh-tick verified. Disconnected subscriptions are explicitly queued; subscription failures cancel registration instead of displaying a false armed state. Valid setup payloads are stored in `armed_entries`, rehydrated after restart, and resubscribed under the original owner.
+
+## Decision hierarchy
+
+The scanner keeps safety gates, weighted evidence, and policy suitability separate. Daily/30-minute candles establish structure and bias, 15-minute candles describe the session, 5-minute candles classify the tradable regime, 1-minute candles form the trigger, and ticks confirm executable entry/exit. Missing higher-timeframe evidence increases uncertainty; lower-timeframe momentum cannot substitute for it.
+
+Market state reports structure, volatility, participation, location and execution dimensions plus regime, confidence, uncertainty, option-buying suitability, abstention and invalidation. Momentum is classified as formation, acceleration, breakout, confirmation, continuation, exhaustion or failure. Setup families own distinct entry/invalidation/exit policies. Candidate utility remains an after-cost ordering tool until independent outcomes can calibrate probability and expectancy.
+
 ## Tick and premium-candle handling
 
 Each normalized `WebSocketTick` carries the instrument token, last price, exchange/receive timestamp, cumulative volume when available, bid, ask, five-level depth and quantities when available, timestamp source, and packet type.
@@ -147,6 +162,8 @@ For a long option, LTP is diagnostic only. A full quantity-covered five-level bi
 
 Exit priority is deterministic: stop, time/near-close, trailing, underlying/premium invalidation, then targets. Optional invalidation and partial-booking behavior remains configuration-controlled and must earn out-of-sample support; the exit-rule ablation report explicitly reports when counterfactual paths are unavailable.
 
+Time-stop duration, trailing activation and target style come from the persisted setup-family exit profile. No profile may weaken the original hard stop.
+
 ## Latency measurement
 
 The in-memory latency report always exposes the required path metrics even with zero samples: exchange-to-receive, receive-to-rally detection, detection-to-scan, scheduled and fast scan durations, scan-to-arm, arm-to-confirmation, confirmation-to-submission, submission-to-acknowledgement, acknowledgement-to-fill, and exit trigger-to-submission/acknowledgement/fill. Every metric reports p50/p95/p99, sample count and missing count; queue drop totals are separate. Broker/database consumers are queued off the WebSocket event callback, while latency recording is bounded in-memory work.
@@ -174,6 +191,7 @@ The database layer stores, among other records:
 - Strategy versions and validation results.
 - Raw ticks and independent setup episodes.
 - Runtime job history.
+- Durable armed-entry lifecycle payloads and states.
 
 Accepted and rejected opportunities must remain explainable. A hard-gate rejection, armed-entry expiry, chase rejection, data-gap cancellation, or order failure should retain its reason in repository records and diagnostics.
 
@@ -193,7 +211,9 @@ Safety-sensitive defaults include:
 - `ARMED_ENTRY_VALID_SECONDS=90`
 - `FAST_RALLY_WINDOW_SECONDS=5.0`
 - `FAST_RALLY_TRIGGER_PCT=0.08`
-- `STRATEGY_VERSION=banknifty_option_buying_v3`
+- `STRATEGY_VERSION=banknifty_option_buying_v4`
+- `ENABLE_HIERARCHICAL_MARKET_STATE=true`
+- `ARMED_ENTRY_RECOVERY_ENABLED=true`
 - `REQUIRE_BROKER_PROTECTIVE_STOP_FOR_LIVE_ENTRY=true`
 - `ENABLE_BROKER_EMERGENCY_SL=false`
 
@@ -215,6 +235,9 @@ Use these endpoints to understand the running system:
 | `GET /scanner/opportunities` | Accepted scanner opportunities. |
 | `GET /scanner/diagnostics` | Gate, score, contract, and rejection explanations. |
 | `GET /scanner/armed-entries` | Armed, pending, entered, expired, too-late, and cancelled setup states. |
+| `GET /research/evidence-matrix` | Version-separated setup/regime outcome cells; rejections never enter trade expectancy. |
+| `GET /research/strategy-promotion` | Advisory promotion checks; never mutates live settings. |
+| `GET /research/professional-readiness` | Non-blocking cached readiness from the after-market research lane. |
 | `GET /risk/status` | Account-level entry risk and reconciliation state. |
 | `GET /trades` | Persisted paper/live trade lifecycle records. |
 | `GET /trades/exit-alerts` | Stuck or mismatched live exits. |

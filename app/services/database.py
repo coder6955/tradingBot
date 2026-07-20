@@ -346,6 +346,23 @@ class RuntimeJobRunRecord(Base):
     metadata_json = Column(Text, nullable=True)
 
 
+class ArmedEntryRecord(Base):
+    __tablename__ = "armed_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    setup_id = Column(String(64), nullable=False, unique=True, index=True)
+    strategy_version = Column(String(100), nullable=False, index=True)
+    symbol = Column(String(50), nullable=False, index=True)
+    tradingsymbol = Column(String(100), nullable=False, index=True)
+    instrument_token = Column(Integer, nullable=False, index=True)
+    order_mode = Column(String(20), nullable=False, index=True)
+    state = Column(String(40), nullable=False, index=True)
+    armed_at = Column(DateTime, nullable=False, index=True)
+    valid_until = Column(DateTime, nullable=False, index=True)
+    updated_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    payload_json = Column(Text, nullable=False)
+
+
 def init_db(database_url: Optional[str] = None) -> None:
     global engine, SessionLocal
     url = database_url or settings.database_url

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from datetime import datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -691,13 +692,15 @@ class TradeExitService:
     def _time_exit_outcome(self, trade: Any, price: float) -> str | None:
         if settings.exit_open_trades_before_close_minutes > 0 and self._near_market_close():
             return "time_exit"
-        if settings.option_time_stop_minutes <= 0:
+        profile = self._exit_profile(trade)
+        configured_minutes = int(profile.get("time_stop_minutes") or settings.option_time_stop_minutes)
+        if configured_minutes <= 0:
             return None
         created_at = trade.created_at
         if created_at is None:
             return None
         created_ist = created_at.replace(tzinfo=ZoneInfo("Asia/Kolkata")) if created_at.tzinfo is None else created_at.astimezone(ZoneInfo("Asia/Kolkata"))
-        if ist_now() < created_ist + timedelta(minutes=settings.option_time_stop_minutes):
+        if ist_now() < created_ist + timedelta(minutes=configured_minutes):
             return None
         entry = float(trade.average_price or trade.entry_price or 0.0)
         if entry <= 0:
@@ -714,15 +717,39 @@ class TradeExitService:
             return None
         entry = float(trade.average_price or trade.entry_price or 0.0)
         target_1 = float(trade.target_1 or 0.0)
-        if entry <= 0 or target_1 <= 0 or price <= 0:
+        stop = float(trade.stop_loss or 0.0)
+        if entry <= 0 or target_1 <= 0 or stop <= 0 or price <= 0:
             return None
+        profile = self._exit_profile(trade)
+        trail_after_r = max(0.5, float(profile.get("trail_after_r") or 1.0))
+        risk = max(entry - stop, 0.01)
+        activation = min(target_1, entry + risk * trail_after_r)
         high_since_entry = self._high_since_entry(str(trade.tradingsymbol), trade.created_at)
-        if high_since_entry < target_1:
+        if high_since_entry < activation:
             return None
-        locked_stop = entry * (1 + settings.option_trailing_stop_lock_pct / 100)
+        target_style = str(profile.get("target_style") or "fixed_structure")
+        lock_pct = settings.option_trailing_stop_lock_pct
+        if target_style == "gamma_scalp":
+            lock_pct = min(lock_pct, 1.0)
+        elif target_style == "runner":
+            lock_pct = max(lock_pct, 3.0)
+        locked_stop = entry * (1 + lock_pct / 100)
         if price <= locked_stop:
             return "trailing_stop"
         return None
+
+    def _exit_profile(self, trade: Any) -> dict[str, Any]:
+        raw = getattr(trade, "order_response_json", None)
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        factors = payload.get("signal_factor_scores", {}) if isinstance(payload, dict) else {}
+        family = factors.get("setup_family", {}) if isinstance(factors, dict) else {}
+        profile = family.get("exit_profile", {}) if isinstance(family, dict) else {}
+        return profile if isinstance(profile, dict) else {}
 
     def _invalidation_exit_outcome(self, provider: KiteProvider, trade: Any, price: float) -> str | None:
         if str(trade.side).upper() != "BUY":

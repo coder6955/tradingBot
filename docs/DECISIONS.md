@@ -199,3 +199,24 @@ This file records decisions that should survive individual conversations and cod
 **Decision:** Readiness requires at least 100 independent out-of-sample trades, 20 sessions, three purged/embargoed folds, positive after-cost expectancy, minimum profit factor, bounded drawdown, and sufficient stable evidence in traded trend/range/volatile/event/expiry regimes. Zero-trade evidence fails explicitly.
 **Why:** Scanner observations are dependent, and one aggregate split can conceal leakage, regime concentration or costs.
 **Consequence:** Missing regimes or insufficient samples keep readiness and live scaling blocked; thresholds are not optimized on evaluation folds.
+
+## D029 — Use hierarchical state, phase, and setup policies
+
+**Status:** Accepted
+**Decision:** Structure, volatility, participation, location and execution form a confidence/uncertainty-aware market state. Multi-timeframe responsibilities are fixed, momentum has an explicit lifecycle, and each setup family owns its entry, invalidation and exit policy.
+**Why:** One aggregate score cannot distinguish formation from exhaustion, a trend from a transition, or price momentum from option-buying suitability.
+**Consequence:** Only unsafe or untradable conditions become hard gates. Weighted inputs stay capped, every abstention has a code, and setup-family score adjustments are bounded.
+
+## D030 — Persist armed intent and report subscription truthfully
+
+**Status:** Accepted
+**Decision:** Armed setups are durable, versioned records. Recovery rehydrates valid setups and owner subscriptions. Registration exposes queued, subscribed-awaiting-tick, live-verified and failed subscription states.
+**Why:** An in-memory armed label can survive neither restart nor subscription failure and can falsely imply that a rally trigger is being watched.
+**Consequence:** Subscription failure cancels arming; disconnected queues are visibly degraded; owner-based overlap and stickiness remain responsible for token lifecycle.
+
+## D031 — Keep promotion advisory and research off the hot path
+
+**Status:** Accepted
+**Decision:** Heavy readiness runs only in the after-market worker lane; ordinary readiness requests serve completed cache. Evidence is segmented by setup, regime, time, DTE, direction, volatility, execution and participation, and promotion never changes runtime configuration.
+**Why:** Research work can delay trigger/order processing, and a self-modifying live strategy destroys lineage and invites overfitting.
+**Consequence:** Rejected observations never enter trade expectancy, insufficient cells fail visibly, and a human must register any new strategy version.

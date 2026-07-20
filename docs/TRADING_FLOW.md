@@ -20,8 +20,10 @@ flowchart TD
     Rally -->|Yes| Scan
     Scan --> Data{"Required data fresh and available?"}
     Data -->|No| Reject["Reject and save reasons"]
-    Data -->|Yes| Contract["Select sticky nearest-expiry CE or PE"]
-    Contract --> Gates{"Hard gates pass?"}
+    Data -->|Yes| Context["MTF structure + market state + volatility"]
+    Context --> Phase["Momentum phase + setup-family policy"]
+    Phase --> Contract["Rank executable nearest-expiry CE or PE"]
+    Contract --> Gates{"Safety gates pass?"}
     Gates -->|No| Reject
     Gates -->|Yes| Score["Calculate weighted score"]
     Score --> Timing{"Enter now or near trigger?"}
@@ -78,7 +80,7 @@ The scanner gathers Bank Nifty market context, price action, regime, option chai
 1. Resolves the nearest valid expiry from live instruments.
 2. Maps bullish setups to CE and bearish setups to PE for option buying.
 3. Builds contracts from the matching expiry and option type.
-4. Scores liquidity, price, spread, OI, volume, strike distance, and affordability where applicable.
+4. Ranks executable ask/bid, spread, top-book depth, OI, volume, strike distance, DTE, Greeks when supplied, and affordability where applicable.
 5. Selects the best contract.
 6. Applies Bank Nifty contract stickiness.
 
@@ -109,6 +111,10 @@ Correlated trend and momentum evidence is capped so several versions of the same
 
 Every accepted and rejected candidate should be logged with its reasons and score components.
 
+Before final timing, the scanner classifies five market dimensions: structure, volatility, participation, location and execution. Daily/30m/15m/5m/1m evidence has separate responsibilities; tick data confirms execution. Momentum is a phase machine, not a boolean. Exhaustion and failure explicitly abstain, while formation may arm and acceleration/breakout/confirmation/continuation may become actionable.
+
+The setup family supplies allowed regimes, momentum phases and an exit profile. Its score adjustment is capped. Candidate ranking applies spread and conservative costs, reward/risk, liquidity and uncertainty. Until calibrated evidence exists, ranking utility is neither expected profit nor probability.
+
 ## 5. Decide whether to arm
 
 An early setup may be armed when:
@@ -120,7 +126,7 @@ An early setup may be armed when:
 - The account-level risk preflight passes.
 - `ArmedEntryTrackerService.register_from_scan()` actually returns `registered=true`.
 
-The scanner reports `ARMED_FOR_ENTRY` only after successful registration. A promising setup that failed registration must retain the rejection/pending reason and must not display a false armed state.
+The scanner reports `ARMED_FOR_ENTRY` only after successful registration. `subscription_state` distinguishes fresh-tick verification, broker subscription awaiting its first fresh tick, and a disconnected queued subscription. A subscription failure cancels registration. Valid setups are persisted and recovered with their owner subscription after restart.
 
 The default armed lifetime is 90 seconds. Repeated scans for the same mode, action, token, expiry, and strike update the logical setup rather than creating uncontrolled duplicates.
 
@@ -204,7 +210,7 @@ Open option tokens are subscribed under the `active_trade` owner in full mode. `
 
 Before rule evaluation, `ExecutablePriceService` calculates the sell price available for the remaining quantity. Full five-level bid depth produces a conservative depth-weighted price. Partial depth uses the worst visible bid but cannot prove a target or authorize a live software exit. Best-bid-only data is paper-only; LTP-only data is diagnostic and cannot fill an exit.
 
-`TradeExitService` then evaluates open trades in explicit priority order:
+`TradeExitService` reads the persisted setup-family exit profile and then evaluates open trades in explicit priority order:
 
 - Stop-loss crossing.
 - Near-close/time stop.
@@ -212,6 +218,8 @@ Before rule evaluation, `ExecutablePriceService` calculates the sell price avail
 - Configured underlying or premium invalidation.
 - Targets and optional partial booking/move-to-cost behavior.
 - Broker protective-stop coordination.
+
+The profile may change time-stop duration, trailing activation in R units and target style. It never weakens the original stop-loss boundary.
 
 Paper exits use the same executable-price assumptions and close the virtual position/trade record. Live exits require full quantity-safe executable depth and live auto-square-off, cancel a non-triggered protective order when appropriate, submit one broker exit, and use broker updates/reconciliation to confirm lifecycle state. Exit failures and mismatches remain visible rather than being silently marked closed. LTP, book evidence, first rule and all simultaneous triggers are persisted for audit and analytics.
 
@@ -231,6 +239,8 @@ Paper exits use the same executable-price assumptions and close the virtual posi
 Rejected-opportunity evaluation uses raw-tick first touch, then chronological candles. It never infers a hit from a later current quote. Same-candle stop/target paths stay ambiguous; incomplete paths are censored and excluded from learning. Repeated observations share a setup episode, so research counts independent episodes rather than scanner frequency.
 
 Research/backtests do not run from scheduled scans, fast callbacks, or order paths. Time-bucket evidence is precomputed after market hours, versioned by strategy/config, and rejected when missing, stale, or mismatched. Walk-forward validation uses multiple anchored folds with a purge/embargo at least as large as the trade horizon. Readiness requires at least the configured fold, independent out-of-sample trade, and session counts; zero-trade evidence cannot pass.
+
+Heavy readiness is queued on the dedicated after-market lane. The readiness GET endpoint serves only a completed cached job. The evidence matrix keeps rejected observations out of expectancy and segments closed outcomes by setup, regime, time, DTE, direction, volatility, execution and participation. Promotion is advisory and manual; research cannot alter live thresholds or activate a version.
 
 Readiness additionally requires positive after-cost expectancy, minimum profit factor, bounded drawdown, and sufficient evidence across traded trend, range, volatile, event-day and expiry-day regimes. Expiry-day evidence is explicitly excluded when the entry policy blocks expiry-day buying; missing event/regime samples fail rather than being assumed stable. Until a chronological out-of-sample calibration model has sufficient independent samples, API `probability` is `null`. The numeric score-derived value is exposed only as `heuristic_score_confidence` with an explicit source.
 

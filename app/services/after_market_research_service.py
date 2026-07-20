@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time as time_module
+import threading
 from datetime import datetime, time
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -59,6 +60,7 @@ class AfterMarketResearchService:
         self.run_count = 0
         self.manual_run_count = 0
         self.skipped_count = 0
+        self.queued = False
 
     def status(self) -> dict[str, Any]:
         now = self._now()
@@ -66,6 +68,7 @@ class AfterMarketResearchService:
             "status": "ok",
             "enabled": settings.enable_after_market_research_job,
             "running": self.running,
+            "queued": self.queued,
             "market_session": self._market_session(now),
             "configured_run_time": settings.after_market_research_time,
             "symbol": settings.after_market_research_symbol.upper(),
@@ -99,6 +102,31 @@ class AfterMarketResearchService:
                 "market_session": self._market_session(now),
             }
         return self.run_once(trigger="scheduled", force=False, now=now)
+
+    def run_async(self, *, trigger: str = "manual", force: bool = False, now: datetime | None = None) -> dict[str, Any]:
+        """Queue the heavy report without occupying an API or scanner worker."""
+        point = to_ist_naive(now or self._now())
+        allowed, reason = self._can_run(now=point, force=force)
+        if not allowed:
+            return {"action": "after_market_research", "status": "skipped", "reason": reason, "force": force}
+        if self.running or self.queued:
+            return {"action": "after_market_research", "status": "already_running", "force": force}
+        self.queued = True
+
+        def runner() -> None:
+            try:
+                self.run_once(trigger=trigger, force=force, now=point)
+            finally:
+                self.queued = False
+
+        threading.Thread(target=runner, name="after-market-research-worker", daemon=True).start()
+        return {
+            "action": "after_market_research",
+            "status": "queued",
+            "force": force,
+            "execution_lane": "dedicated_after_market_worker",
+            "message": "Research was queued; live scanning and API status endpoints remain non-blocking.",
+        }
 
     def run_once(self, *, trigger: str = "manual", force: bool = False, now: datetime | None = None) -> dict[str, Any]:
         now = to_ist_naive(now or self._now())

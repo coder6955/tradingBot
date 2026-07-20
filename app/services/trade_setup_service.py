@@ -28,6 +28,12 @@ class OptionContract:
     ask: float = 0.0
     oi_day_high: float = 0.0
     oi_day_low: float = 0.0
+    bid_quantity: int = 0
+    ask_quantity: int = 0
+    implied_volatility: float | None = None
+    delta: float | None = None
+    gamma: float | None = None
+    theta: float | None = None
 
 
 class TradeSetupService:
@@ -87,7 +93,8 @@ class TradeSetupService:
             affordable = self._affordable_buy_candidates(candidates)
             if affordable:
                 candidates = affordable
-        selected = max(candidates, key=lambda contract: self._contract_score(contract, target))
+        ranked = self.rank_contracts(candidates=candidates, spot_price=spot_price, target_strike=target, side=side)
+        selected = ranked[0]["contract"] if ranked else max(candidates, key=lambda contract: self._contract_score(contract, target))
         if underlying.upper() != "BANKNIFTY":
             return selected
         return self._sticky_contract_selection(
@@ -96,6 +103,61 @@ class TradeSetupService:
             selected=selected,
             target=target,
         )
+
+    def rank_contracts(
+        self,
+        *,
+        candidates: List[OptionContract],
+        spot_price: float,
+        target_strike: float | None = None,
+        side: str = "BUY",
+    ) -> list[dict[str, Any]]:
+        """Rank contracts by executable price, liquidity, Greeks, DTE, and stability."""
+        if not candidates:
+            return []
+        target = float(target_strike if target_strike is not None else spot_price)
+        rows: list[dict[str, Any]] = []
+        for contract in candidates:
+            executable = contract.ask if side.upper() == "BUY" else contract.bid
+            spread_pct = self._spread_pct(contract)
+            distance_intervals = abs(contract.strike - target) / max(self._strike_interval(candidates), 1.0)
+            score = float(self.liquidity_score(contract))
+            score -= min(30.0, distance_intervals * 8.0)
+            score -= min(35.0, spread_pct * 4.0)
+            if executable <= 0:
+                score -= 60.0
+            if contract.bid_quantity >= settings.contract_min_depth_quantity:
+                score += 6.0
+            if contract.ask_quantity >= settings.contract_min_depth_quantity:
+                score += 4.0
+            if contract.delta is not None:
+                abs_delta = abs(float(contract.delta))
+                if settings.min_option_buy_delta <= abs_delta <= settings.max_option_buy_delta:
+                    score += 10.0
+                else:
+                    score -= 8.0
+            if contract.theta is not None and executable > 0:
+                theta_pct = abs(float(contract.theta)) / executable * 100
+                if theta_pct > settings.max_option_buy_theta_pct:
+                    score -= 12.0
+            expiry = self._parse_expiry(contract.expiry)
+            dte = (expiry - ist_today()).days if expiry else None
+            if dte is not None and dte <= 0 and settings.block_expiry_day_option_buying:
+                score -= 50.0
+            rows.append(
+                {
+                    "contract": contract,
+                    "score": round(max(0.0, min(100.0, score)), 2),
+                    "executable_price": executable,
+                    "spread_pct": round(spread_pct, 3),
+                    "distance_intervals": round(distance_intervals, 3),
+                    "dte": dte,
+                    "depth": {"bid_quantity": contract.bid_quantity, "ask_quantity": contract.ask_quantity},
+                    "greeks": {"delta": contract.delta, "gamma": contract.gamma, "theta": contract.theta, "iv": contract.implied_volatility},
+                }
+            )
+        rows.sort(key=lambda row: (float(row["score"]), -float(row["spread_pct"]), float(row["executable_price"])), reverse=True)
+        return rows[: max(1, settings.contract_max_ranked_candidates)]
 
     def _sticky_contract_selection(
         self,
@@ -380,6 +442,9 @@ class TradeSetupService:
         sell_depth = depth.get("sell", []) if isinstance(depth, dict) else []
         bid = float(buy_depth[0].get("price", 0.0)) if buy_depth else 0.0
         ask = float(sell_depth[0].get("price", 0.0)) if sell_depth else 0.0
+        bid_quantity = int(float(buy_depth[0].get("quantity", 0) or 0)) if buy_depth else 0
+        ask_quantity = int(float(sell_depth[0].get("quantity", 0) or 0)) if sell_depth else 0
+        greeks = quote.get("greeks", {}) if isinstance(quote.get("greeks"), dict) else {}
         return OptionContract(
             tradingsymbol=tradingsymbol,
             exchange=str(item.get("exchange") or settings.option_exchange),
@@ -396,6 +461,12 @@ class TradeSetupService:
             ask=ask,
             oi_day_high=float(quote.get("oi_day_high") or 0.0),
             oi_day_low=float(quote.get("oi_day_low") or 0.0),
+            bid_quantity=bid_quantity,
+            ask_quantity=ask_quantity,
+            implied_volatility=self._optional_float(quote.get("implied_volatility") or quote.get("iv") or greeks.get("iv")),
+            delta=self._optional_float(quote.get("delta") or greeks.get("delta")),
+            gamma=self._optional_float(quote.get("gamma") or greeks.get("gamma")),
+            theta=self._optional_float(quote.get("theta") or greeks.get("theta")),
         )
 
     def _strike_interval(self, contracts: List[OptionContract]) -> float:
@@ -410,7 +481,9 @@ class TradeSetupService:
 
     def _contract_score(self, contract: OptionContract, target: float) -> float:
         distance_penalty = abs(contract.strike - target)
-        return self.liquidity_score(contract) - (distance_penalty / max(contract.strike, 1.0) * 1000)
+        executable_penalty = 60.0 if contract.ask <= 0 else 0.0
+        depth_bonus = 5.0 if contract.bid_quantity >= settings.contract_min_depth_quantity else 0.0
+        return self.liquidity_score(contract) + depth_bonus - executable_penalty - (distance_penalty / max(contract.strike, 1.0) * 1000)
 
     def _affordable_buy_candidates(self, contracts: List[OptionContract]) -> List[OptionContract]:
         available_cash = self._available_cash()
@@ -454,3 +527,9 @@ class TradeSetupService:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    def _optional_float(self, value: Any) -> float | None:
+        try:
+            return float(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None

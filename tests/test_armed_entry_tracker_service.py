@@ -23,6 +23,11 @@ class FakeWebSocketFeed:
         return {"subscribed": sorted(clean)}
 
 
+class FailingWebSocketFeed(FakeWebSocketFeed):
+    def subscribe(self, tokens):
+        return {"subscribed": [], "reason": "subscription_failed", "message": "test failure"}
+
+
 class FakeOrderService:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -51,6 +56,17 @@ class MutableClock:
 
     def __call__(self) -> datetime:
         return self.now
+
+
+class InMemoryArmedEntryRepository:
+    def __init__(self) -> None:
+        self.rows: dict[str, dict[str, object]] = {}
+
+    def upsert(self, payload):
+        self.rows[str(payload["setup_id"])] = dict(payload)
+
+    def active(self, *, now=None):
+        return [dict(payload) for payload in self.rows.values() if payload["valid_until"] >= now]
 
 
 class ArmedEntryTrackerServiceTests(unittest.TestCase):
@@ -165,6 +181,72 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
         self.assertTrue(setup_id.startswith("armed-"))
         self.assertIn({580001}, self.websocket.subscriptions)
         self.assertEqual(self.tracker.active_tokens(), {580001})
+
+    def test_subscription_failure_is_not_reported_as_armed(self) -> None:
+        tracker = ArmedEntryTrackerService(
+            websocket_price_feed=FailingWebSocketFeed(),
+            risk_management_service=PassingRiskService(),
+            market_session_provider=lambda: "REGULAR_MARKET",
+            clock=self.clock,
+        )
+        result = tracker.register_from_scan(
+            symbol="BANKNIFTY",
+            action="BUY_CE",
+            side="BUY",
+            contract=self._contract(),
+            prices={"entry_price": 103, "stop_loss": 90, "target_1": 130, "target_2": 145, "target_3": 160, "risk_reward": 2.0},
+            entry_timing={"entry_trigger_price": 105, "current_premium": 103, "spread_pct": 1.0},
+            score=86,
+            probability=None,
+            confidence=0.86,
+            quantity=15,
+            factor_scores={},
+            order_mode="paper",
+        )
+
+        self.assertFalse(result["registered"])
+        self.assertFalse(result["websocket_tracking_enabled"])
+        self.assertEqual(result["subscription_health"]["state"], "failed")
+        self.assertEqual(tracker.active_tokens(), set())
+
+    def test_armed_entry_is_persisted_and_recovered_with_subscription_owner(self) -> None:
+        durable = InMemoryArmedEntryRepository()
+        first = ArmedEntryTrackerService(
+            websocket_price_feed=self.websocket,
+            armed_entry_repository=durable,
+            risk_management_service=PassingRiskService(),
+            market_session_provider=lambda: "REGULAR_MARKET",
+            clock=self.clock,
+        )
+        result = first.register_from_scan(
+            symbol="BANKNIFTY",
+            action="BUY_CE",
+            side="BUY",
+            contract=self._contract(),
+            prices={"entry_price": 103, "stop_loss": 90, "target_1": 130, "target_2": 145, "target_3": 160, "risk_reward": 2.0},
+            entry_timing={"entry_trigger_price": 105, "current_premium": 103, "spread_pct": 1.0, "reasons": ["waiting_for_entry_trigger"]},
+            score=86,
+            probability=None,
+            confidence=0.86,
+            quantity=15,
+            factor_scores={"market_regime": {"regime": "trend_expansion"}},
+            order_mode="paper",
+        )
+        self.assertTrue(result["registered"])
+        second_websocket = FakeWebSocketFeed()
+        second = ArmedEntryTrackerService(
+            websocket_price_feed=second_websocket,
+            armed_entry_repository=durable,
+            risk_management_service=PassingRiskService(),
+            market_session_provider=lambda: "REGULAR_MARKET",
+            clock=self.clock,
+        )
+
+        recovery = second.recover_active()
+
+        self.assertEqual(recovery["recovered"], 1)
+        self.assertEqual(second.active_tokens(), {580001})
+        self.assertIn({580001}, second_websocket.subscriptions)
 
     def test_websocket_tick_below_trigger_does_not_enter(self) -> None:
         setup_id = self._register()

@@ -466,10 +466,25 @@ class KiteFeed:
 
     def _recent_stored_candles(self, symbol: str) -> List[Dict[str, Any]]:
         now = ist_now_naive()
-        session_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        current_bucket = now.replace(minute=(now.minute // 5) * 5, second=0, microsecond=0)
         session = get_session()
         try:
+            market_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+            market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+            if now.weekday() < 5 and market_open <= now <= market_close:
+                session_start = market_open
+                current_bucket = now.replace(minute=(now.minute // 5) * 5, second=0, microsecond=0)
+            else:
+                latest = (
+                    session.query(Candle.timestamp)
+                    .filter(Candle.symbol == symbol.upper(), Candle.timeframe == "5minute", Candle.timestamp <= now)
+                    .order_by(Candle.timestamp.desc())
+                    .first()
+                )
+                if latest is None or latest[0] is None:
+                    return []
+                latest_time = latest[0].replace(tzinfo=None)
+                session_start = latest_time.replace(hour=9, minute=15, second=0, microsecond=0)
+                current_bucket = latest_time.replace(hour=15, minute=31, second=0, microsecond=0)
             rows = (
                 session.query(Candle)
                 .filter(

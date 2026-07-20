@@ -34,6 +34,9 @@ from app.services.execution_analytics_service import ExecutionAnalyticsService
 from app.services.active_price_feed import ActiveTradePriceFeed
 from app.services.after_market_research_service import AfterMarketResearchService
 from app.services.armed_entry_tracker_service import ArmedEntryTrackerService
+from app.services.armed_entry_repository import ArmedEntryRepository
+from app.services.evidence_matrix_service import EvidenceMatrixService
+from app.services.strategy_promotion_service import StrategyPromotionService
 from app.services.banknifty_option_prewarm_service import BankNiftyOptionPrewarmService
 from app.services.banknifty_fast_rally_service import BankNiftyFastRallyService
 from app.services.banknifty_intelligence_service import BankNiftyIntelligenceService
@@ -371,7 +374,10 @@ armed_entry_tracker_service = ArmedEntryTrackerService(
     risk_management_service=risk_management_service,
     market_session_provider=kite_websocket_price_feed.market_session,
     latency_metrics=latency_metrics_service,
+    armed_entry_repository=ArmedEntryRepository(),
 )
+evidence_matrix_service = EvidenceMatrixService()
+strategy_promotion_service = StrategyPromotionService(evidence=evidence_matrix_service)
 kite_websocket_price_feed.tick_handler = armed_entry_tracker_service.on_tick
 kite_websocket_price_feed.gap_handler = armed_entry_tracker_service.cancel_for_data_gap
 
@@ -447,6 +453,11 @@ def _run_startup_maintenance() -> None:
         strategy_version_registry.ensure_current_version()
     except Exception:
         logger.exception("startup strategy version registration failed")
+    try:
+        recovery = armed_entry_tracker_service.recover_active()
+        logger.info("startup armed entry recovery %s", recovery)
+    except Exception:
+        logger.exception("startup armed entry recovery failed")
     try:
         kite_websocket_price_feed.cleanup_old_persisted_candles()
     except Exception:
@@ -647,6 +658,17 @@ def get_strategy_version(version: str) -> dict[str, object]:
     if result.get("status") == "not_found":
         raise HTTPException(status_code=404, detail=f"strategy version not found: {version}")
     return result
+
+
+@app.get("/research/evidence-matrix", tags=["10 Research"], summary="Inspect setup/regime outcome evidence")
+def get_evidence_matrix(group_by: str | None = None, limit: int = 5000) -> dict[str, object]:
+    dimensions = [item.strip() for item in str(group_by or "").split(",") if item.strip()] or None
+    return evidence_matrix_service.report(group_by=dimensions, limit=max(1, min(int(limit), 10000)))
+
+
+@app.get("/research/strategy-promotion", tags=["10 Research"], summary="Evaluate guarded strategy promotion readiness")
+def get_strategy_promotion(timeframe: str = "5minute") -> dict[str, object]:
+    return strategy_promotion_service.evaluate(timeframe=timeframe)
 
 
 @app.post("/strategy/versions/register", tags=["10 Research"], summary="Register or refresh the current strategy version with human notes")
@@ -879,7 +901,9 @@ async def command_center_dashboard() -> HTMLResponse:
         <a class="linkbtn secondary" href="/research/execution-realism" target="_blank">Execution Realism</a>
         <a class="linkbtn secondary" href="/research/daily-review" target="_blank">Daily Review</a>
         <a class="linkbtn secondary" href="/research/after-market/status" target="_blank">After-Market</a>
-        <a class="linkbtn secondary" href="/strategy/versions/current" target="_blank">Strategy V3</a>
+        <a class="linkbtn secondary" href="/research/evidence-matrix" target="_blank">Evidence Matrix</a>
+        <a class="linkbtn secondary" href="/research/strategy-promotion" target="_blank">Promotion Gate</a>
+        <a class="linkbtn secondary" href="/strategy/versions/current" target="_blank">Strategy V4</a>
         <a class="linkbtn secondary" href="/runtime/status" target="_blank">Runtime</a>
         <a class="linkbtn secondary" href="/market-data/pipeline-status" target="_blank">Pipeline</a>
         <a class="linkbtn secondary" href="/runtime/latency" target="_blank">Latency</a>
@@ -899,7 +923,7 @@ async def command_center_dashboard() -> HTMLResponse:
       </div>
     </section>
     <section class="panel">
-      <h2>V3 Strategy &amp; Market Session</h2>
+      <h2>V4 Strategy &amp; Market Session</h2>
       <div class="status" id="strategyCards"></div>
       <div class="summary-line" id="strategySummary"></div>
     </section>
@@ -1221,6 +1245,11 @@ function renderLatestWatch(signal) {
   const el = document.getElementById("latestWatch");
   if (!signal) { el.innerHTML = `<div class="empty">No current opportunity.</div>`; return; }
   const t = timing(signal);
+  const f = signal.factor_scores || {};
+  const market = f.market_regime || {};
+  const momentum = f.momentum_phase || {};
+  const family = f.setup_family || {};
+  const candidate = f.candidate_ranking || {};
   el.innerHTML = `<div class="watch">
     ${watchItem("State", t.entry_timing_state || signal.setup_state || "SIGNAL")}
     ${watchItem("Action", signal.action)}
@@ -1229,6 +1258,10 @@ function renderLatestWatch(signal) {
     ${watchItem("SL", signal.stop_loss)}
     ${watchItem("Target 1", signal.target_1)}
     ${watchItem("Chase", t.chase_risk || "-")}
+    ${watchItem("Regime", market.regime || "-")}
+    ${watchItem("Momentum", momentum.phase || "-")}
+    ${watchItem("Setup family", family.name || "-")}
+    ${watchItem("Utility", candidate.utility_score ?? "-")}
     ${watchItem("Reason", t.entry_timing_reason || "Qualified signal")}
   </div>`;
 }
@@ -1498,6 +1531,9 @@ def _decision_event_from_opportunity(record) -> dict[str, object]:
     timing = factors.get("entry_timing", {}) if isinstance(factors.get("entry_timing"), dict) else {}
     state = str(timing.get("entry_timing_state") or "ACCEPTED")
     reason = str(timing.get("entry_timing_reason") or "Accepted opportunity saved")
+    market = factors.get("market_regime", {}) if isinstance(factors.get("market_regime"), dict) else {}
+    momentum = factors.get("momentum_phase", {}) if isinstance(factors.get("momentum_phase"), dict) else {}
+    family = factors.get("setup_family", {}) if isinstance(factors.get("setup_family"), dict) else {}
     return {
         "time": format_ist(record.created_at),
         "sort_time": record.created_at.isoformat() if record.created_at else "",
@@ -1514,6 +1550,9 @@ def _decision_event_from_opportunity(record) -> dict[str, object]:
         "status": record.status,
         "outcome": record.outcome,
         "state": state,
+        "market_regime": market.get("regime"),
+        "momentum_phase": momentum.get("phase"),
+        "setup_family": family.get("name"),
     }
 
 
@@ -1523,6 +1562,9 @@ def _decision_event_from_rejection(record) -> dict[str, object]:
     reasons = _json_list(getattr(record, "reasons_json", None))
     state = str(timing.get("entry_timing_state") or "REJECTED")
     reason = str(timing.get("entry_timing_reason") or "; ".join(reasons[:3]) or record.primary_gate or "Rejected setup")
+    market = factors.get("market_regime", {}) if isinstance(factors.get("market_regime"), dict) else {}
+    momentum = factors.get("momentum_phase", {}) if isinstance(factors.get("momentum_phase"), dict) else {}
+    family = factors.get("setup_family", {}) if isinstance(factors.get("setup_family"), dict) else {}
     severity = "warn"
     if any(item in reasons for item in ["entry_too_late", "chase_risk_high", "selected_option_quote_invalid"]):
         severity = "bad"
@@ -1542,6 +1584,10 @@ def _decision_event_from_rejection(record) -> dict[str, object]:
         "reasons": reasons,
         "later_outcome": record.later_outcome,
         "state": state,
+        "market_regime": market.get("regime"),
+        "momentum_phase": momentum.get("phase"),
+        "setup_family": family.get("name"),
+        "abstention_code": market.get("abstention_code") or momentum.get("abstention_code") or family.get("abstention_code"),
     }
 
 
@@ -2188,6 +2234,26 @@ def get_research_settings() -> dict[str, object]:
             "min_profit_factor": settings.min_strategy_profit_factor,
             "min_win_rate_pct": settings.min_strategy_win_rate_pct,
         },
+        "institutional_decision_policy": {
+            "hierarchical_market_state": settings.enable_hierarchical_market_state,
+            "min_market_state_confidence": settings.market_state_min_confidence,
+            "max_market_state_uncertainty": settings.market_state_max_uncertainty,
+            "mtf_min_timeframes": settings.mtf_min_timeframes,
+            "mtf_min_alignment_score": settings.mtf_min_alignment_score,
+            "momentum_min_entry_score": settings.momentum_min_entry_score,
+            "setup_policy_min_score": settings.setup_policy_min_score,
+            "candidate_min_utility_score": settings.candidate_min_utility_score,
+            "note": "Candidate utility orders opportunities; it is not a calibrated probability or profit forecast.",
+        },
+        "evidence_governance": {
+            "minimum_trades_per_cell": settings.evidence_matrix_min_trades,
+            "minimum_expectancy_pct": settings.evidence_matrix_min_expectancy_pct,
+            "minimum_profit_factor": settings.evidence_matrix_min_profit_factor,
+            "maximum_drawdown_pct": settings.evidence_matrix_max_drawdown_pct,
+            "automatic_live_mutation": False,
+            "promotion_endpoint": "/research/strategy-promotion",
+            "matrix_endpoint": "/research/evidence-matrix",
+        },
         "market_insights": {
             "day_type_filter": settings.enable_day_type_filter,
             "min_day_type_score": settings.min_day_type_score,
@@ -2606,6 +2672,8 @@ def run_after_market_research(
 ) -> dict[str, object]:
     payload = payload or {}
     _require_manual_override_for_market_heavy_operation(payload, "after-market research job")
+    if hasattr(after_market_research_service, "run_async"):
+        return after_market_research_service.run_async(trigger="manual", force=bool(payload.get("force", False)))
     return after_market_research_service.run_once(trigger="manual", force=bool(payload.get("force", False)))
 
 
@@ -2658,9 +2726,30 @@ def get_professional_readiness(
     direction: str = "BOTH",
     limit: int = 3000,
 ) -> dict[str, object]:
-    if deferred := _defer_review_analysis_during_market("professional_readiness"):
-        return deferred
-    return professional_readiness_service.report(symbol=symbol, timeframe=timeframe, direction=direction, limit=_bounded_int(limit, 3000, maximum=5000))
+    status = after_market_research_service.status()
+    latest = status.get("last_result") if isinstance(status, dict) else None
+    if not isinstance(latest, dict):
+        job_run = status.get("job_run", {}) if isinstance(status, dict) else {}
+        metadata = job_run.get("metadata", {}) if isinstance(job_run, dict) else {}
+        latest = metadata.get("result") if isinstance(metadata, dict) else None
+    reports = latest.get("reports", {}) if isinstance(latest, dict) else {}
+    stage = reports.get("professional_readiness", {}) if isinstance(reports, dict) else {}
+    result = stage.get("result") if isinstance(stage, dict) else None
+    if isinstance(result, dict):
+        return {
+            **result,
+            "source": "after_market_research_cache",
+            "non_blocking": True,
+            "last_run_date": status.get("last_run_date"),
+        }
+    return {
+        "status": "not_ready",
+        "ready_for_live": False,
+        "source": "after_market_research_cache",
+        "non_blocking": True,
+        "message": "No completed professional-readiness report is cached. Queue /research/after-market/run after market close.",
+        "job": status.get("job_run") if isinstance(status, dict) else None,
+    }
 
 
 @app.post(

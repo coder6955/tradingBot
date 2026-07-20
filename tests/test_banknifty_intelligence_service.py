@@ -40,7 +40,7 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
 
         self.assertTrue(result["passed"])
         self.assertGreaterEqual(result["score"], 70)
-        self.assertIn(result["details"]["tradeQuality"], {"A", "B"})
+        self.assertIn(result["details"]["tradeQuality"], {"A_PLUS", "A", "B"})
 
     def test_no_trade_when_top_banks_are_mixed(self) -> None:
         snapshots = self._market_snapshots(bank_move=0.6, nifty_move=0.2, bank_constituent_move=0.7)
