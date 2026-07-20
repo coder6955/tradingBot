@@ -106,7 +106,24 @@ class KiteProvider:
 
     def historical_data(self, instrument_token: int, from_dt: datetime, to_dt: datetime, interval: str) -> List[Dict[str, Any]]:
         self._ensure_ready()
-        return self._call(self.client.historical_data, instrument_token, from_dt, to_dt, interval)  # type: ignore
+        return self._call(self.client.historical_data, instrument_token, from_dt, to_dt, self._broker_interval(interval))  # type: ignore
+
+    def _broker_interval(self, interval: str) -> str:
+        internal = str(interval or "").strip().lower()
+        supported = {
+            "1minute": "minute",
+            "minute": "minute",
+            "3minute": "3minute",
+            "5minute": "5minute",
+            "10minute": "10minute",
+            "15minute": "15minute",
+            "30minute": "30minute",
+            "60minute": "60minute",
+            "day": "day",
+        }
+        if internal not in supported:
+            raise ValueError(f"unsupported Kite historical interval: {interval}")
+        return supported[internal]
 
     def margins(self) -> Dict[str, Any]:
         self._ensure_ready()

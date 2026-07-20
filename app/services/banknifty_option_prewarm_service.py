@@ -49,6 +49,13 @@ class BankNiftyOptionPrewarmService:
             self.last_reason = "websocket_subscribe_unavailable"
             return self.status(extra={"refreshed": False})
         if callable(replace):
+            register_symbol = getattr(self.websocket_price_feed, "register_token_symbol", None)
+            if callable(register_symbol):
+                for item in candidates:
+                    token = self._safe_int(item.get("instrument_token"))
+                    tradingsymbol = str(item.get("tradingsymbol") or "")
+                    if token and tradingsymbol:
+                        register_symbol(token, tradingsymbol)
             self.last_subscription = dict(
                 replace(
                     owner="banknifty_prewarm",

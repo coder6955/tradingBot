@@ -25,8 +25,16 @@ class DataFreshnessService:
 
         source = str(snapshot.get("source") or "")
         is_real = bool(snapshot.get("is_real_data"))
-        if live and (not is_real or source in {"mock", "stored_candles", "fallback"}):
+        if live and (not is_real or source in {"mock", "fallback"}):
             reasons.append(f"live mode requires fresh Kite quote; source={source or 'unknown'}, is_real_data={is_real}")
+        if live and not bool(snapshot.get("analysis_ready")):
+            quality_reasons = snapshot.get("data_quality_reasons") or ["analysis snapshot unavailable"]
+            reasons.append(f"live mode requires canonical completed-candle analysis: {quality_reasons}")
+
+        quote_source = str(snapshot.get("quote_timestamp_source") or "unavailable")
+        checks["banknifty_quote_timestamp_source"] = quote_source
+        if live and quote_source not in {"exchange_timestamp", "last_trade_time", "timestamp"}:
+            reasons.append(f"Bank Nifty quote lacks broker/exchange timestamp provenance: {quote_source}")
 
         quote_age = self._age_seconds(snapshot.get("quote_timestamp") or snapshot.get("timestamp"))
         checks["banknifty_quote_age_seconds"] = quote_age
@@ -82,6 +90,9 @@ class DataFreshnessService:
         return max(ages) if ages else None
 
     def _quote_age(self, payload: dict[str, Any]) -> float | None:
+        source = str(payload.get("quote_timestamp_source") or "")
+        if source and source not in {"exchange_timestamp", "last_trade_time", "timestamp"}:
+            return None
         return self._age_seconds(
             payload.get("quote_timestamp")
             or payload.get("timestamp")

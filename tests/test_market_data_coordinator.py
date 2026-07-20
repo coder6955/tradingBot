@@ -93,7 +93,7 @@ class MarketDataCoordinatorTests(unittest.TestCase):
         self.assertEqual(provider.quote_count, 1)
         self.assertGreaterEqual(coordinator.status()["quote_inflight_reused"], 1)
 
-    def test_accepted_and_rejected_outcome_evaluation_share_quote_cache(self) -> None:
+    def test_rejected_outcome_does_not_infer_first_touch_from_shared_current_quote(self) -> None:
         provider = CountingProvider(price=121.0)
         coordinator = MarketDataCoordinator(lambda: provider, quote_ttl_seconds=5)
         opportunity_repo = OpportunityRepository()
@@ -140,7 +140,8 @@ class MarketDataCoordinatorTests(unittest.TestCase):
         result = service.evaluate_once()
 
         self.assertEqual(result["closed"], 1)
-        self.assertEqual(result["rejected_opportunities"]["updated"], 1)
+        self.assertEqual(result["rejected_opportunities"]["updated"], 0)
+        self.assertEqual(result["rejected_opportunities"]["results"][0]["reason"], "chronological_outcome_pending")
         self.assertEqual(provider.quote_count, 1)
 
 

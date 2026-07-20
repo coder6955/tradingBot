@@ -4,7 +4,8 @@ import unittest
 from datetime import date, timedelta
 
 from app.models import Signal
-from app.services.database import Candle, get_session, init_db
+from app.config import settings
+from app.services.database import Candle, RawTickRecord, SetupEpisodeRecord, get_session, init_db
 from app.services.opportunity_outcome_service import OpportunityOutcomeService
 from app.services.opportunity_repository import OpportunityRepository
 from app.services.rejected_opportunity_outcome_service import RejectedOpportunityOutcomeService
@@ -61,6 +62,30 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
                     low_price=low_price,
                     close_price=close_price,
                     volume=1000,
+                )
+            )
+            session.commit()
+        finally:
+            session.close()
+
+    def _save_raw_tick(self, *, token: int, symbol: str, price: float, timestamp) -> None:
+        session = get_session()
+        try:
+            session.add(
+                RawTickRecord(
+                    session_date=timestamp.date().isoformat(),
+                    sequence=int(timestamp.timestamp() * 1_000_000),
+                    instrument_token=token,
+                    symbol=symbol,
+                    last_price=price,
+                    exchange_timestamp=timestamp,
+                    receive_timestamp=timestamp + timedelta(milliseconds=20),
+                    timestamp_source="exchange_timestamp",
+                    packet_type="full",
+                    owners_json='["banknifty_prewarm"]',
+                    capture_context="warm_market",
+                    strategy_version="test-v2",
+                    config_hash="test-config",
                 )
             )
             session.commit()
@@ -132,6 +157,7 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120, "target_2": 130, "target_3": 140}},
             market_session="REGULAR_MARKET",
         )
+        self._save_raw_tick(token=580001, symbol=contract.tradingsymbol, price=121, timestamp=rejected.created_at + timedelta(seconds=10))
         rejected_service = RejectedOpportunityOutcomeService(rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=121))  # type: ignore[arg-type]
         service = OpportunityOutcomeService(
             repo,
@@ -165,7 +191,7 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             bid=99,
             ask=101,
         )
-        rejected_repo.save_rejection(
+        rejected = rejected_repo.save_rejection(
             symbol="BANKNIFTY",
             side="BUY",
             action="BUY_CE",
@@ -176,6 +202,7 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             rejection_source="manual_diagnostic",
             market_session="REGULAR_MARKET",
         )
+        self._save_raw_tick(token=580001, symbol=contract.tradingsymbol, price=121, timestamp=rejected.created_at + timedelta(seconds=10))
         service = RejectedOpportunityOutcomeService(rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=121))  # type: ignore[arg-type]
 
         default_result = service.evaluate_once()
@@ -187,6 +214,79 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
         self.assertEqual(analysis["sample"]["learning_eligible"], 0)
         self.assertEqual(analysis["sample"]["learning_excluded"], 1)
         self.assertEqual(analysis["learning_exclusion_reasons"]["manual_diagnostic"], 1)
+
+    def test_repeated_rejections_share_one_independent_setup_episode(self) -> None:
+        repository = RejectedOpportunityRepository()
+        contract = OptionContract(
+            tradingsymbol="BANKNIFTY26JUL58000CE",
+            exchange="NFO",
+            instrument_token=580001,
+            name="BANKNIFTY",
+            expiry=date.today().isoformat(),
+            strike=58000,
+            option_type="CE",
+            lot_size=15,
+            last_price=100,
+            open_interest=50000,
+            volume=10000,
+            bid=99,
+            ask=101,
+        )
+        first = repository.save_rejection(
+            symbol="BANKNIFTY", side="BUY", action="BUY_CE", score=80, reasons=["waiting"], contract=contract, market_session="REGULAR_MARKET"
+        )
+        second = repository.save_rejection(
+            symbol="BANKNIFTY", side="BUY", action="BUY_CE", score=81, reasons=["waiting"], contract=contract, market_session="REGULAR_MARKET"
+        )
+        session = get_session()
+        try:
+            episodes = session.query(SetupEpisodeRecord).all()
+            self.assertEqual(first.episode_id, second.episode_id)
+            self.assertEqual(len(episodes), 1)
+            self.assertEqual(episodes[0].observation_count, 2)
+        finally:
+            session.close()
+
+    def test_missing_chronological_path_is_censored_not_inferred_from_current_quote(self) -> None:
+        repository = RejectedOpportunityRepository()
+        contract = OptionContract(
+            tradingsymbol="BANKNIFTY26JUL58000CE",
+            exchange="NFO",
+            instrument_token=580001,
+            name="BANKNIFTY",
+            expiry=date.today().isoformat(),
+            strike=58000,
+            option_type="CE",
+            lot_size=15,
+            last_price=100,
+            open_interest=50000,
+            volume=10000,
+            bid=99,
+            ask=101,
+        )
+        record = repository.save_rejection(
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=80,
+            reasons=["waiting"],
+            contract=contract,
+            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            market_session="REGULAR_MARKET",
+        )
+        session = get_session()
+        try:
+            stored = session.get(type(record), record.id)
+            stored.created_at = stored.created_at - timedelta(minutes=settings.rejected_outcome_horizon_minutes + 5)
+            session.commit()
+        finally:
+            session.close()
+        result = RejectedOpportunityOutcomeService(repository, kite_provider_factory=lambda: FakeKiteProvider(price=121)).evaluate_once()  # type: ignore[arg-type]
+        updated = repository.list_rejections(symbol="BANKNIFTY", limit=1)[0]
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(updated.later_outcome, "censored_chronological_data_unavailable")
+        self.assertEqual(updated.later_outcome_source, "censored")
+        self.assertFalse(bool(updated.learning_eligible))
 
     def test_rejected_later_outcome_replays_candles_before_quote_fallback(self) -> None:
         rejected_repo = RejectedOpportunityRepository()

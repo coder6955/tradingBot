@@ -116,3 +116,51 @@ This file records decisions that should survive individual conversations and cod
 **Why:** Conversation memory and uploaded ChatGPT files are incomplete snapshots and cannot reliably represent the current code.  
 **Consequence:** A change is not complete when it materially changes architecture or trading behavior but leaves the corresponding document stale.
 
+## D017 — Make exchange-timestamped underlying candles canonical
+
+**Status:** Accepted  
+**Decision:** Current-session `BANKNIFTY` 1-minute WebSocket candles and completed 5-minute aggregates are the underlying analysis authority. Receive time is diagnostic, never substitute market time.  
+**Why:** Quote-only caches and local receipt timestamps can fabricate indicator evidence or freshness.  
+**Consequence:** Missing/stale exchange provenance fails closed for live scans; generated continuity rows are marked and only created inside the NSE session.
+
+## D018 — Use two-stage fast candidate promotion
+
+**Status:** Accepted  
+**Decision:** Tick acceleration promotes only Bank Nifty against an immutable, versioned, bounded-age slow context; stage B uses the normal scanner primitives under the shared scan lock.  
+**Why:** A full-universe rescan is slow, while a separate fast strategy would diverge from scheduled decisions.  
+**Consequence:** Stale or config-mismatched context rejects the fast candidate, and event-driven live entry stays disabled.
+
+## D019 — Retain relevant raw ticks for exact ordered replay
+
+**Status:** Accepted  
+**Decision:** Underlying, prewarmed, armed, and active-trade ticks are written asynchronously with capture sequence and configurable retention.  
+**Why:** Candles cannot reconstruct bid/ask order, first touch, queue pressure, or trigger timing.  
+**Consequence:** Warm ticks are expendable before risk-sensitive ticks; any lost armed/active tick is visible as a critical capture gap.
+
+## D020 — Count independent setup episodes and censor incomplete outcomes
+
+**Status:** Accepted  
+**Decision:** Repeated scan observations share a stable time-bucketed contract/direction/strategy episode. Outcomes require chronological first touch; incomplete paths are censored, and legacy current-quote outcomes remain stored but excluded.  
+**Why:** Repeated polling is dependent data, and a later quote does not prove which threshold was touched first.  
+**Consequence:** Gate reports distinguish observations, independent episodes, primary/co-occurring/isolated evidence, duplicates, and avoid causal claims.
+
+## D021 — Require rolling purged out-of-sample evidence
+
+**Status:** Accepted  
+**Decision:** Validation uses multiple anchored chronological folds with an embargo no shorter than the trade horizon, per-fold results, combined out-of-sample metrics, and deterministic confidence intervals.  
+**Why:** One 70/30 split is unstable and can leak overlapping outcome horizons.  
+**Consequence:** Cautious-live readiness requires at least 100 independent out-of-sample trades across 20 sessions and three folds by default; paper trading remains available below that bar.
+
+## D022 — Do not label heuristic score confidence as probability
+
+**Status:** Accepted  
+**Decision:** `probability` remains null until a separately evaluated chronological calibration model has sufficient independent data. Score-derived confidence is labeled `heuristic_score_confidence`.  
+**Why:** A weighted score is not a calibrated event likelihood.  
+**Consequence:** API/dashboard language must retain the distinction and store the probability source/calibration version.
+
+## D023 — Fail live routing closed on strategy-config drift
+
+**Status:** Accepted  
+**Decision:** Strategy/config lineage is recorded on decision and execution artifacts. Mixed hashes are reported rather than silently combined; live routing blocks when the active registered version has config drift.  
+**Why:** Evidence from materially different policies is not interchangeable.  
+**Consequence:** Paper mode can continue with a warning. Operators must register/activate the next version after reviewing `.env.example`; the machine-specific `.env` is never overwritten.

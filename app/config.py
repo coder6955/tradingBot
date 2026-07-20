@@ -20,9 +20,9 @@ class Settings:
     app_name: str = "AI Option Trader"
     app_environment: str = os.getenv("APP_ENV", "development")
     strategy_name: str = os.getenv("STRATEGY_NAME", "banknifty_option_buying")
-    strategy_version: str = os.getenv("STRATEGY_VERSION", "banknifty_option_buying_v1")
-    strategy_version_note: str = os.getenv("STRATEGY_VERSION_NOTE", "Initial Bank Nifty option-buying strategy version")
-    strategy_change_reason: str = os.getenv("STRATEGY_CHANGE_REASON", "Initial version or manual strategy version registration")
+    strategy_version: str = os.getenv("STRATEGY_VERSION", "banknifty_option_buying_v2")
+    strategy_version_note: str = os.getenv("STRATEGY_VERSION_NOTE", "Canonical market-data, replay, latency, and validation architecture")
+    strategy_change_reason: str = os.getenv("STRATEGY_CHANGE_REASON", "Accuracy, timestamp provenance, fast-path, and validation hardening")
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
     python_version: str = "3.12"
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./app.db")
@@ -106,6 +106,14 @@ class Settings:
     backtest_slippage_pct: float = float(os.getenv("BACKTEST_SLIPPAGE_PCT", "1.0"))
     backtest_charges_pct: float = float(os.getenv("BACKTEST_CHARGES_PCT", "0.20"))
     backtest_walk_forward_train_pct: float = float(os.getenv("BACKTEST_WALK_FORWARD_TRAIN_PCT", "70.0"))
+    walk_forward_folds: int = int(os.getenv("WALK_FORWARD_FOLDS", "5"))
+    walk_forward_embargo_candles: int = int(os.getenv("WALK_FORWARD_EMBARGO_CANDLES", "12"))
+    walk_forward_min_train_candles: int = int(os.getenv("WALK_FORWARD_MIN_TRAIN_CANDLES", "120"))
+    walk_forward_min_validation_candles: int = int(os.getenv("WALK_FORWARD_MIN_VALIDATION_CANDLES", "60"))
+    readiness_min_oos_trades: int = int(os.getenv("READINESS_MIN_OOS_TRADES", "100"))
+    readiness_min_oos_sessions: int = int(os.getenv("READINESS_MIN_OOS_SESSIONS", "20"))
+    readiness_min_validation_folds: int = int(os.getenv("READINESS_MIN_VALIDATION_FOLDS", "3"))
+    probability_calibration_min_samples: int = int(os.getenv("PROBABILITY_CALIBRATION_MIN_SAMPLES", "200"))
     enable_execution_realism: bool = os.getenv("ENABLE_EXECUTION_REALISM", "true").lower() == "true"
     realism_entry_buy_slippage_pct: float = float(os.getenv("REALISM_ENTRY_BUY_SLIPPAGE_PCT", "0.30"))
     realism_exit_target_slippage_pct: float = float(os.getenv("REALISM_EXIT_TARGET_SLIPPAGE_PCT", "0.35"))
@@ -131,6 +139,8 @@ class Settings:
     min_strategy_profit_factor: float = float(os.getenv("MIN_STRATEGY_PROFIT_FACTOR", "1.15"))
     min_strategy_win_rate_pct: float = float(os.getenv("MIN_STRATEGY_WIN_RATE_PCT", "35.0"))
     strategy_edge_cache_seconds: int = int(os.getenv("STRATEGY_EDGE_CACHE_SECONDS", "1800"))
+    time_bucket_cache_ttl_seconds: int = int(os.getenv("TIME_BUCKET_CACHE_TTL_SECONDS", "86400"))
+    volatility_history_cache_ttl_seconds: int = int(os.getenv("VOLATILITY_HISTORY_CACHE_TTL_SECONDS", "60"))
     enable_day_type_filter: bool = os.getenv("ENABLE_DAY_TYPE_FILTER", "true").lower() == "true"
     min_day_type_score: int = int(os.getenv("MIN_DAY_TYPE_SCORE", "55"))
     opening_range_minutes: int = int(os.getenv("OPENING_RANGE_MINUTES", "30"))
@@ -179,6 +189,8 @@ class Settings:
     rejected_outcome_batch_limit: int = int(os.getenv("REJECTED_OUTCOME_BATCH_LIMIT", "100"))
     rejected_outcome_max_batches: int = int(os.getenv("REJECTED_OUTCOME_MAX_BATCHES", "20"))
     rejected_outcome_batch_delay_seconds: float = float(os.getenv("REJECTED_OUTCOME_BATCH_DELAY_SECONDS", "0.5"))
+    rejected_outcome_horizon_minutes: int = int(os.getenv("REJECTED_OUTCOME_HORIZON_MINUTES", "90"))
+    setup_episode_window_seconds: int = int(os.getenv("SETUP_EPISODE_WINDOW_SECONDS", "60"))
     automation_exhaust_rejected_outcomes_after_close: bool = os.getenv("AUTOMATION_EXHAUST_REJECTED_OUTCOMES_AFTER_CLOSE", "true").lower() == "true"
     enable_targeted_option_candle_backfill: bool = os.getenv("ENABLE_TARGETED_OPTION_CANDLE_BACKFILL", "true").lower() == "true"
     targeted_option_candle_backfill_timeframes: str = os.getenv("TARGETED_OPTION_CANDLE_BACKFILL_TIMEFRAMES", "1minute,5minute")
@@ -310,6 +322,15 @@ class Settings:
     fast_rally_window_seconds: float = float(os.getenv("FAST_RALLY_WINDOW_SECONDS", "5.0"))
     fast_rally_trigger_pct: float = float(os.getenv("FAST_RALLY_TRIGGER_PCT", "0.08"))
     fast_rally_rescan_cooldown_seconds: float = float(os.getenv("FAST_RALLY_RESCAN_COOLDOWN_SECONDS", "2.0"))
+    fast_scan_context_max_age_seconds: float = float(os.getenv("FAST_SCAN_CONTEXT_MAX_AGE_SECONDS", "90.0"))
+    enable_underlying_candle_pipeline: bool = os.getenv("ENABLE_UNDERLYING_CANDLE_PIPELINE", "true").lower() == "true"
+    underlying_candle_symbol: str = os.getenv("UNDERLYING_CANDLE_SYMBOL", "BANKNIFTY")
+    enable_raw_tick_capture: bool = os.getenv("ENABLE_RAW_TICK_CAPTURE", "true").lower() == "true"
+    raw_tick_queue_size: int = int(os.getenv("RAW_TICK_QUEUE_SIZE", "10000"))
+    raw_tick_batch_size: int = int(os.getenv("RAW_TICK_BATCH_SIZE", "250"))
+    raw_tick_retention_days: int = int(os.getenv("RAW_TICK_RETENTION_DAYS", "10"))
+    raw_tick_cleanup_interval_seconds: int = int(os.getenv("RAW_TICK_CLEANUP_INTERVAL_SECONDS", "3600"))
+    latency_sample_limit: int = int(os.getenv("LATENCY_SAMPLE_LIMIT", "5000"))
     live_exit_max_retry_count: int = int(os.getenv("LIVE_EXIT_MAX_RETRY_COUNT", "2"))
     live_reconciliation_blocks_automation: bool = os.getenv("LIVE_RECONCILIATION_BLOCKS_AUTOMATION", "true").lower() == "true"
     enable_underlying_invalidation_exit: bool = os.getenv("ENABLE_UNDERLYING_INVALIDATION_EXIT", "true").lower() == "true"

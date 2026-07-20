@@ -7,13 +7,15 @@ from typing import Any, Callable
 
 from app.config import settings
 from app.services.kite_websocket_price_feed import WebSocketTick
+from app.services.strategy_lineage_service import current_strategy_lineage
 
 
 class BankNiftyFastRallyService:
     """Turn Bank Nifty websocket acceleration into a lightweight rescan request."""
 
-    def __init__(self, callback: Callable[[dict[str, Any]], Any] | None = None) -> None:
+    def __init__(self, callback: Callable[[dict[str, Any]], Any] | None = None, *, latency_metrics: Any | None = None) -> None:
         self.callback = callback
+        self.latency_metrics = latency_metrics
         self.underlying_token: int | None = None
         self._ticks: deque[tuple[datetime, float]] = deque(maxlen=512)
         self._lock = RLock()
@@ -54,11 +56,21 @@ class BankNiftyFastRallyService:
                 "move_pct": round(move_pct, 4),
                 "window_seconds": window_seconds,
                 "timestamp": now.isoformat(sep=" "),
+                "exchange_timestamp": tick.timestamp.isoformat(sep=" "),
+                "receive_timestamp": (tick.receive_timestamp or now).isoformat(sep=" "),
+                "timestamp_source": tick.timestamp_source,
+                **current_strategy_lineage(),
             }
             self.last_event = event
             self.trigger_count += 1
         if self.callback is not None:
             self.callback(dict(event))
+        if self.latency_metrics is not None:
+            self.latency_metrics.record_between(
+                "local_receipt_to_fast_rally_detection",
+                tick.receive_timestamp,
+                detail={"direction": direction, "move_pct": event["move_pct"]},
+            )
         return event
 
     def status(self) -> dict[str, Any]:

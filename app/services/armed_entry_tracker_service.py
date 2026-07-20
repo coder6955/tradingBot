@@ -45,7 +45,7 @@ class ArmedEntrySetup:
     quantity: int
     lot_size: int
     score: int
-    probability: float
+    probability: float | None
     confidence: float
     max_entry_chase_pct: float
     max_premium_move_from_base_pct: float
@@ -100,6 +100,7 @@ class ArmedEntryTrackerService:
         risk_management_service: RiskManagementService | None = None,
         market_session_provider: Callable[[], str] | None = None,
         clock: Callable[[], datetime] | None = None,
+        latency_metrics: Any | None = None,
     ) -> None:
         self.order_service_factory = order_service_factory
         self.websocket_price_feed = websocket_price_feed
@@ -107,6 +108,7 @@ class ArmedEntryTrackerService:
         self.risk_management_service = risk_management_service or RiskManagementService()
         self.market_session_provider = market_session_provider
         self.clock = clock or ist_now_naive
+        self.latency_metrics = latency_metrics
         self._setups: dict[str, ArmedEntrySetup] = {}
         self._setup_id_by_key: dict[str, str] = {}
         self._lock = RLock()
@@ -124,7 +126,7 @@ class ArmedEntryTrackerService:
         prices: dict[str, float],
         entry_timing: dict[str, Any],
         score: int,
-        probability: float,
+        probability: float | None,
         confidence: float,
         quantity: int,
         factor_scores: dict[str, Any],
@@ -174,7 +176,7 @@ class ArmedEntryTrackerService:
                 quantity=int(quantity or contract.lot_size or 0),
                 lot_size=int(contract.lot_size or quantity or 0),
                 score=int(score or 0),
-                probability=float(probability or 0.0),
+                probability=float(probability) if probability is not None else None,
                 confidence=float(confidence or 0.0),
                 max_entry_chase_pct=settings.max_entry_chase_pct,
                 max_premium_move_from_base_pct=settings.max_premium_move_from_base_pct,
@@ -281,6 +283,16 @@ class ArmedEntryTrackerService:
                 self.last_reason = setup.latest_reason
             return {**self._to_dict(setup), "tick_quality": tick_quality}
 
+        confirmed_at = self.clock().replace(tzinfo=None)
+        if self.latency_metrics is not None:
+            trigger_time = tick.timestamp if tick.timestamp_source in {"exchange_timestamp", "last_trade_time"} else tick.receive_timestamp
+            self.latency_metrics.record_between(
+                "trigger_timestamp_to_confirmation",
+                trigger_time,
+                confirmed_at,
+                detail={"setup_id": setup.setup_id, "timestamp_source": tick.timestamp_source},
+            )
+
         session = self._market_session()
         if session != "REGULAR_MARKET":
             return self._mark_rejected(setup.setup_id, "CANCELLED", ["event_entry_hard_gate_failed", "market_closed"])
@@ -303,6 +315,7 @@ class ArmedEntryTrackerService:
             return self._mark_rejected(setup.setup_id, "CANCELLED", ["event_entry_hard_gate_failed", *[str(reason) for reason in risk.get("reasons", [])]])
 
         if bool(getattr(self.websocket_price_feed, "running", False)):
+            queued_at = self.clock().replace(tzinfo=None)
             with self._lock:
                 setup.latest_state = "ORDER_PENDING"
                 setup.latest_reason = "event_entry_queued_for_execution"
@@ -312,9 +325,12 @@ class ArmedEntryTrackerService:
                 executable_price=executable,
                 tick=tick,
                 spread_pct=spread_pct,
+                queued_at=queued_at,
             )
+            if self.latency_metrics is not None:
+                self.latency_metrics.record_between("confirmation_to_execution_queued", confirmed_at, queued_at, detail={"setup_id": setup.setup_id})
             return {**self._to_dict(setup), "execution_queued": True}
-        return self._enter_paper(setup.setup_id, executable_price=executable, tick=tick, spread_pct=spread_pct)
+        return self._enter_paper(setup.setup_id, executable_price=executable, tick=tick, spread_pct=spread_pct, queued_at=confirmed_at)
 
     def cancel(self, setup_id: str, reason: str = "cancelled") -> dict[str, Any]:
         return self._mark_rejected(setup_id, "CANCELLED", [reason])
@@ -383,7 +399,17 @@ class ArmedEntryTrackerService:
         for setup_id in expired:
             self._mark_rejected(setup_id, "EXPIRED", ["armed_setup_expired"])
 
-    def _enter_paper(self, setup_id: str, *, executable_price: float, tick: WebSocketTick, spread_pct: float) -> dict[str, Any]:
+    def _enter_paper(
+        self,
+        setup_id: str,
+        *,
+        executable_price: float,
+        tick: WebSocketTick,
+        spread_pct: float,
+        queued_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        if self.latency_metrics is not None:
+            self.latency_metrics.record_between("armed_execution_queue_wait", queued_at, detail={"setup_id": setup_id})
         with self._lock:
             setup = self._setups.get(setup_id)
             if setup is None or setup.latest_state in self.TERMINAL_STATES:
@@ -659,6 +685,11 @@ class ArmedEntryTrackerService:
         subscribe = getattr(self.websocket_price_feed, "subscribe", None)
         if not callable(subscribe):
             return {"subscribed": [], "reason": "websocket_subscribe_unavailable"}
+        register_symbol = getattr(self.websocket_price_feed, "register_token_symbol", None)
+        if callable(register_symbol):
+            setup = self._setups.get(setup_id)
+            if setup is not None:
+                register_symbol(int(token), setup.tradingsymbol)
         try:
             try:
                 return dict(subscribe({int(token)}, owner=f"armed:{setup_id}", mode="full"))

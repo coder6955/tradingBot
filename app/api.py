@@ -37,6 +37,11 @@ from app.services.armed_entry_tracker_service import ArmedEntryTrackerService
 from app.services.banknifty_option_prewarm_service import BankNiftyOptionPrewarmService
 from app.services.banknifty_fast_rally_service import BankNiftyFastRallyService
 from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed
+from app.services.latency_metrics_service import LatencyMetricsService
+from app.services.raw_tick_capture_service import RawTickCaptureService
+from app.services.underlying_candle_service import UnderlyingCandleService
+from app.services.volatility_edge_service import VolatilityEdgeService
+from app.services.fast_scan_context_service import FastScanContextService
 from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.market_data_runtime_service import MarketDataRuntimeService
 from app.services.market_session_service import MarketSessionService
@@ -81,7 +86,7 @@ Recommended sequence:
 9. Study failures: `POST /opportunities/evaluate-open`, `GET /opportunities/failure-analysis`
 10. Live orders only after validation: set `LIVE_TRADING_MODE=true`, `PAPER_TRADING_MODE=false`, `AUTOMATION_PLACE_ORDERS=true`, and `AUTOMATION_CONFIRM_LIVE=true`
 
-Safety note: signals are probability-ranked trade setups, not guaranteed-profit trades.
+Safety note: signals are score-ranked trade setups; probability remains null until calibrated out-of-sample evidence is sufficient.
 """
 
 logger = logging.getLogger(__name__)
@@ -209,7 +214,19 @@ backtest_service = BacktestService()
 option_history_repository = OptionHistoryRepository()
 shared_kite_feed = KiteFeed() if settings.use_kite_market_data else None
 market_session_service = MarketSessionService()
-kite_websocket_price_feed = KiteWebSocketPriceFeed(market_session_service=market_session_service)
+latency_metrics_service = LatencyMetricsService()
+raw_tick_capture_service = RawTickCaptureService()
+underlying_candle_service = UnderlyingCandleService(market_session_service=market_session_service)
+kite_websocket_price_feed = KiteWebSocketPriceFeed(
+    market_session_service=market_session_service,
+    latency_metrics=latency_metrics_service,
+    underlying_tick_handler=underlying_candle_service.on_tick,
+    raw_tick_handler=lambda tick, context: raw_tick_capture_service.capture(
+        tick,
+        symbol=str(context.get("symbol") or "") or None,
+        owners=context.get("owners") or [],
+    ),
+)
 active_trade_price_feed = ActiveTradePriceFeed(kite_websocket_price_feed)
 banknifty_option_prewarm_service = BankNiftyOptionPrewarmService(kite_websocket_price_feed)
 shared_trade_setup_service = TradeSetupService()
@@ -224,6 +241,8 @@ strategy_edge_service = StrategyEdgeService(backtest_service=backtest_service, r
 day_type_service = DayTypeService()
 option_premium_confirmation_service = OptionPremiumConfirmationService()
 time_bucket_edge_service = TimeBucketEdgeService(backtest_service=backtest_service)
+volatility_edge_service = VolatilityEdgeService()
+fast_scan_context_service = FastScanContextService()
 outcome_learning_service = OutcomeLearningService()
 opportunity_analytics_service = OpportunityAnalyticsService()
 execution_analytics_service = ExecutionAnalyticsService()
@@ -243,6 +262,7 @@ after_market_research_service = AfterMarketResearchService(
     opportunity_analytics_service=opportunity_analytics_service,
     execution_analytics_service=execution_analytics_service,
     professional_readiness_service=professional_readiness_service,
+    time_bucket_edge_service=time_bucket_edge_service,
     strategy_edge_service=strategy_edge_service,
     market_session_service=market_session_service,
     job_repository=RuntimeJobRepository(),
@@ -305,6 +325,10 @@ def get_scanner_service() -> ScannerService:
         rejected_opportunity_repository=rejected_opportunity_repository,
         banknifty_option_prewarm_service=banknifty_option_prewarm_service,
         armed_entry_tracker=armed_entry_tracker_service,
+        time_bucket_edge_service=time_bucket_edge_service,
+        volatility_edge_service=volatility_edge_service,
+        outcome_learning_service=outcome_learning_service,
+        fast_scan_context_service=fast_scan_context_service,
     )
 
 
@@ -315,9 +339,26 @@ def get_order_service() -> OrderService:
         trade_repository=trade_repository,
         risk_management_service=risk_management_service,
         active_price_feed=active_trade_price_feed,
-        live_safety_checker=broker_sync_service.live_block_status,
+        live_safety_checker=_combined_live_safety_status,
         market_data_coordinator=market_data_coordinator,
+        latency_metrics=latency_metrics_service,
     )
+
+
+def _combined_live_safety_status() -> dict[str, Any]:
+    broker = broker_sync_service.live_block_status()
+    if broker.get("blocked"):
+        return {**broker, "source": "broker_reconciliation"}
+    strategy = strategy_version_registry.current_version()
+    version = strategy.get("version", {}) if isinstance(strategy, dict) else {}
+    if bool(version.get("config_drift_detected")):
+        return {
+            "blocked": True,
+            "reason": "strategy_config_drift_requires_new_strategy_version",
+            "source": "strategy_lineage",
+            "strategy": version,
+        }
+    return {"blocked": False, "source": "combined", "broker": broker, "strategy": version}
 
 
 armed_entry_tracker_service = ArmedEntryTrackerService(
@@ -326,6 +367,7 @@ armed_entry_tracker_service = ArmedEntryTrackerService(
     rejected_opportunity_repository=rejected_opportunity_repository,
     risk_management_service=risk_management_service,
     market_session_provider=kite_websocket_price_feed.market_session,
+    latency_metrics=latency_metrics_service,
 )
 kite_websocket_price_feed.tick_handler = armed_entry_tracker_service.on_tick
 kite_websocket_price_feed.gap_handler = armed_entry_tracker_service.cancel_for_data_gap
@@ -337,8 +379,10 @@ auto_trader_service = AutoTraderService(
     opportunity_repository=opportunity_repository,
     risk_management_service=risk_management_service,
     notification_service=notification_service,
+    latency_metrics=latency_metrics_service,
+    fast_scan_context_service=fast_scan_context_service,
 )
-banknifty_fast_rally_service = BankNiftyFastRallyService(auto_trader_service.request_fast_rescan)
+banknifty_fast_rally_service = BankNiftyFastRallyService(auto_trader_service.request_fast_rescan, latency_metrics=latency_metrics_service)
 
 
 def _dispatch_strategy_tick(tick: object) -> None:
@@ -385,6 +429,8 @@ automation_supervisor_service = AutomationSupervisorService(
 
 @app.on_event("startup")
 async def startup_automation() -> None:
+    raw_tick_capture_service.start()
+    underlying_candle_service.start()
     threading.Thread(target=_run_startup_maintenance, name="startup-maintenance", daemon=True).start()
     threading.Thread(target=_run_startup_broker_sync, name="startup-broker-sync", daemon=True).start()
     if settings.automation_enabled:
@@ -400,6 +446,10 @@ def _run_startup_maintenance() -> None:
         kite_websocket_price_feed.cleanup_old_persisted_candles()
     except Exception:
         logger.exception("startup websocket candle cleanup failed")
+    try:
+        raw_tick_capture_service.cleanup_retention()
+    except Exception:
+        logger.exception("startup raw tick retention cleanup failed")
     if settings.enable_kite_websocket:
         try:
             application_context.market_data_runtime_service.start()
@@ -416,6 +466,8 @@ def _run_startup_maintenance() -> None:
             underlying_token = int(banknifty.get("instrument_token")) if banknifty and banknifty.get("instrument_token") else None
             if underlying_token:
                 banknifty_fast_rally_service.set_underlying_token(underlying_token)
+                underlying_candle_service.set_underlying_token(underlying_token)
+                kite_websocket_price_feed.register_token_symbol(underlying_token, "BANKNIFTY")
                 kite_websocket_price_feed.subscribe({underlying_token}, owner="core_market", mode="quote")
         except Exception:
             logger.exception("startup websocket start failed")
@@ -446,6 +498,8 @@ def _run_startup_broker_sync() -> None:
 @app.on_event("shutdown")
 async def shutdown_background_services() -> None:
     application_context.market_data_runtime_service.stop()
+    underlying_candle_service.stop()
+    raw_tick_capture_service.stop()
     await automation_supervisor_service.stop()
     await option_snapshot_collector_service.stop()
     await auto_trader_service.stop()
@@ -455,6 +509,22 @@ async def shutdown_background_services() -> None:
 @app.get("/health", tags=["01 System"], summary="Check API health")
 async def health() -> dict[str, str]:
     return {"status": "ok", "service": settings.app_name}
+
+
+@app.get("/market-data/pipeline-status", tags=["09 Market Data"], summary="Inspect canonical candles, raw ticks, queues, and latency")
+def market_data_pipeline_status() -> dict[str, object]:
+    return {
+        "canonical_underlying_candles": underlying_candle_service.status(),
+        "raw_tick_capture": raw_tick_capture_service.status(),
+        "latency": latency_metrics_service.report(),
+        "fast_scan_context": fast_scan_context_service.status(),
+        "websocket": kite_websocket_price_feed.status(),
+    }
+
+
+@app.get("/runtime/latency", tags=["01 System"], summary="Read end-to-end trading-path latency percentiles")
+def runtime_latency() -> dict[str, object]:
+    return latency_metrics_service.report()
 
 
 @app.get("/db/health", tags=["01 System"], summary="Check database connectivity")
@@ -1256,6 +1326,8 @@ def _decision_event_from_trade(record) -> dict[str, object]:
         "symbol": record.symbol,
         "tradingsymbol": record.tradingsymbol,
         "mode": record.mode,
+        "strategy_version": getattr(record, "strategy_version", None),
+        "config_hash": getattr(record, "config_hash", None),
         "status": record.status,
         "outcome": record.outcome,
         "entry_price": record.entry_price,
@@ -1337,6 +1409,11 @@ def opportunity_record_to_dict(record) -> dict[str, object]:
         "lot_size": record.lot_size,
         "score": record.score,
         "probability": record.probability,
+        "heuristic_score_confidence": getattr(record, "heuristic_score_confidence", None),
+        "probability_source": getattr(record, "probability_source", None),
+        "calibration_version": getattr(record, "calibration_version", None),
+        "strategy_version": getattr(record, "strategy_version", None),
+        "config_hash": getattr(record, "config_hash", None),
         "risk_reward": record.risk_reward,
         "status": record.status,
         "outcome": record.outcome,
@@ -2789,7 +2866,7 @@ def _build_scanner_opportunities_payload(side: str, symbols: str | None, limit: 
         "count": len(recommendations),
         "saved_ids": saved_ids,
         "opportunities": [asdict(signal) for signal in recommendations[:limit]],
-        "disclaimer": "Signals are probability-ranked trade setups with risk checks, not guaranteed profits.",
+        "disclaimer": "Signals are score-ranked; uncalibrated heuristic confidence is not a probability and trades are not guaranteed.",
     }
 
 

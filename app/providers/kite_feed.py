@@ -9,7 +9,7 @@ from app.config import settings
 from app.providers.token_store import load_access_token
 from app.services.database import Candle, get_session
 from app.services.indicator_service import compute_ema, compute_macd, compute_rsi
-from app.services.time_utils import ist_now_naive
+from app.services.time_utils import ist_now_naive, to_ist_naive
 
 try:
     from kiteconnect import KiteConnect
@@ -36,7 +36,10 @@ class KiteFeed:
     def __init__(self) -> None:
         self._instrument_cache: Dict[str, List[Dict[str, Any]]] = {}
         self._instrument_cache_at: Dict[str, datetime] = {}
+        # Analysis snapshots are candle-derived. Broad context quotes must never
+        # populate this cache or they can masquerade as calculated indicators.
         self._snapshot_cache: Dict[str, tuple[datetime, Dict[str, Any]]] = {}
+        self._context_snapshot_cache: Dict[str, tuple[datetime, Dict[str, Any]]] = {}
         self._quote_cache: Dict[str, tuple[datetime, Dict[str, Any]]] = {}
         self._call_counts: Dict[str, int] = {"quote": 0, "historical_data": 0, "instruments": 0, "snapshot_cache_hits": 0, "quote_cache_hits": 0}
         if KiteConnect is None:
@@ -92,13 +95,17 @@ class KiteFeed:
             day_high = self._float(ohlc.get("high"))
             day_low = self._float(ohlc.get("low"))
             volume = self._float(payload.get("volume"))
+            quote_timestamp, timestamp_source = self._exchange_quote_timestamp(payload)
             if price is not None and price > 0:
                 snapshots[symbol].update(
                     {
                         "is_real_data": True,
                         "price": price,
                         "instrument_token": self._safe_int(payload.get("instrument_token"), None),  # type: ignore
-                        "quote_timestamp": now.isoformat(sep=" "),
+                        "quote_timestamp": quote_timestamp.isoformat(sep=" ") if quote_timestamp else None,
+                        "receive_timestamp": now.isoformat(sep=" "),
+                        "quote_timestamp_source": timestamp_source,
+                        "context_quote_only": True,
                         "previous_day_close": previous_close or 0.0,
                         "day_open": day_open or 0.0,
                         "day_high": day_high or price,
@@ -107,7 +114,7 @@ class KiteFeed:
                         "volume_confirmed": bool(volume and volume > 0),
                     }
                 )
-                self._snapshot_cache[symbol] = (now, snapshots[symbol])
+                self._context_snapshot_cache[symbol] = (now, snapshots[symbol])
             else:
                 snapshots[symbol] = self._stored_snapshot(symbol, snapshots[symbol])
         return snapshots
@@ -132,22 +139,32 @@ class KiteFeed:
             q = self.client.quote([instrument])  # type: ignore
             # q structure may vary; try to extract last_price
             last_price = None
+            quote_payload: dict[str, Any] = {}
             for key in (instrument, "last_price"):
                 if isinstance(q, dict) and key in q and isinstance(q[key], dict) and "last_price" in q[key]:
                     last_price = q[key]["last_price"]
+                    quote_payload = dict(q[key])
                     break
             if last_price is None and isinstance(q, dict) and "last_price" in q:
                 last_price = q["last_price"]
+                quote_payload = dict(q)
             if last_price is not None:
                 snapshot["price"] = float(last_price)
                 snapshot["is_real_data"] = snapshot["price"] > 0
-                snapshot["quote_timestamp"] = started_at.isoformat(sep=" ")
+                exchange_timestamp, timestamp_source = self._exchange_quote_timestamp(quote_payload)
+                snapshot["quote_timestamp"] = exchange_timestamp.isoformat(sep=" ") if exchange_timestamp else None
+                snapshot["receive_timestamp"] = started_at.isoformat(sep=" ")
+                snapshot["quote_timestamp_source"] = timestamp_source
+                snapshot["instrument_token"] = self._safe_int(quote_payload.get("instrument_token"), None)  # type: ignore
         except Exception:
             # ignore network / key errors
             pass
 
         stored_snapshot = self._stored_snapshot(symbol, snapshot)
-        if stored_snapshot.get("source") == "stored_candles":
+        if stored_snapshot.get("analysis_ready"):
+            self._snapshot_cache[symbol.upper()] = (ist_now_naive(), stored_snapshot)
+            return stored_snapshot
+        if symbol.upper() == "BANKNIFTY":
             self._snapshot_cache[symbol.upper()] = (ist_now_naive(), stored_snapshot)
             return stored_snapshot
         if not settings.kite_snapshot_historical_fallback_enabled:
@@ -214,6 +231,9 @@ class KiteFeed:
                     snapshot["adx"] = self._simple_trend_strength(closes)
                     snapshot["trend_bullish"] = closes[-1] >= ema_21 and ema_9 >= ema_21
                     snapshot["market_context"] = "strong" if snapshot["adx"] >= 20 and snapshot["volume_confirmed"] else "neutral"
+                    snapshot["indicators_available"] = True
+                    snapshot["analysis_ready"] = bool(snapshot.get("is_real_data"))
+                    snapshot["data_quality_reasons"] = [] if snapshot["analysis_ready"] else ["fresh_ltp_unavailable"]
                     levels = self._daily_levels(snapshot["candles"])
                     snapshot.update(levels)
         except Exception:
@@ -267,7 +287,10 @@ class KiteFeed:
             for key, value in fetched.items():
                 payload = dict(value) if isinstance(value, dict) else value
                 if isinstance(payload, dict):
-                    payload.setdefault("quote_timestamp", stamp.isoformat(sep=" "))
+                    exchange_timestamp, timestamp_source = self._exchange_quote_timestamp(payload)
+                    payload["quote_timestamp"] = exchange_timestamp.isoformat(sep=" ") if exchange_timestamp else None
+                    payload["receive_timestamp"] = stamp.isoformat(sep=" ")
+                    payload["quote_timestamp_source"] = timestamp_source
                 self._quote_cache[key] = (stamp, payload)
                 result[key] = payload
             return result
@@ -297,21 +320,21 @@ class KiteFeed:
             "source": "kite",
             "is_real_data": False,
             "price": 0.0,
-            "rsi": 50,
-            "adx": 15,
-            "macd_positive": False,
-            "ema_alignment": False,
-            "vwap_above_price": False,
-            "volume_confirmed": False,
-            "trend_bullish": False,
-            "market_context": "neutral",
+            "rsi": None,
+            "adx": None,
+            "macd_positive": None,
+            "ema_alignment": None,
+            "vwap_above_price": None,
+            "volume_confirmed": None,
+            "trend_bullish": None,
+            "market_context": "unavailable",
             "instrument_token": None,
             "candles": [],
-            "vwap": 0.0,
-            "ema_9": 0.0,
-            "ema_21": 0.0,
-            "macd": 0.0,
-            "macd_signal": 0.0,
+            "vwap": None,
+            "ema_9": None,
+            "ema_21": None,
+            "macd": None,
+            "macd_signal": None,
             "previous_day_high": 0.0,
             "previous_day_low": 0.0,
             "previous_day_close": 0.0,
@@ -319,7 +342,13 @@ class KiteFeed:
             "day_high": 0.0,
             "day_low": 0.0,
             "quote_timestamp": None,
+            "receive_timestamp": None,
+            "quote_timestamp_source": "unavailable",
             "candle_timestamp": None,
+            "candle_confirmation_close": None,
+            "indicators_available": False,
+            "analysis_ready": False,
+            "data_quality_reasons": ["canonical_current_session_candles_unavailable", "fresh_ltp_unavailable"],
         }
 
     def _float(self, value: Any) -> float | None:
@@ -380,7 +409,10 @@ class KiteFeed:
     def _stored_snapshot(self, symbol: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
         candles = self._recent_stored_candles(symbol)
         if len(candles) < 26:
-            return snapshot
+            reasons = ["insufficient_canonical_current_session_candles"]
+            if not snapshot.get("is_real_data") or float(snapshot.get("price") or 0.0) <= 0:
+                reasons.append("fresh_ltp_unavailable")
+            return {**snapshot, "analysis_ready": False, "indicators_available": False, "data_quality_reasons": reasons, "canonical_candle_count": len(candles)}
 
         closes = [float(c["close"]) for c in candles]
         highs = [float(c["high"]) for c in candles]
@@ -404,11 +436,12 @@ class KiteFeed:
         stored = {
             **snapshot,
             "source": "stored_candles",
-            "is_real_data": True,
-            "price": closes[-1],
+            "is_real_data": bool(snapshot.get("is_real_data")),
+            "price": float(snapshot.get("price") or 0.0),
             "candles": candles,
             "quote_timestamp": snapshot.get("quote_timestamp"),
             "candle_timestamp": candles[-1]["date"] if candles else None,
+            "candle_confirmation_close": closes[-1],
             "rsi": int(rsi),
             "macd": round(macd[-1], 4) if macd else 0.0,
             "macd_signal": round(signal[-1], 4) if signal else 0.0,
@@ -417,21 +450,34 @@ class KiteFeed:
             "ema_21": round(ema_21, 2),
             "ema_alignment": ema_9 > ema_21,
             "vwap": round(vwap, 2),
-            "vwap_above_price": closes[-1] > vwap,
+            "vwap_above_price": float(snapshot.get("price") or 0.0) > vwap,
             "volume_confirmed": volumes[-1] > avg_volume * 1.15 if avg_volume else False,
             "adx": self._simple_trend_strength(closes),
-            "trend_bullish": closes[-1] >= ema_21 and ema_9 >= ema_21,
+            "trend_bullish": float(snapshot.get("price") or 0.0) >= ema_21 and ema_9 >= ema_21,
+            "indicators_available": True,
+            "analysis_ready": bool(snapshot.get("is_real_data")) and float(snapshot.get("price") or 0.0) > 0,
+            "data_quality_reasons": [] if bool(snapshot.get("is_real_data")) and float(snapshot.get("price") or 0.0) > 0 else ["fresh_ltp_unavailable"],
+            "canonical_candle_count": len(candles),
+            "candle_source": "canonical_current_session_completed",
         }
         stored["market_context"] = "strong" if stored["adx"] >= 20 and stored["volume_confirmed"] else "neutral"
         stored.update(self._daily_levels(candles))
         return stored
 
     def _recent_stored_candles(self, symbol: str) -> List[Dict[str, Any]]:
+        now = ist_now_naive()
+        session_start = now.replace(hour=9, minute=15, second=0, microsecond=0)
+        current_bucket = now.replace(minute=(now.minute // 5) * 5, second=0, microsecond=0)
         session = get_session()
         try:
             rows = (
                 session.query(Candle)
-                .filter(Candle.symbol == symbol.upper(), Candle.timeframe == "5minute")
+                .filter(
+                    Candle.symbol == symbol.upper(),
+                    Candle.timeframe == "5minute",
+                    Candle.timestamp >= session_start,
+                    Candle.timestamp < current_bucket,
+                )
                 .order_by(Candle.timestamp.desc())
                 .limit(160)
                 .all()
@@ -444,11 +490,26 @@ class KiteFeed:
                     "low": float(row.low_price),
                     "close": float(row.close_price),
                     "volume": float(row.volume or 0.0),
+                    "timestamp_source": getattr(row, "timestamp_source", None),
+                    "is_generated": bool(getattr(row, "is_generated", 0)),
+                    "data_quality": getattr(row, "data_quality", None),
                 }
                 for row in reversed(rows)
             ]
         finally:
             session.close()
+
+    def _exchange_quote_timestamp(self, payload: Dict[str, Any]) -> tuple[datetime | None, str]:
+        for key in ("exchange_timestamp", "last_trade_time", "timestamp"):
+            value = payload.get(key)
+            if value is None:
+                continue
+            try:
+                parsed = to_ist_naive(value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00")))
+                return parsed, key
+            except (TypeError, ValueError):
+                continue
+        return None, "receive_only"
 
     def _kite_symbol(self, symbol: str) -> str:
         raw_symbol = symbol.split(":", 1)[-1].upper()

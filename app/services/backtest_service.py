@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import datetime
+import math
 import re
+import statistics
 from typing import Any
 
 from app.models import Signal
@@ -746,14 +748,62 @@ class BacktestService:
         direction = (direction or "BOTH").upper()
         horizon = horizon_candles or settings.backtest_horizon_candles
         candles = self._load_candles(symbol=symbol, timeframe=timeframe, limit=limit)
-        if len(candles) < 120:
-            return {"status": "insufficient_data", "symbol": symbol, "candles": len(candles), "minimum_required": 120}
+        min_train = max(60, int(settings.walk_forward_min_train_candles))
+        min_validation = max(20, int(settings.walk_forward_min_validation_candles))
+        embargo = max(int(settings.walk_forward_embargo_candles), int(horizon))
+        requested_folds = max(1, int(settings.walk_forward_folds))
+        minimum = min_train + embargo + min_validation
+        if len(candles) < minimum:
+            return {"status": "insufficient_data", "symbol": symbol, "candles": len(candles), "minimum_required": minimum}
 
-        split = int(len(candles) * (settings.backtest_walk_forward_train_pct / 100))
-        split = min(max(split, 60), len(candles) - 60)
-        train_result = self._run_option_premium_on_candles(symbol=symbol, timeframe=timeframe, direction=direction, horizon=horizon, underlying=candles[:split], decision_mode=decision_mode)
-        test_result = self._run_option_premium_on_candles(symbol=symbol, timeframe=timeframe, direction=direction, horizon=horizon, underlying=candles[split:], decision_mode=decision_mode)
-        passed, reasons = self._validation_passed(test_result.get("summary", {}))
+        available = len(candles) - min_train - embargo
+        fold_count = min(requested_folds, max(1, available // min_validation))
+        validation_size = max(min_validation, available // fold_count)
+        folds: list[dict[str, Any]] = []
+        validation_sessions: set[str] = set()
+        last_train_summary: dict[str, Any] = {}
+        for fold_index in range(fold_count):
+            validation_start = min_train + embargo + (fold_index * validation_size)
+            validation_end = len(candles) if fold_index == fold_count - 1 else min(len(candles), validation_start + validation_size)
+            if validation_end - validation_start < min_validation:
+                continue
+            train_end = validation_start - embargo
+            train_slice = candles[:train_end]
+            validation_slice = candles[validation_start:validation_end]
+            train_result = self._run_option_premium_on_candles(
+                symbol=symbol, timeframe=timeframe, direction=direction, horizon=horizon, underlying=train_slice, decision_mode=decision_mode
+            )
+            validation_result = self._run_option_premium_on_candles(
+                symbol=symbol, timeframe=timeframe, direction=direction, horizon=horizon, underlying=validation_slice, decision_mode=decision_mode
+            )
+            last_train_summary = train_result.get("summary", {})
+            fold_passed, fold_reasons = self._validation_passed(validation_result.get("summary", {}))
+            validation_sessions.update(
+                candle.timestamp.date().isoformat() for candle in validation_slice if getattr(candle, "timestamp", None) is not None
+            )
+            folds.append(
+                {
+                    "fold": fold_index + 1,
+                    "train_candles": len(train_slice),
+                    "embargo_candles": embargo,
+                    "validation_candles": len(validation_slice),
+                    "train_end": train_slice[-1].timestamp.isoformat(sep=" ") if train_slice else None,
+                    "validation_start": validation_slice[0].timestamp.isoformat(sep=" ") if validation_slice else None,
+                    "validation_end": validation_slice[-1].timestamp.isoformat(sep=" ") if validation_slice else None,
+                    "summary": validation_result.get("summary", {}),
+                    "segments": validation_result.get("segments", {}),
+                    "passed": fold_passed,
+                    "reasons": fold_reasons,
+                }
+            )
+        aggregate = self._aggregate_walk_forward_summaries([fold["summary"] for fold in folds])
+        aggregate["expectancy_confidence_interval_95"] = self._fold_confidence_interval(
+            [float(fold["summary"].get("expectancy_pct") or 0.0) for fold in folds]
+        )
+        passed, reasons = self._validation_passed(aggregate)
+        if len(folds) < settings.readiness_min_validation_folds:
+            passed = False
+            reasons.append(f"requires at least {settings.readiness_min_validation_folds} completed validation folds")
         return {
             "status": "ok",
             "mode": "walk_forward_option",
@@ -761,11 +811,15 @@ class BacktestService:
             "symbol": symbol,
             "timeframe": timeframe,
             "direction": direction,
-            "train_candles": split,
-            "test_candles": len(candles) - split,
-            "train_summary": train_result.get("summary", {}),
-            "test_summary": test_result.get("summary", {}),
-            "summary": test_result.get("summary", {}),
+            "train_candles": folds[-1]["train_candles"] if folds else 0,
+            "test_candles": sum(int(fold["validation_candles"]) for fold in folds),
+            "train_summary": last_train_summary,
+            "test_summary": aggregate,
+            "summary": aggregate,
+            "fold_count": len(folds),
+            "out_of_sample_sessions": len(validation_sessions),
+            "folds": folds,
+            "embargo_candles": embargo,
             "passed": passed,
             "reasons": reasons,
             "thresholds": {
@@ -774,6 +828,38 @@ class BacktestService:
                 "min_profit_factor": settings.min_strategy_profit_factor,
                 "min_win_rate_pct": settings.min_strategy_win_rate_pct,
             },
+        }
+
+    def _aggregate_walk_forward_summaries(self, summaries: list[dict[str, Any]]) -> dict[str, Any]:
+        trades = sum(int(item.get("trades") or 0) for item in summaries)
+        wins = sum(int(item.get("wins") or 0) for item in summaries)
+        losses = sum(int(item.get("losses") or 0) for item in summaries)
+        net = sum(float(item.get("net_pnl_pct") or 0.0) for item in summaries)
+        gross_win = sum(float(item.get("average_win_pct") or 0.0) * int(item.get("wins") or 0) for item in summaries)
+        gross_loss = sum(float(item.get("average_loss_pct") or 0.0) * int(item.get("losses") or 0) for item in summaries)
+        return {
+            "trades": trades,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round((wins / trades) * 100, 2) if trades else 0.0,
+            "average_win_pct": round(gross_win / wins, 3) if wins else 0.0,
+            "average_loss_pct": round(gross_loss / losses, 3) if losses else 0.0,
+            "expectancy_pct": round(net / trades, 3) if trades else 0.0,
+            "net_pnl_pct": round(net, 3),
+            "profit_factor": round(gross_win / gross_loss, 2) if gross_loss else None,
+            "max_drawdown_pct": max((float(item.get("max_drawdown_pct") or 0.0) for item in summaries), default=0.0),
+        }
+
+    def _fold_confidence_interval(self, values: list[float]) -> dict[str, float | int | str | None]:
+        if not values:
+            return {"lower": None, "upper": None, "folds": 0, "method": "normal_fold_mean"}
+        center = statistics.mean(values)
+        margin = 0.0 if len(values) < 2 else 1.96 * statistics.stdev(values) / math.sqrt(len(values))
+        return {
+            "lower": round(center - margin, 4),
+            "upper": round(center + margin, 4),
+            "folds": len(values),
+            "method": "normal_fold_mean",
         }
 
     def run_ablation(

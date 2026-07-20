@@ -97,6 +97,12 @@ class ProfessionalReadinessService:
         backtest_summary = option_backtest.get("summary", {})
         walk_summary = walk_forward.get("summary", {})
         return {
+            "strategy_lineage_consistency": {
+                "passed": not bool(opportunities.get("mixed_lineage")) and not bool(execution.get("mixed_lineage")),
+                "opportunity_mixed_lineage": bool(opportunities.get("mixed_lineage")),
+                "execution_mixed_lineage": bool(execution.get("mixed_lineage")),
+                "message": "Readiness never combines different config hashes silently.",
+            },
             "option_snapshot_sample": {
                 "passed": int(option_coverage.get("snapshots") or 0) >= 500,
                 "value": option_coverage.get("snapshots"),
@@ -129,10 +135,19 @@ class ProfessionalReadinessService:
                 "status": option_backtest.get("status"),
             },
             "walk_forward_passed": {
-                "passed": bool(walk_forward.get("passed")),
+                "passed": bool(walk_forward.get("passed"))
+                and int(walk_forward.get("fold_count") or 0) >= settings.readiness_min_validation_folds
+                and int(walk_summary.get("trades") or 0) >= settings.readiness_min_oos_trades
+                and int(walk_forward.get("out_of_sample_sessions") or 0) >= settings.readiness_min_oos_sessions,
                 "value": walk_summary.get("expectancy_pct"),
                 "status": walk_forward.get("status"),
                 "reasons": walk_forward.get("reasons", []),
+                "fold_count": walk_forward.get("fold_count"),
+                "minimum_folds": settings.readiness_min_validation_folds,
+                "out_of_sample_trades": walk_summary.get("trades"),
+                "minimum_out_of_sample_trades": settings.readiness_min_oos_trades,
+                "out_of_sample_sessions": walk_forward.get("out_of_sample_sessions"),
+                "minimum_out_of_sample_sessions": settings.readiness_min_oos_sessions,
             },
         }
 

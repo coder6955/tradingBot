@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import math
+import time
 from datetime import datetime, timedelta
 from statistics import mean, stdev
 from typing import Any
+from threading import RLock
 
 from app.config import settings
 from app.services.database import Candle, OptionQuoteSnapshot, get_session
@@ -19,6 +21,10 @@ class VolatilityEdgeService:
     """
 
     UNKNOWN_DATA_MISSING = "UNKNOWN_DATA_MISSING"
+
+    def __init__(self) -> None:
+        self._history_cache: dict[tuple[Any, ...], tuple[float, Any]] = {}
+        self._history_cache_lock = RLock()
 
     def evaluate(
         self,
@@ -135,6 +141,10 @@ class VolatilityEdgeService:
         }
 
     def _recent_candles(self, symbol: str, timeframe: str, *, limit: int) -> list[Candle]:
+        key = ("candles", symbol, timeframe, int(limit))
+        cached = self._history_cache_get(key)
+        if cached is not None:
+            return list(cached)
         session = get_session()
         try:
             rows = (
@@ -144,9 +154,26 @@ class VolatilityEdgeService:
                 .limit(limit)
                 .all()
             )
-            return list(reversed(rows))
+            result = list(reversed(rows))
+            self._history_cache_set(key, result)
+            return result
         finally:
             session.close()
+
+    def _history_cache_get(self, key: tuple[Any, ...]) -> Any | None:
+        now = time.monotonic()
+        with self._history_cache_lock:
+            cached = self._history_cache.get(key)
+            if cached is None or cached[0] <= now:
+                if cached is not None:
+                    self._history_cache.pop(key, None)
+                return None
+            return cached[1]
+
+    def _history_cache_set(self, key: tuple[Any, ...], value: Any) -> None:
+        expires = time.monotonic() + max(1.0, float(settings.volatility_history_cache_ttl_seconds))
+        with self._history_cache_lock:
+            self._history_cache[key] = (expires, value)
 
     def _realized_volatility(self, candles: list[Candle]) -> dict[str, Any]:
         closes = [float(candle.close_price) for candle in candles if float(candle.close_price or 0) > 0]

@@ -21,7 +21,7 @@ class Signal:
     target_3: Optional[float] = None
     quantity: int = 0
     lot_size: int = 0
-    probability: float = 0.0
+    probability: Optional[float] = None
     risk_reward: float = 0.0
     setup_type: str = ""
     technical_score: int = 0

@@ -10,7 +10,7 @@ VENV_SITE_PACKAGES = PROJECT_ROOT / ".venv" / "Lib" / "site-packages"
 if VENV_SITE_PACKAGES.exists() and str(VENV_SITE_PACKAGES) not in sys.path:
     sys.path.append(str(VENV_SITE_PACKAGES))
 
-from sqlalchemy import Column, DateTime, Float, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy import BigInteger, Column, DateTime, Float, Integer, String, Text, UniqueConstraint, create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.config import settings
@@ -23,6 +23,7 @@ SessionLocal = None
 
 class Candle(Base):
     __tablename__ = "candles"
+    __table_args__ = (UniqueConstraint("symbol", "timeframe", "timestamp", name="uq_candle_series_timestamp"),)
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String(50), nullable=False, index=True)
@@ -33,6 +34,11 @@ class Candle(Base):
     low_price = Column(Float, nullable=False)
     close_price = Column(Float, nullable=False)
     volume = Column(Float, nullable=False)
+    instrument_token = Column(Integer, nullable=True, index=True)
+    receive_timestamp = Column(DateTime, nullable=True, index=True)
+    timestamp_source = Column(String(40), nullable=True, index=True)
+    is_generated = Column(Integer, nullable=False, default=0, index=True)
+    data_quality = Column(String(50), nullable=True, index=True)
 
 
 class OptionQuoteSnapshot(Base):
@@ -91,7 +97,12 @@ class OpportunityRecord(Base):
     quantity = Column(Integer, nullable=False, default=0)
     lot_size = Column(Integer, nullable=False, default=0)
     score = Column(Integer, nullable=False)
-    probability = Column(Float, nullable=False, default=0.0)
+    probability = Column(Float, nullable=True)
+    heuristic_score_confidence = Column(Float, nullable=True)
+    probability_source = Column(String(50), nullable=False, default="unavailable_insufficient_calibration", index=True)
+    calibration_version = Column(String(100), nullable=True, index=True)
+    strategy_version = Column(String(100), nullable=True, index=True)
+    config_hash = Column(String(64), nullable=True, index=True)
     risk_reward = Column(Float, nullable=False, default=0.0)
     status = Column(String(30), nullable=False, default="open", index=True)
     outcome = Column(String(30), nullable=True, index=True)
@@ -124,6 +135,10 @@ class RejectedOpportunityRecord(Base):
     market_session = Column(String(30), nullable=True, index=True)
     learning_eligible = Column(Integer, nullable=False, default=0, index=True)
     learning_exclusion_reason = Column(String(150), nullable=True)
+    episode_id = Column(Integer, nullable=True, index=True)
+    episode_key = Column(String(64), nullable=True, index=True)
+    strategy_version = Column(String(100), nullable=True, index=True)
+    config_hash = Column(String(64), nullable=True, index=True)
     reasons_json = Column(Text, nullable=False)
     market_state_json = Column(Text, nullable=True)
     option_quality_json = Column(Text, nullable=True)
@@ -137,6 +152,7 @@ class RejectedOpportunityRecord(Base):
     later_outcome_source = Column(String(50), nullable=True, index=True)
     later_outcome_timeframe = Column(String(20), nullable=True, index=True)
     later_outcome_ambiguous = Column(Integer, nullable=False, default=0, index=True)
+    later_outcome_confidence = Column(String(30), nullable=True, index=True)
     later_evaluated_at = Column(DateTime, nullable=True)
     later_notes = Column(Text, nullable=True)
 
@@ -206,6 +222,8 @@ class TradeRecord(Base):
     order_response_json = Column(Text, nullable=True)
     broker_status_json = Column(Text, nullable=True)
     notes = Column(Text, nullable=True)
+    strategy_version = Column(String(100), nullable=True, index=True)
+    config_hash = Column(String(64), nullable=True, index=True)
 
 
 class StrategyValidationRecord(Base):
@@ -224,7 +242,57 @@ class StrategyValidationRecord(Base):
     profit_factor = Column(Float, nullable=True)
     max_drawdown_pct = Column(Float, nullable=False, default=0.0)
     passed = Column(Integer, nullable=False, default=0, index=True)
+    strategy_version = Column(String(100), nullable=True, index=True)
+    config_hash = Column(String(64), nullable=True, index=True)
+    fold_count = Column(Integer, nullable=False, default=0)
+    out_of_sample_sessions = Column(Integer, nullable=False, default=0)
     result_json = Column(Text, nullable=False)
+
+
+class SetupEpisodeRecord(Base):
+    __tablename__ = "setup_episodes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    updated_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    episode_key = Column(String(64), nullable=False, unique=True, index=True)
+    symbol = Column(String(50), nullable=False, index=True)
+    action = Column(String(20), nullable=True, index=True)
+    side = Column(String(10), nullable=False, index=True)
+    tradingsymbol = Column(String(100), nullable=True, index=True)
+    expiry = Column(String(20), nullable=True, index=True)
+    strike = Column(Float, nullable=True)
+    trigger_price = Column(Float, nullable=True)
+    strategy_version = Column(String(100), nullable=False, index=True)
+    config_hash = Column(String(64), nullable=False, index=True)
+    observation_count = Column(Integer, nullable=False, default=1)
+    independent_outcome = Column(String(80), nullable=True, index=True)
+    outcome_source = Column(String(50), nullable=True, index=True)
+    outcome_confidence = Column(String(30), nullable=True, index=True)
+
+
+class RawTickRecord(Base):
+    __tablename__ = "raw_ticks"
+    __table_args__ = (UniqueConstraint("session_date", "sequence", name="uq_raw_tick_session_sequence"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    session_date = Column(String(20), nullable=False, index=True)
+    sequence = Column(BigInteger, nullable=False, index=True)
+    instrument_token = Column(Integer, nullable=False, index=True)
+    symbol = Column(String(100), nullable=False, index=True)
+    last_price = Column(Float, nullable=False)
+    bid = Column(Float, nullable=True)
+    ask = Column(Float, nullable=True)
+    cumulative_volume = Column(Float, nullable=True)
+    exchange_timestamp = Column(DateTime, nullable=True, index=True)
+    receive_timestamp = Column(DateTime, nullable=False, index=True)
+    timestamp_source = Column(String(40), nullable=False, index=True)
+    packet_type = Column(String(40), nullable=False, index=True)
+    owners_json = Column(Text, nullable=True)
+    capture_context = Column(String(40), nullable=False, index=True)
+    strategy_version = Column(String(100), nullable=False, index=True)
+    config_hash = Column(String(64), nullable=False, index=True)
 
 
 class StrategyVersionRecord(Base):
@@ -274,12 +342,34 @@ def init_db(database_url: Optional[str] = None) -> None:
     engine = create_engine(url, future=True, connect_args=connect_args)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     Base.metadata.create_all(bind=engine)
+    _ensure_candle_columns()
     _ensure_opportunity_columns()
     _ensure_trade_columns()
     _ensure_rejected_opportunity_columns()
     _ensure_strategy_validation_columns()
     _ensure_strategy_version_columns()
     _ensure_runtime_job_run_columns()
+    _mark_legacy_rejected_outcomes_low_confidence()
+
+
+def _ensure_candle_columns() -> None:
+    if engine is None:
+        return
+    inspector = inspect(engine)
+    if "candles" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("candles")}
+    required = {
+        "instrument_token": "INTEGER",
+        "receive_timestamp": "DATETIME",
+        "timestamp_source": "VARCHAR(40)",
+        "is_generated": "INTEGER DEFAULT 0",
+        "data_quality": "VARCHAR(50)",
+    }
+    with engine.begin() as connection:
+        for column, column_type in required.items():
+            if column not in existing:
+                connection.execute(text(f"ALTER TABLE candles ADD COLUMN {column} {column_type}"))
 
 
 def _ensure_opportunity_columns() -> None:
@@ -289,10 +379,20 @@ def _ensure_opportunity_columns() -> None:
     if "opportunities" not in inspector.get_table_names():
         return
     columns = {column["name"] for column in inspector.get_columns("opportunities")}
-    if "failure_tags_json" in columns:
-        return
+    required = {
+        "failure_tags_json": "TEXT",
+        "heuristic_score_confidence": "FLOAT",
+        "probability_source": "VARCHAR(50)",
+        "calibration_version": "VARCHAR(100)",
+        "strategy_version": "VARCHAR(100)",
+        "config_hash": "VARCHAR(64)",
+    }
     with engine.begin() as connection:
-        connection.execute(text("ALTER TABLE opportunities ADD COLUMN failure_tags_json TEXT"))
+        for column, column_type in required.items():
+            if column not in columns:
+                connection.execute(text(f"ALTER TABLE opportunities ADD COLUMN {column} {column_type}"))
+        if engine.dialect.name.startswith("mysql"):
+            connection.execute(text("ALTER TABLE opportunities MODIFY COLUMN probability FLOAT NULL"))
 
 
 def _ensure_trade_columns() -> None:
@@ -343,6 +443,8 @@ def _ensure_trade_columns() -> None:
         "time_to_mae": "FLOAT",
         "mfe_recorded_at": "DATETIME",
         "mae_recorded_at": "DATETIME",
+        "strategy_version": "VARCHAR(100)",
+        "config_hash": "VARCHAR(64)",
     }
     with engine.begin() as connection:
         for column, column_type in required.items():
@@ -369,6 +471,11 @@ def _ensure_rejected_opportunity_columns() -> None:
         "later_outcome_source": "VARCHAR(50)",
         "later_outcome_timeframe": "VARCHAR(20)",
         "later_outcome_ambiguous": "INTEGER DEFAULT 0",
+        "later_outcome_confidence": "VARCHAR(30)",
+        "episode_id": "INTEGER",
+        "episode_key": "VARCHAR(64)",
+        "strategy_version": "VARCHAR(100)",
+        "config_hash": "VARCHAR(64)",
     }
     with engine.begin() as connection:
         for column, column_type in required.items():
@@ -390,6 +497,10 @@ def _ensure_strategy_validation_columns() -> None:
     required = {
         "max_drawdown_pct": "FLOAT",
         "passed": "INTEGER",
+        "strategy_version": "VARCHAR(100)",
+        "config_hash": "VARCHAR(64)",
+        "fold_count": "INTEGER DEFAULT 0",
+        "out_of_sample_sessions": "INTEGER DEFAULT 0",
     }
     with engine.begin() as connection:
         for column, column_type in required.items():
@@ -450,10 +561,34 @@ def _ensure_runtime_job_run_columns() -> None:
                 connection.execute(text(f"ALTER TABLE runtime_job_runs ADD COLUMN {column} {column_type}"))
 
 
+def _mark_legacy_rejected_outcomes_low_confidence() -> None:
+    if engine is None:
+        return
+    inspector = inspect(engine)
+    if "rejected_opportunities" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("rejected_opportunities")}
+    required = {"later_outcome_source", "learning_eligible", "learning_exclusion_reason", "later_outcome_confidence"}
+    if not required.issubset(columns):
+        return
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "UPDATE rejected_opportunities "
+                "SET learning_eligible = 0, "
+                "learning_exclusion_reason = 'legacy_non_chronological_outcome', "
+                "later_outcome_confidence = 'legacy_low' "
+                "WHERE later_outcome IS NOT NULL "
+                "AND (later_outcome_source IS NULL OR later_outcome_source IN ('current_quote', 'unknown'))"
+            )
+        )
+
+
 def get_session():
     if SessionLocal is None:
         init_db()
     else:
+        _ensure_candle_columns()
         _ensure_opportunity_columns()
         _ensure_trade_columns()
         _ensure_rejected_opportunity_columns()

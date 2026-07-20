@@ -65,9 +65,9 @@ A scan can begin from:
 - Startup warmup while the market is open.
 - A Bank Nifty fast-rally event.
 
-`BankNiftyFastRallyService` observes only the broker-resolved Bank Nifty underlying token. With current defaults, a move of at least 0.08% in either direction within five seconds requests a non-blocking immediate rescan. A cooldown and scan lock prevent duplicate or overlapping scans.
+`BankNiftyFastRallyService` observes only the broker-resolved Bank Nifty underlying token. With current defaults, a move of at least 0.08% in either direction within five seconds promotes only `BANKNIFTY` for full candidate validation. A cooldown, shared scan lock, duplicate-order protection, and a bounded-age `FastScanContextService` prevent overlapping or stale-context decisions.
 
-The fast-rally event does not itself authorize a trade. It only reduces detection latency by asking the normal scanner to reevaluate immediately.
+The fast-rally event is stage A only. Stage B uses the same scanner gates, scoring, contract selection, entry timing, chase, quality, reconciliation, and account risk primitives as scheduled scans. Missing, stale, or config-mismatched slow context rejects the promotion. It never authorizes live event entry.
 
 ## 3. Build the candidate
 
@@ -221,7 +221,10 @@ Paper exits close the virtual position and trade record. Live exits require live
 
 ## 12. Replay and calibration
 
-`TickReplayService` converts captured dictionaries or `WebSocketTick` objects, sorts them deterministically by receive/exchange time and token, and sends them to a supplied handler without sleeping. It supports reproducible tests for fast-rally detection, tick confirmation, chase behavior, and state transitions.
+`TickReplayService` replays ad-hoc ticks deterministically and replays persisted sessions by their capture sequence without sleeping. Raw records include price, bid/ask, cumulative volume, exchange/receive timestamps, provenance, packet type, owners, and strategy/config lineage.
 
-Synthetic acceleration tests validate the mechanism. An exact historical session replay requires persisted raw ticks from that session; reconstructed candles are not equivalent to the original bid/ask tick stream.
+Rejected-opportunity evaluation uses raw-tick first touch, then chronological candles. It never infers a hit from a later current quote. Same-candle stop/target paths stay ambiguous; incomplete paths are censored and excluded from learning. Repeated observations share a setup episode, so research counts independent episodes rather than scanner frequency.
 
+Research/backtests do not run from scheduled scans, fast callbacks, or order paths. Time-bucket evidence is precomputed after market hours, versioned by strategy/config, and rejected when missing, stale, or mismatched. Walk-forward validation uses multiple anchored folds with a purge/embargo at least as large as the trade horizon. Readiness requires at least the configured fold, independent out-of-sample trade, and session counts; zero-trade evidence cannot pass.
+
+Until a chronological out-of-sample calibration model has sufficient independent samples, API `probability` is `null`. The numeric score-derived value is exposed only as `heuristic_score_confidence` with an explicit source.

@@ -55,11 +55,10 @@ class SignalService:
         target_1 = target_1 if target_1 is not None else entry_price * 1.12
         target_2 = target_2 if target_2 is not None else entry_price * 1.2
         target_3 = target_3 if target_3 is not None else entry_price * 1.3
-        probability = probability if probability is not None else confidence
-
+        probability_text = f"calibrated probability estimate of {probability:.0%}" if probability is not None else "an uncalibrated heuristic confidence score"
         explanation = (
             f"{symbol} shows a {trend} setup with {market_context} market context. "
-            f"The score of {score}/100 and probability estimate of {probability:.0%} exceed the configured threshold. "
+            f"The score of {score}/100 and {probability_text} exceed the configured threshold. "
             "Risk controls must still be followed; this is not a guaranteed-profit trade."
         )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import date, datetime
 from typing import Any, Callable, Dict
 
@@ -28,6 +29,7 @@ class OrderService:
         active_price_feed: ActiveTradePriceFeed | None = None,
         live_safety_checker: Callable[[], dict[str, Any]] | None = None,
         market_data_coordinator: MarketDataCoordinator | None = None,
+        latency_metrics: Any | None = None,
     ) -> None:
         self.kite_provider = kite_provider or KiteProvider()
         self.paper_trading_service = paper_trading_service or PaperTradingService()
@@ -37,6 +39,7 @@ class OrderService:
         self.active_price_feed = active_price_feed
         self.live_safety_checker = live_safety_checker
         self.market_data_coordinator = market_data_coordinator
+        self.latency_metrics = latency_metrics
         self._banknifty_underlying_token: int | None = None
 
     def place_signal_order(
@@ -48,6 +51,7 @@ class OrderService:
         metadata: dict[str, Any] | None = None,
         execution_quality_override: dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
+        order_started = time.perf_counter()
         self._validate_signal(signal)
         transaction_type = "BUY" if signal.side.upper() == "BUY" else "SELL"
         mode = (order_mode or settings.default_order_mode or "paper").lower()
@@ -75,13 +79,14 @@ class OrderService:
                 notes=self._metadata_note(metadata),
             )
             self._subscribe_active_trade_tokens(signal)
+            self._record_latency("order_service_start_to_ack", order_started, signal=signal, mode="paper")
             return {"status": "paper", "trade": trade, "trade_id": record.id, "execution_quality": quality}
 
         if not settings.live_trading_mode or settings.paper_trading_mode:
             raise ValueError("live order blocked: set LIVE_TRADING_MODE=true and PAPER_TRADING_MODE=false")
         safety = self.live_safety_checker() if self.live_safety_checker is not None else {"blocked": False}
         if safety.get("blocked"):
-            raise ValueError(f"live order blocked by broker reconciliation: {safety.get('reason') or 'unknown'}")
+            raise ValueError(f"live order blocked by safety check: {safety.get('reason') or 'unknown'}")
 
         risk = self.risk_management_service.evaluate_signal(signal.symbol)
         if not risk["passed"]:
@@ -91,6 +96,7 @@ class OrderService:
         if quantity <= 0:
             raise ValueError("available Zerodha funds are insufficient for one option lot")
 
+        submission_started = time.perf_counter()
         result = self.kite_provider.place_order(
             tradingsymbol=str(signal.tradingsymbol),
             exchange=signal.exchange,
@@ -99,6 +105,7 @@ class OrderService:
             order_type="MARKET",
             product=settings.default_product,
         )
+        self._record_latency("live_submission_to_broker_ack", submission_started, signal=signal, mode="live")
         order_id = result.get("order_id") if isinstance(result, dict) else None
         record = self.trade_repository.create_trade(
             signal,
@@ -112,6 +119,7 @@ class OrderService:
         )
         broker_emergency_sl = self._broker_emergency_protection(signal, record=record, quantity=quantity, entry_order_id=str(order_id) if order_id else None)
         self._subscribe_active_trade_tokens(signal)
+        self._record_latency("order_service_start_to_ack", order_started, signal=signal, mode="live")
         return {
             "status": "live",
             "order": result,
@@ -121,6 +129,15 @@ class OrderService:
             "execution_quality": quality,
             "broker_emergency_sl": broker_emergency_sl,
         }
+
+    def _record_latency(self, name: str, started: float, *, signal: Signal, mode: str) -> None:
+        if self.latency_metrics is None:
+            return
+        self.latency_metrics.record(
+            name,
+            (time.perf_counter() - started) * 1000.0,
+            detail={"symbol": signal.symbol, "tradingsymbol": signal.tradingsymbol, "mode": mode},
+        )
 
     def _validate_signal(self, signal: Signal) -> None:
         if not signal.tradingsymbol:
@@ -347,6 +364,10 @@ class OrderService:
         tokens: set[int] = set()
         if signal.instrument_token:
             tokens.add(int(signal.instrument_token))
+            websocket_feed = getattr(self.active_price_feed, "websocket_feed", None)
+            register_symbol = getattr(websocket_feed, "register_token_symbol", None)
+            if callable(register_symbol) and signal.tradingsymbol:
+                register_symbol(int(signal.instrument_token), str(signal.tradingsymbol))
         underlying_token = self._resolve_banknifty_underlying_token()
         if underlying_token:
             tokens.add(underlying_token)

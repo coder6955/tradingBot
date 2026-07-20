@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import re
 import time as time_module
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
 from app.config import settings
 from app.providers.kite_provider import KiteProvider
-from app.services.database import Candle, RejectedOpportunityRecord, get_session
+from app.services.database import Candle, RawTickRecord, RejectedOpportunityRecord, get_session
 from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
 from app.services.time_utils import ist_today
@@ -101,7 +101,9 @@ class RejectedOpportunityOutcomeService:
         if not prices:
             return {"id": record.id, "updated": False, "reason": "planned_prices_unavailable"}
 
-        replay_result = self._outcome_from_candle_replay(provider, record, prices)
+        replay_result = self._outcome_from_raw_ticks(provider, record, prices)
+        if replay_result is None:
+            replay_result = self._outcome_from_candle_replay(provider, record, prices)
         if replay_result is not None:
             updated = self.repository.mark_later_outcome(
                 int(record.id),
@@ -113,6 +115,7 @@ class RejectedOpportunityOutcomeService:
                 outcome_source=str(replay_result.get("source") or "candle_replay"),
                 outcome_timeframe=str(replay_result.get("timeframe") or ""),
                 ambiguous=bool(replay_result.get("ambiguous")),
+                confidence=str(replay_result.get("confidence") or "chronological_high"),
             )
             return {
                 "id": updated.id,
@@ -120,7 +123,7 @@ class RejectedOpportunityOutcomeService:
                 "tradingsymbol": updated.tradingsymbol,
                 "later_outcome": updated.later_outcome,
                 "later_exit_price": updated.later_exit_price,
-                "source": "candle_replay",
+                "source": replay_result.get("source"),
                 "timeframe": replay_result.get("timeframe"),
                 "source_symbol": replay_result.get("source_symbol"),
                 "candle_timestamp": replay_result.get("candle_timestamp"),
@@ -128,40 +131,60 @@ class RejectedOpportunityOutcomeService:
                 "ambiguous": bool(replay_result.get("ambiguous")),
             }
 
-        current_price = self._current_option_price(provider, record)
-        outcome_source = "current_quote"
-        if current_price is None:
-            expired_price = self._expired_price(record)
-            if expired_price is None:
-                return {"id": record.id, "updated": False, "reason": "quote_unavailable"}
-            current_price = expired_price
-            outcome_source = "expiry"
-
-        outcome = self._outcome_for_price(record, current_price, prices)
-        if outcome is None:
-            return {
-                "id": record.id,
-                "updated": False,
-                "tradingsymbol": record.tradingsymbol,
-                "current_price": current_price,
-                "reason": "no_later_outcome_yet",
-                "replay_checked": bool(settings.enable_rejected_outcome_candle_replay),
-            }
-
+        age_minutes = self._minutes_between(record.created_at, datetime.now().replace(tzinfo=None))
+        if age_minutes is None or age_minutes < settings.rejected_outcome_horizon_minutes:
+            return {"id": record.id, "updated": False, "reason": "chronological_outcome_pending"}
         updated = self.repository.mark_later_outcome(
             int(record.id),
-            outcome=outcome,
-            exit_price=current_price,
-            notes=self._notes(record, outcome, current_price, prices),
-            outcome_source=outcome_source,
+            outcome="censored_chronological_data_unavailable",
+            notes="Excluded from learning because no chronological raw tick or candle path was available.",
+            outcome_source="censored",
+            confidence="censored_excluded",
         )
-        return {
-            "id": updated.id,
-            "updated": True,
-            "tradingsymbol": updated.tradingsymbol,
-            "later_outcome": updated.later_outcome,
-            "later_exit_price": updated.later_exit_price,
-        }
+        return {"id": updated.id, "updated": True, "later_outcome": updated.later_outcome, "source": "censored"}
+
+    def _outcome_from_raw_ticks(
+        self,
+        provider: KiteProvider,
+        record: RejectedOpportunityRecord,
+        prices: dict[str, float],
+    ) -> dict[str, Any] | None:
+        token = self._record_instrument_token(provider, record)
+        if token is None or record.created_at is None:
+            return None
+        start = record.created_at.replace(tzinfo=None)
+        horizon = start + timedelta(minutes=max(1, int(settings.rejected_outcome_horizon_minutes)))
+        session = get_session()
+        try:
+            ticks = (
+                session.query(RawTickRecord)
+                .filter(
+                    RawTickRecord.instrument_token == int(token),
+                    RawTickRecord.exchange_timestamp.isnot(None),
+                    RawTickRecord.exchange_timestamp >= start,
+                    RawTickRecord.exchange_timestamp <= horizon,
+                )
+                .order_by(RawTickRecord.exchange_timestamp.asc(), RawTickRecord.sequence.asc(), RawTickRecord.id.asc())
+                .all()
+            )
+        finally:
+            session.close()
+        for tick in ticks:
+            outcome = self._outcome_for_price(record, float(tick.last_price), prices)
+            if outcome is not None:
+                outcome_at = tick.exchange_timestamp.replace(tzinfo=None)
+                return {
+                    "outcome": outcome,
+                    "exit_price": float(tick.last_price),
+                    "outcome_at": outcome_at.isoformat(sep=" "),
+                    "outcome_minutes": self._minutes_between(start, outcome_at),
+                    "source": "raw_tick_replay",
+                    "timeframe": "tick",
+                    "confidence": "chronological_high",
+                    "sequence": tick.sequence,
+                    "ambiguous": False,
+                }
+        return None
 
     def _planned_prices(self, record: RejectedOpportunityRecord) -> dict[str, float]:
         factors = self._json(record.factor_scores_json)
@@ -300,23 +323,17 @@ class RejectedOpportunityOutcomeService:
         if not stop_hit and not target_hit:
             return None
         if stop_hit and target_hit:
-            policy = str(settings.rejected_outcome_ambiguous_candle_policy or "conservative_stop").lower()
-            if policy == "skip":
-                return None
-            if policy == "label_ambiguous":
-                target_key, target_price = target
-                return self._candle_result(
-                    record,
-                    candle,
-                    "ambiguous_stop_and_target_same_candle",
-                    float(candle.close_price),
-                    ambiguous=True,
-                    ambiguous_stop_price=float(stop_loss or candle.close_price),
-                    ambiguous_target_key=target_key,
-                    ambiguous_target_price=target_price,
-                )
-            if policy != "target_first":
-                target = None
+            target_key, target_price = target
+            return self._candle_result(
+                record,
+                candle,
+                "ambiguous_stop_and_target_same_candle",
+                float(candle.close_price),
+                ambiguous=True,
+                ambiguous_stop_price=float(stop_loss or candle.close_price),
+                ambiguous_target_key=target_key,
+                ambiguous_target_price=target_price,
+            )
         if stop_hit and target is None:
             return self._candle_result(record, candle, "would_have_hit_stop_loss", float(stop_loss or candle.close_price))
         if target is not None:
@@ -366,6 +383,7 @@ class RejectedOpportunityOutcomeService:
             "candle_low": float(candle.low_price),
             "candle_close": float(candle.close_price),
             "ambiguous": ambiguous,
+            "confidence": "chronological_ambiguous" if ambiguous else "chronological_medium",
             "ambiguous_stop_price": ambiguous_stop_price,
             "ambiguous_target_key": ambiguous_target_key,
             "ambiguous_target_price": ambiguous_target_price,

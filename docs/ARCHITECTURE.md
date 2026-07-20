@@ -30,6 +30,8 @@ flowchart LR
     Kite["Kite REST and WebSocket"] --> Coordinator["MarketDataCoordinator"]
     Kite --> WS["KiteWebSocketPriceFeed"]
     WS --> Candles["Premium candle builder"]
+    WS --> Underlying["Canonical BANKNIFTY 1m/5m candles"]
+    WS --> Raw["Async raw-tick capture"]
     WS --> Rally["BankNiftyFastRallyService"]
     Rally --> Auto["AutoTraderService"]
     Auto --> Scanner["ScannerService"]
@@ -59,6 +61,10 @@ flowchart LR
 | `KiteProvider` / `KiteFeed` | Broker REST access, instruments, quotes, historical data, margins, and orders. |
 | `MarketDataCoordinator` | Coordinates and caches broker market-data requests. |
 | `KiteWebSocketPriceFeed` | Tick ingestion, ownership-based subscriptions, priority event delivery, gap reporting, and premium candle construction. |
+| `UnderlyingCandleService` | Builds exchange-timestamped, current-session canonical `BANKNIFTY` 1-minute candles and completed 5-minute aggregates without lookahead. |
+| `RawTickCaptureService` / `TickReplayService` | Asynchronously retain replay-relevant ordered ticks and replay them by capture sequence. |
+| `FastScanContextService` | Holds a bounded-age immutable snapshot of slow evidence for fast candidate promotion and rejects stale/config-mismatched contexts. |
+| `LatencyMetricsService` | Keeps bounded latency samples, tail percentiles, queue drops, last events, and strategy/config lineage. |
 | `BankNiftyOptionPrewarmService` | Keeps the nearest-expiry ATM ± configured strike depth CE/PE band warm. The current default depth is 3. |
 | `BankNiftyFastRallyService` | Detects short-window Bank Nifty acceleration and requests an immediate scan. |
 | `AutoTraderService` | Runs scheduled scans, serialized fast rescans, optional order routing, and duplicate live-order protection. |
@@ -78,15 +84,15 @@ The shared `TradeSetupService` is deliberate: its in-memory Bank Nifty contract 
 
 At application startup:
 
-1. Strategy-version registration and old WebSocket candle cleanup run in background maintenance.
+1. Strategy-version registration, old WebSocket candle cleanup, and raw-tick retention cleanup run in background maintenance.
 2. Broker order/trade synchronization and startup position reconciliation run separately.
 3. If WebSocket support is enabled, the market-data runtime starts.
 4. The `NIFTY BANK` instrument token is resolved from the broker's current NSE instrument list.
-5. That underlying token is assigned to the fast-rally detector and subscribed under the `core_market` owner.
+5. That underlying token is assigned to the fast-rally detector and canonical candle builder, mapped to `BANKNIFTY`, and subscribed under the `core_market` owner.
 6. If the market is open, an initial scanner refresh is requested.
 7. If automation is configured, the automation supervisor starts its market-hours lifecycle.
 
-Shutdown stops the market-data runtime, automation supervisor, snapshot collector, auto trader, and outcome monitor.
+Shutdown stops the market-data runtime, canonical candle and raw-tick writers, automation supervisor, snapshot collector, auto trader, and outcome monitor.
 
 ## WebSocket subscription model
 
@@ -123,6 +129,10 @@ The premium candle builder:
 - Can recover historical context without pretending recovered candles were live ticks.
 - Keeps live-token verification separate from merely requesting a subscription; `is_live_verified()` requires a fresh received tick.
 
+The underlying candle path is separate from option-premium candles. It accepts only broker exchange/last-trade timestamps inside the configured NSE session, persists completed `1minute` candles, aggregates only completed minutes into `5minute`, marks generated in-session continuity rows, and recovers persisted state without replaying it as live ticks. `KiteFeed` combines a fresh exchange-timestamped LTP with these completed candles; broad context quotes use a separate cache and cannot masquerade as indicator evidence.
+
+Raw ticks for `core_market`, `banknifty_prewarm`, `armed:*`, and `active_trade` owners enter a bounded asynchronous writer. Warm ticks may be evicted under pressure, but an armed/active tick loss raises critical capture status. Retention is configurable and replay uses persisted capture sequence.
+
 ## Gap semantics
 
 Not every absence of ticks means the feed is broken:
@@ -144,9 +154,12 @@ The database layer stores, among other records:
 - Rejected opportunities with structured reasons.
 - Paper/live trade lifecycle records.
 - Strategy versions and validation results.
+- Raw ticks and independent setup episodes.
 - Runtime job history.
 
 Accepted and rejected opportunities must remain explainable. A hard-gate rejection, armed-entry expiry, chase rejection, data-gap cancellation, or order failure should retain its reason in repository records and diagnostics.
+
+Opportunities, rejection observations/episodes, validations, trades, raw replays, and latency events carry strategy version and config hash. Mixed hashes are surfaced and block professional readiness; paper mode may continue visibly, while direct live routing fails closed on unregistered drift.
 
 ## Configuration authority
 
@@ -172,6 +185,8 @@ Use these endpoints to understand the running system:
 | Endpoint | Purpose |
 |---|---|
 | `GET /runtime/status` | High-level runtime status. |
+| `GET /runtime/latency` | p50/p95/p99/max/sample and last-event latency detail with queue drops. |
+| `GET /market-data/pipeline-status` | Canonical candle coverage, raw-tick capture, fast context, WebSocket queues, and latency. |
 | `GET /automation/status` | Automation lifecycle and worker status. |
 | `GET /kite/websocket/status` | Connection, owners, subscriptions, queue, gaps, candles, and fast-rally status. |
 | `GET /scanner/opportunities` | Accepted scanner opportunities. |
@@ -191,4 +206,3 @@ When architecture changes, update the documentation in the same change:
 3. Add or amend a record in [DECISIONS.md](DECISIONS.md) when the rationale or trade-off changes.
 4. Update `.env.example` when a setting is added or renamed.
 5. Add tests for trading-logic changes and run the relevant focused and full suites.
-

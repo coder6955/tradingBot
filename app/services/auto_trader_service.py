@@ -30,12 +30,16 @@ class AutoTraderService:
         opportunity_repository: OpportunityRepository | None = None,
         risk_management_service: RiskManagementService | None = None,
         notification_service: NotificationService | None = None,
+        latency_metrics: Any | None = None,
+        fast_scan_context_service: Any | None = None,
     ) -> None:
         self.scanner_factory = scanner_factory
         self.order_service_factory = order_service_factory
         self.opportunity_repository = opportunity_repository
         self.risk_management_service = risk_management_service or RiskManagementService()
         self.notification_service = notification_service or NotificationService()
+        self.latency_metrics = latency_metrics
+        self.fast_scan_context_service = fast_scan_context_service
         self.task: asyncio.Task[None] | None = None
         self.running = False
         self.config: dict[str, Any] = {}
@@ -142,6 +146,9 @@ class AutoTraderService:
             order_mode=str(self.config.get("order_mode") or "paper"),
             rejection_source="automation_scan",
         )
+        return self._finalize_opportunities(opportunities, source="automation_scan")
+
+    def _finalize_opportunities(self, opportunities: list[Signal], *, source: str) -> dict[str, Any]:
         limited = opportunities[: int(self.config.get("limit", 5))]
         self.latest_opportunities = [asdict(signal) for signal in limited]
         saved_ids: list[int] = []
@@ -158,7 +165,14 @@ class AutoTraderService:
             order_mode = str(self.config.get("order_mode") or "paper").lower()
             for signal in limited:
                 try:
+                    decision_at = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
                     result = self._place_once(signal, opportunity_id=saved_id_by_order_key.get(self._order_key(signal)))
+                    if self.latency_metrics is not None:
+                        self.latency_metrics.record_between(
+                            "decision_to_order_completion",
+                            decision_at,
+                            detail={"symbol": signal.symbol, "source": source, "order_mode": self.config.get("order_mode")},
+                        )
                     if result is not None:
                         placed.append(result)
                 except Exception as exc:
@@ -195,6 +209,7 @@ class AutoTraderService:
             "saved_ids": saved_ids,
             "opportunities": self.latest_opportunities,
             "placed": placed,
+            "source": source,
         }
 
     def request_fast_rescan(self, event: dict[str, Any]) -> dict[str, Any]:
@@ -211,17 +226,58 @@ class AutoTraderService:
                 return {"scheduled": False, "reason": "fast_rescan_cooldown"}
             self._fast_rescan_running = True
             self._last_fast_rescan_at = now
-        Thread(target=self._run_fast_rescan, name="banknifty-fast-rescan", daemon=True).start()
-        return {"scheduled": True}
+        Thread(target=self._run_fast_candidate_validation, args=(dict(event),), name="banknifty-fast-candidate", daemon=True).start()
+        return {"scheduled": True, "stage": "candidate_promoted_for_full_validation"}
 
-    def _run_fast_rescan(self) -> None:
+    def _run_fast_candidate_validation(self, event: dict[str, Any]) -> None:
         try:
-            self.scan_once()
+            context = self.fast_scan_context_service.validate(symbol="BANKNIFTY") if self.fast_scan_context_service is not None else {"passed": False, "reason": "fast_scan_context_service_missing"}
+            if not context.get("passed"):
+                self.errors.append({"time": self._now_ist(), "error": context.get("reason"), "source": "fast_rally_candidate_validation"})
+                return
+            direction = str(event.get("direction") or "").lower()
+            if direction not in {"bullish", "bearish"}:
+                raise ValueError("fast candidate direction is invalid")
+            scan_started = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+            rally_at = self._parse_event_time(event.get("timestamp"))
+            if self.latency_metrics is not None:
+                self.latency_metrics.record_between("rally_detection_to_scan_start", rally_at, scan_started, detail=context)
+            with self._scan_lock:
+                scanner = self.scanner_factory()
+                opportunities = scanner.scan_symbols(
+                    symbols=["BANKNIFTY"],
+                    trends={"BANKNIFTY": direction},
+                    side=str(self.config.get("side", "BUY")),
+                    order_mode=str(self.config.get("order_mode") or "paper"),
+                    rejection_source="fast_rally_candidate_validation",
+                )
+                result = self._finalize_opportunities(opportunities, source="fast_rally_candidate_validation")
+            if self.latency_metrics is not None:
+                self.latency_metrics.record_between("scan_start_to_scan_completion", scan_started, detail={"accepted_candidates": len(opportunities)})
+            result["rally_event"] = dict(event)
+            if self.latency_metrics is not None:
+                event_time = self._parse_event_time(event.get("receive_timestamp") or event.get("timestamp"))
+                self.latency_metrics.record_between(
+                    "tick_to_candidate_decision",
+                    event_time,
+                    detail={"direction": direction, "accepted_candidates": len(opportunities)},
+                )
         except Exception as exc:
-            self.errors.append({"time": self._now_ist(), "error": str(exc), "source": "fast_rally_rescan"})
+            self.errors.append({"time": self._now_ist(), "error": str(exc), "source": "fast_rally_candidate_validation"})
         finally:
             with self._fast_rescan_lock:
                 self._fast_rescan_running = False
+
+    def _parse_event_time(self, value: object) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+            return parsed
+        except (TypeError, ValueError):
+            return None
 
     def _order_key(self, signal: Signal) -> str:
         return "|".join(

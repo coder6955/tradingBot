@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from app.services.database import StrategyValidationRecord, get_session
+from app.services.strategy_lineage_service import current_strategy_lineage
 
 
 class StrategyValidationRepository:
@@ -11,6 +12,7 @@ class StrategyValidationRepository:
 
     def save(self, *, strategy_name: str, symbol: str, timeframe: str, direction: str, mode: str, result: dict[str, Any], passed: bool) -> StrategyValidationRecord:
         summary = result.get("summary") or result.get("test_summary") or {}
+        lineage = current_strategy_lineage()
         record = StrategyValidationRecord(
             strategy_name=strategy_name,
             symbol=symbol.upper(),
@@ -23,6 +25,10 @@ class StrategyValidationRepository:
             profit_factor=self._optional_float(summary.get("profit_factor")),
             max_drawdown_pct=float(summary.get("max_drawdown_pct") or 0.0),
             passed=1 if passed else 0,
+            strategy_version=str(lineage["strategy_version"]),
+            config_hash=str(lineage["config_hash"]),
+            fold_count=int(result.get("fold_count") or 0),
+            out_of_sample_sessions=int(result.get("out_of_sample_sessions") or 0),
             result_json=json.dumps(result, default=str),
         )
         session = get_session()

@@ -8,6 +8,7 @@ from typing import Any
 from app.models import Signal
 from app.services.database import OpportunityRecord, get_session
 from app.services.time_utils import ist_now_naive
+from app.services.strategy_lineage_service import current_strategy_lineage
 
 
 class OpportunityRepository:
@@ -17,6 +18,8 @@ class OpportunityRepository:
         payload = asdict(signal)
         session = get_session()
         try:
+            lineage = current_strategy_lineage()
+            probability_meta = signal.factor_scores.get("probability_estimate", {}) if isinstance(signal.factor_scores, dict) else {}
             record = OpportunityRecord(
                 symbol=signal.symbol,
                 action=signal.action,
@@ -34,6 +37,11 @@ class OpportunityRepository:
                 lot_size=signal.lot_size,
                 score=signal.score,
                 probability=signal.probability,
+                heuristic_score_confidence=probability_meta.get("heuristic_score_confidence"),
+                probability_source=str(probability_meta.get("source") or "unavailable_insufficient_calibration"),
+                calibration_version=probability_meta.get("calibration_version"),
+                strategy_version=str(lineage["strategy_version"]),
+                config_hash=str(lineage["config_hash"]),
                 risk_reward=signal.risk_reward,
                 signal_json=json.dumps(payload, default=str),
                 factor_scores_json=json.dumps(signal.factor_scores, default=str),

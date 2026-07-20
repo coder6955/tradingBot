@@ -51,7 +51,8 @@ class ExecutionSafetyServiceTests(unittest.TestCase):
 
         self.assertFalse(result["passed"])
         self.assertTrue(any("stale" in reason for reason in result["reasons"]))
-        self.assertTrue(any("source=stored_candles" in reason for reason in result["reasons"]))
+        self.assertTrue(any("canonical completed-candle analysis" in reason for reason in result["reasons"]))
+        self.assertTrue(any("timestamp provenance" in reason for reason in result["reasons"]))
 
     def test_rejected_opportunity_repository_persists_reason_breakdown(self) -> None:
         repo = RejectedOpportunityRepository()

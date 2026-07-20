@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from collections import Counter
-from datetime import time
+from datetime import datetime, time
 from typing import Any
 
 from app.config import settings
-from app.services.database import RejectedOpportunityRecord, get_session
+from app.services.database import RejectedOpportunityRecord, SetupEpisodeRecord, get_session
+from app.services.strategy_lineage_service import current_strategy_lineage
 from app.services.time_utils import ist_now, ist_now_naive
 
 
@@ -89,7 +91,37 @@ class RejectedOpportunityRepository:
         )
         session = get_session()
         try:
+            now = ist_now_naive()
+            lineage = current_strategy_lineage()
+            episode_key = self._episode_key(
+                timestamp=now,
+                symbol=symbol,
+                action=action,
+                tradingsymbol=getattr(contract, "tradingsymbol", None),
+                strategy_version=str(lineage["strategy_version"]),
+                config_hash=str(lineage["config_hash"]),
+            )
+            episode = session.query(SetupEpisodeRecord).filter(SetupEpisodeRecord.episode_key == episode_key).first()
+            if episode is None:
+                episode = SetupEpisodeRecord(
+                    created_at=now,
+                    updated_at=now,
+                    episode_key=episode_key,
+                    symbol=symbol.upper(),
+                    action=action,
+                    side=side.upper(),
+                    tradingsymbol=getattr(contract, "tradingsymbol", None),
+                    strategy_version=str(lineage["strategy_version"]),
+                    config_hash=str(lineage["config_hash"]),
+                    observation_count=1,
+                )
+                session.add(episode)
+                session.flush()
+            else:
+                episode.observation_count = int(episode.observation_count or 0) + 1
+                episode.updated_at = now
             record = RejectedOpportunityRecord(
+                created_at=now,
                 symbol=symbol.upper(),
                 action=action,
                 side=side.upper(),
@@ -111,6 +143,10 @@ class RejectedOpportunityRepository:
                 premium_state_json=json.dumps(premium, default=str),
                 score_breakdown_json=json.dumps(score_breakdown or {}, default=str),
                 factor_scores_json=json.dumps(factors, default=str),
+                episode_id=episode.id,
+                episode_key=episode_key,
+                strategy_version=str(lineage["strategy_version"]),
+                config_hash=str(lineage["config_hash"]),
             )
             session.add(record)
             session.commit()
@@ -175,6 +211,7 @@ class RejectedOpportunityRepository:
         outcome_source: str | None = None,
         outcome_timeframe: str | None = None,
         ambiguous: bool = False,
+        confidence: str | None = None,
     ) -> RejectedOpportunityRecord:
         session = get_session()
         try:
@@ -188,6 +225,17 @@ class RejectedOpportunityRepository:
             record.later_outcome_source = outcome_source
             record.later_outcome_timeframe = outcome_timeframe
             record.later_outcome_ambiguous = 1 if ambiguous else 0
+            record.later_outcome_confidence = confidence
+            if str(outcome).startswith("censored_"):
+                record.learning_eligible = 0
+                record.learning_exclusion_reason = "censored_outcome"
+            if record.episode_id:
+                episode = session.get(SetupEpisodeRecord, int(record.episode_id))
+                if episode is not None and episode.independent_outcome is None:
+                    episode.independent_outcome = outcome
+                    episode.outcome_source = outcome_source
+                    episode.outcome_confidence = confidence
+                    episode.updated_at = ist_now_naive()
             record.later_notes = notes
             record.later_evaluated_at = ist_now_naive()
             session.commit()
@@ -199,6 +247,10 @@ class RejectedOpportunityRepository:
     def analyze(self, *, symbol: str | None = "BANKNIFTY", limit: int = 1000, learning_eligible: bool | None = None) -> dict[str, Any]:
         rows = self.list_rejections(symbol=symbol, limit=limit)
         visible_rows = rows if learning_eligible is None else [row for row in rows if bool(row.learning_eligible) is learning_eligible]
+        independent_by_episode: dict[str, RejectedOpportunityRecord] = {}
+        for row in visible_rows:
+            independent_by_episode.setdefault(str(row.episode_key or f"legacy-row:{row.id}"), row)
+        independent_rows = list(independent_by_episode.values())
         reason_counter: Counter[str] = Counter()
         gate_counter: Counter[str] = Counter()
         ce_pe: Counter[str] = Counter()
@@ -213,7 +265,7 @@ class RejectedOpportunityRepository:
             market_session_counter.update([str(row.market_session or "unknown")])
             if not bool(row.learning_eligible):
                 exclusion_counter.update([str(row.learning_exclusion_reason or "unknown")])
-        for row in visible_rows:
+        for row in independent_rows:
             gate_counter.update([str(row.primary_gate or "unknown")])
             ce_pe.update([str(row.option_type or "unknown")])
             if row.later_outcome:
@@ -227,6 +279,8 @@ class RejectedOpportunityRepository:
             "sample": {
                 "total_rejected": len(rows),
                 "reported_rejected": len(visible_rows),
+                "independent_episodes": len(independent_rows),
+                "dependent_duplicate_observations": len(visible_rows) - len(independent_rows),
                 "learning_eligible": len([row for row in rows if bool(row.learning_eligible)]),
                 "learning_excluded": len([row for row in rows if not bool(row.learning_eligible)]),
                 "with_later_outcome": sum(later.values()),
@@ -239,7 +293,7 @@ class RejectedOpportunityRepository:
             "top_reasons": dict(reason_counter.most_common(30)),
             "ce_vs_pe": dict(ce_pe.most_common()),
             "later_outcomes": dict(later.most_common()),
-            "examples": [self.to_dict(row) for row in visible_rows[:20]],
+            "examples": [self.to_dict(row) for row in independent_rows[:20]],
         }
 
     def to_dict(self, record: RejectedOpportunityRecord) -> dict[str, Any]:
@@ -260,6 +314,10 @@ class RejectedOpportunityRepository:
             "market_session": record.market_session,
             "learning_eligible": bool(record.learning_eligible),
             "learning_exclusion_reason": record.learning_exclusion_reason,
+            "episode_id": record.episode_id,
+            "episode_key": record.episode_key,
+            "strategy_version": record.strategy_version,
+            "config_hash": record.config_hash,
             "reasons": self._json_list(record.reasons_json),
             "later_outcome": record.later_outcome,
             "later_exit_price": record.later_exit_price,
@@ -268,8 +326,26 @@ class RejectedOpportunityRepository:
             "later_outcome_source": record.later_outcome_source,
             "later_outcome_timeframe": record.later_outcome_timeframe,
             "later_outcome_ambiguous": bool(record.later_outcome_ambiguous),
+            "later_outcome_confidence": record.later_outcome_confidence,
             "later_notes": record.later_notes,
         }
+
+    def _episode_key(
+        self,
+        *,
+        timestamp: datetime,
+        symbol: str,
+        action: str | None,
+        tradingsymbol: str | None,
+        strategy_version: str,
+        config_hash: str,
+    ) -> str:
+        window = max(1, int(settings.setup_episode_window_seconds))
+        bucket = int(timestamp.timestamp()) // window
+        raw = "|".join(
+            [symbol.upper(), str(action or "unknown").upper(), str(tradingsymbol or "unknown").upper(), str(bucket), strategy_version, config_hash]
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def _classify_learning(
         self,

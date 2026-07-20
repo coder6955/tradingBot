@@ -3,7 +3,7 @@
 This project is an AI-assisted options trading scanner for the Indian stock market.
 
 ## Current capabilities
-- Scan an Indian options universe for probability-ranked BUY and SELL option setups.
+- Scan Bank Nifty options for score-ranked option-buying setups; probability stays unavailable until calibrated evidence is sufficient.
 - Use Kite Connect for NSE/NFO instruments, quotes, candles, profile, margins, positions, and orders.
 - Fall back to deterministic mock data when Kite credentials are not configured.
 - Check technical score, option liquidity, premium risk, stop loss, targets, quantity, and risk/reward before a trade.
@@ -93,7 +93,7 @@ Example paper order body using a signal returned by the scanner:
 }
 ```
 
-Signals are probability-ranked trade setups, not guaranteed-profit trades. Validate broker margins, slippage, spread, event risk, and your own risk limits before enabling live orders.
+Signals are score-ranked trade setups, not guaranteed-profit trades. Heuristic score confidence is not a calibrated probability. Validate broker margins, slippage, spread, event risk, and risk limits before enabling live orders.
 
 ## Run tests
 

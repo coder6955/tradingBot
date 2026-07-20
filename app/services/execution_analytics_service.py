@@ -13,6 +13,10 @@ class ExecutionAnalyticsService:
     def analyze(self, *, symbol: str | None = "BANKNIFTY", limit: int = 1000) -> dict[str, Any]:
         trades = self._trades(symbol=symbol, limit=limit)
         closed = [trade for trade in trades if trade.status == "closed"]
+        lineage_groups: dict[str, list[TradeRecord]] = {}
+        for trade in closed:
+            key = f"{getattr(trade, 'strategy_version', None) or 'legacy'}|{getattr(trade, 'config_hash', None) or 'unknown'}"
+            lineage_groups.setdefault(key, []).append(trade)
         return {
             "status": "ok",
             "symbol": symbol.upper() if symbol else "ALL",
@@ -24,6 +28,9 @@ class ExecutionAnalyticsService:
                 "live": len([trade for trade in trades if trade.mode == "live"]),
                 "paper": len([trade for trade in trades if trade.mode == "paper"]),
             },
+            "mixed_lineage": len(lineage_groups) > 1,
+            "lineage_warning": "Execution evidence is split by strategy/config; do not combine hashes for readiness." if len(lineage_groups) > 1 else None,
+            "overall_by_lineage": {key: self._summary(items) for key, items in lineage_groups.items()},
             "overall": self._summary(closed),
             "segments": {
                 "mode": self._groups(closed, lambda trade: str(trade.mode or "unknown")),

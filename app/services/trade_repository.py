@@ -13,6 +13,7 @@ from app.models import Signal
 from app.services.database import TradeRecord, get_session
 from app.services.realistic_pnl_service import RealisticPnlService
 from app.services.time_utils import format_ist, ist_now_naive, ist_today
+from app.services.strategy_lineage_service import current_strategy_lineage
 
 
 class TradeRepository:
@@ -49,6 +50,7 @@ class TradeRepository:
             paper_entry_price = float(response.get("entry_price") or signal.entry_price or 0.0) if isinstance(response, dict) else float(signal.entry_price or 0.0)
             initial_entry_price = paper_entry_price if mode == "paper" else float(signal.entry_price or 0.0)
             now = ist_now_naive()
+            lineage = current_strategy_lineage()
             record = TradeRecord(
                 opportunity_id=opportunity_id,
                 symbol=signal.symbol,
@@ -82,6 +84,8 @@ class TradeRepository:
                 target_3=signal.target_3,
                 order_response_json=json.dumps(response, default=str),
                 notes=notes,
+                strategy_version=str(lineage["strategy_version"]),
+                config_hash=str(lineage["config_hash"]),
             )
             session.add(record)
             session.commit()

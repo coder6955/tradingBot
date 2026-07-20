@@ -13,6 +13,10 @@ class OpportunityAnalyticsService:
     def analyze(self, *, symbol: str | None = "BANKNIFTY", limit: int = 1000) -> dict[str, Any]:
         records = self._records(symbol=symbol, limit=limit)
         closed = [record for record in records if record.status == "closed" and record.outcome]
+        lineage_groups: dict[str, list[OpportunityRecord]] = {}
+        for record in closed:
+            key = f"{record.strategy_version or 'legacy'}|{record.config_hash or 'unknown'}"
+            lineage_groups.setdefault(key, []).append(record)
         return {
             "status": "ok",
             "symbol": symbol.upper() if symbol else "ALL",
@@ -24,6 +28,9 @@ class OpportunityAnalyticsService:
                 "note": "This studies saved scanner opportunities, not only executed trades.",
             },
             "overall": self._summary(closed),
+            "overall_by_lineage": {key: self._summary(items) for key, items in lineage_groups.items()},
+            "mixed_lineage": len(lineage_groups) > 1,
+            "lineage_warning": "Do not use the combined overall result for readiness; compare matching config hashes." if len(lineage_groups) > 1 else None,
             "segments": {
                 "ce_vs_pe": self._groups(closed, self._ce_pe),
                 "expiry_day": self._groups(closed, self._expiry_day),

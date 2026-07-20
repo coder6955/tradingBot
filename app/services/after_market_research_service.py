@@ -31,6 +31,7 @@ class AfterMarketResearchService:
         execution_analytics_service: Any | None = None,
         professional_readiness_service: Any | None = None,
         strategy_edge_service: Any | None = None,
+        time_bucket_edge_service: Any | None = None,
         clock: Callable[[], datetime] | None = None,
         market_session_service: MarketSessionService | None = None,
         job_repository: RuntimeJobRepository | None = None,
@@ -44,6 +45,7 @@ class AfterMarketResearchService:
         self.execution_analytics_service = execution_analytics_service
         self.professional_readiness_service = professional_readiness_service
         self.strategy_edge_service = strategy_edge_service
+        self.time_bucket_edge_service = time_bucket_edge_service
         self.clock = clock or (lambda: datetime.now(ZoneInfo("Asia/Kolkata")))
         self.market_session_service = market_session_service or MarketSessionService(clock=self.clock)
         self.job_repository = job_repository or RuntimeJobRepository()
@@ -260,6 +262,12 @@ class AfterMarketResearchService:
             ),
             compact=True,
         )
+        if self.time_bucket_edge_service is not None:
+            self._run_stage(
+                reports,
+                "time_bucket_cache",
+                lambda: self.time_bucket_edge_service.refresh_all(symbol=symbol, timeframe=timeframe),
+            )
         self._run_stage(
             reports,
             "ablation",

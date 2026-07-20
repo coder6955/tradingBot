@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Callable, Iterable
 
+from app.services.database import RawTickRecord, get_session
 from app.services.kite_websocket_price_feed import WebSocketTick
+from app.services.strategy_lineage_service import current_strategy_lineage
 
 
 class TickReplayService:
@@ -23,7 +25,63 @@ class TickReplayService:
             "first_timestamp": self._timestamp(ordered[0]) if ordered else None,
             "last_timestamp": self._timestamp(ordered[-1]) if ordered else None,
             "results": results,
+            **current_strategy_lineage(),
         }
+
+    def replay_persisted(
+        self,
+        *,
+        session_date: str,
+        instrument_tokens: Iterable[int] | None = None,
+        config_hash: str | None = None,
+    ) -> dict[str, Any]:
+        session = get_session()
+        try:
+            query = session.query(RawTickRecord).filter(RawTickRecord.session_date == str(session_date))
+            tokens = {int(token) for token in instrument_tokens or []}
+            if tokens:
+                query = query.filter(RawTickRecord.instrument_token.in_(tokens))
+            if config_hash:
+                query = query.filter(RawTickRecord.config_hash == str(config_hash))
+            rows = query.order_by(RawTickRecord.sequence.asc(), RawTickRecord.id.asc()).all()
+            events = [
+                {
+                    "instrument_token": row.instrument_token,
+                    "price": row.last_price,
+                    "bid": row.bid,
+                    "ask": row.ask,
+                    "volume": row.cumulative_volume,
+                    "timestamp": row.exchange_timestamp or row.receive_timestamp,
+                    "receive_timestamp": row.receive_timestamp,
+                    "timestamp_source": row.timestamp_source,
+                    "packet_type": row.packet_type,
+                }
+                for row in rows
+            ]
+            lineage_values = sorted({(str(row.strategy_version), str(row.config_hash)) for row in rows})
+        finally:
+            session.close()
+        ordered_ticks = [self._tick(event) for event in events]
+        replay_results = [self.handler(tick) for tick in ordered_ticks]
+        result = {
+            "ticks_replayed": len(ordered_ticks),
+            "first_timestamp": self._timestamp(ordered_ticks[0]) if ordered_ticks else None,
+            "last_timestamp": self._timestamp(ordered_ticks[-1]) if ordered_ticks else None,
+            "results": replay_results,
+            **current_strategy_lineage(),
+        }
+        result.update(
+            {
+                "session_date": str(session_date),
+                "persisted_tick_count": len(events),
+                "lineages": [
+                    {"strategy_version": strategy_version, "config_hash": hash_value}
+                    for strategy_version, hash_value in lineage_values
+                ],
+                "mixed_lineage": len(lineage_values) > 1,
+            }
+        )
+        return result
 
     def _tick(self, event: dict[str, Any] | WebSocketTick) -> WebSocketTick:
         if isinstance(event, WebSocketTick):

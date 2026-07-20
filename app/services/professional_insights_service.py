@@ -483,6 +483,13 @@ class ProfessionalInsightsService:
     def _learning_eligible_rejections(self, rows: list[RejectedOpportunityRecord]) -> list[RejectedOpportunityRecord]:
         return [row for row in rows if bool(getattr(row, "learning_eligible", 0))]
 
+    def _independent_rejections(self, rows: list[RejectedOpportunityRecord]) -> list[RejectedOpportunityRecord]:
+        independent: dict[str, RejectedOpportunityRecord] = {}
+        for row in rows:
+            key = str(getattr(row, "episode_key", None) or f"legacy-row:{row.id}")
+            independent.setdefault(key, row)
+        return list(independent.values())
+
     def _rejection_learning_filter_summary(self, rows: list[RejectedOpportunityRecord]) -> dict[str, Any]:
         eligible = self._learning_eligible_rejections(rows)
         excluded = [row for row in rows if not bool(getattr(row, "learning_eligible", 0))]
@@ -499,6 +506,7 @@ class ProfessionalInsightsService:
     def _accepted_vs_rejected(
         self, opportunities: list[OpportunityRecord], rejections: list[RejectedOpportunityRecord]
     ) -> dict[str, Any]:
+        rejections = self._independent_rejections(rejections)
         closed = [row for row in opportunities if row.status == "closed"]
         rejected_reviewed = [row for row in rejections if row.later_outcome]
         missed_winners = [row for row in rejected_reviewed if self._is_win(row.later_outcome)]
@@ -1226,6 +1234,8 @@ class ProfessionalInsightsService:
         }
 
     def _rejected_quality_summary(self, rejections: list[RejectedOpportunityRecord]) -> dict[str, Any]:
+        observation_count = len(rejections)
+        rejections = self._independent_rejections(rejections)
         reviewed = [row for row in rejections if row.later_outcome]
         missed = [row for row in reviewed if self._is_win(row.later_outcome)]
         saved = [row for row in reviewed if self._is_loss(row.later_outcome)]
@@ -1234,6 +1244,8 @@ class ProfessionalInsightsService:
         outcome_minutes = [float(row.later_outcome_minutes) for row in reviewed if row.later_outcome_minutes is not None]
         return {
             "total_rejected": len(rejections),
+            "observation_count": observation_count,
+            "dependent_duplicate_count": observation_count - len(rejections),
             "reviewed": len(reviewed),
             "unresolved": len(unresolved),
             "missed_winners": len(missed),
@@ -1258,17 +1270,30 @@ class ProfessionalInsightsService:
                 groups[label].append(row)
         rows: list[dict[str, Any]] = []
         for gate, items in groups.items():
-            reviewed = [row for row in items if row.later_outcome]
+            independent_by_episode: dict[str, RejectedOpportunityRecord] = {}
+            for row in items:
+                episode_key = str(getattr(row, "episode_key", None) or f"legacy-row:{row.id}")
+                independent_by_episode.setdefault(episode_key, row)
+            independent = list(independent_by_episode.values())
+            reviewed = [row for row in independent if row.later_outcome]
             missed = [row for row in reviewed if self._is_win(row.later_outcome)]
             saved = [row for row in reviewed if self._is_loss(row.later_outcome)]
             ambiguous = [row for row in reviewed if self._is_ambiguous(row)]
-            unresolved = [row for row in items if not row.later_outcome]
+            unresolved = [row for row in independent if not row.later_outcome]
             moves = [self._rejected_move_value(row) for row in reviewed if not self._is_ambiguous(row)]
             minutes = [float(row.later_outcome_minutes) for row in reviewed if row.later_outcome_minutes is not None]
+            primary_count = len([row for row in independent if self._clean_label(str(row.primary_gate or "unknown_gate")) == gate])
+            isolated_count = len([row for row in independent if len(set(self._clean_label(item) for item in self._json_list(row.reasons_json) if item)) <= 1])
             rows.append(
                 {
                     "gate_or_reason": gate,
-                    "count": len(items),
+                    "count": len(independent),
+                    "observation_count": len(items),
+                    "independent_episode_count": len(independent),
+                    "dependent_duplicate_count": len(items) - len(independent),
+                    "primary_gate_count": primary_count,
+                    "co_occurring_reason_count": len(independent) - primary_count,
+                    "isolated_evidence_count": isolated_count,
                     "reviewed": len(reviewed),
                     "missed_winners": len(missed),
                     "saved_losers": len(saved),
@@ -1276,12 +1301,13 @@ class ProfessionalInsightsService:
                     "unresolved": len(unresolved),
                     "missed_winner_rate_pct": round((len(missed) / len(reviewed)) * 100, 2) if reviewed else 0.0,
                     "saved_loser_rate_pct": round((len(saved) / len(reviewed)) * 100, 2) if reviewed else 0.0,
-                    "unresolved_rate_pct": round((len(unresolved) / len(items)) * 100, 2) if items else 0.0,
+                    "unresolved_rate_pct": round((len(unresolved) / len(independent)) * 100, 2) if independent else 0.0,
                     "ambiguous_rate_pct": round((len(ambiguous) / len(reviewed)) * 100, 2) if reviewed else 0.0,
                     "avg_move_after_rejection": round(sum(moves) / len(moves), 2) if moves else 0.0,
                     "avg_minutes_to_outcome": round(sum(minutes) / len(minutes), 2) if minutes else None,
-                    "evidence_quality": self._gate_evidence_quality(len(items), len(reviewed), len(ambiguous)),
+                    "evidence_quality": self._gate_evidence_quality(len(independent), len(reviewed), len(ambiguous)),
                     "interpretation": self._gate_effectiveness_interpretation(len(reviewed), len(missed), len(saved), len(ambiguous)),
+                    "causal_claim": "not_established_observational_episode_evidence_only",
                 }
             )
         return sorted(

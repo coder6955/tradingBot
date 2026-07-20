@@ -30,6 +30,7 @@ from app.services.strategy_edge_service import StrategyEdgeService
 from app.services.time_bucket_edge_service import TimeBucketEdgeService
 from app.services.trade_setup_service import OptionContract, TradeSetupService
 from app.services.volatility_edge_service import VolatilityEdgeService
+from app.services.fast_scan_context_service import FastScanContextService
 
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ class ScannerService:
         banknifty_regime_filter_service: BankNiftyRegimeFilterService | None = None,
         armed_entry_tracker: ArmedEntryTrackerService | None = None,
         setup_family_classifier: SetupFamilyClassifierService | None = None,
+        fast_scan_context_service: FastScanContextService | None = None,
     ) -> None:
         self.signal_service = signal_service or SignalService()
         self.scoring_service = scoring_service or IndicatorScoringService()
@@ -89,6 +91,7 @@ class ScannerService:
         self.banknifty_regime_filter_service = banknifty_regime_filter_service or BankNiftyRegimeFilterService()
         self.armed_entry_tracker = armed_entry_tracker
         self.setup_family_classifier = setup_family_classifier or SetupFamilyClassifierService()
+        self.fast_scan_context_service = fast_scan_context_service
 
         # Market data is independent from live order placement. When Kite data is
         # requested, fail closed instead of silently returning mock opportunities.
@@ -146,10 +149,37 @@ class ScannerService:
         option_instruments = self._get_option_instruments()
         symbols = self._focus_symbols(symbols or self._derive_scan_universe(option_instruments))
         market_snapshots = self._market_snapshots(symbols)
+        if self.fast_scan_context_service is not None and rejection_source != "fast_rally_candidate_validation":
+            self.fast_scan_context_service.refresh(symbols=symbols, market_snapshots=market_snapshots)
         enforce_budget = str(order_mode).lower() == "live"
 
         for symbol in symbols:
             snapshot = self.feed.get_snapshot(symbol)
+            if "analysis_ready" in snapshot and not bool(snapshot.get("analysis_ready")):
+                quality_reasons = [str(item) for item in (snapshot.get("data_quality_reasons") or [])]
+                reasons = ["canonical completed-candle analysis was not ready", *quality_reasons]
+                self._log_decision(
+                    symbol=symbol,
+                    accepted=False,
+                    score=0,
+                    reasons=reasons,
+                    breakdown=self._empty_score_breakdown(),
+                    snapshot=snapshot,
+                    side=side,
+                    trend="unknown",
+                )
+                self._save_rejection(
+                    symbol=symbol,
+                    side=side,
+                    trend="unknown",
+                    score=0,
+                    reasons=reasons,
+                    breakdown=self._empty_score_breakdown(),
+                    snapshot=snapshot,
+                    rejection_source=rejection_source,
+                )
+                diagnostics.append({"symbol": symbol, "signal": None, "accepted": False, "reasons": reasons})
+                continue
             if settings.use_kite_market_data and not snapshot.get("is_real_data"):
                 reasons = ["real Kite market data was not available for this symbol"]
                 self._log_decision(
@@ -427,7 +457,14 @@ class ScannerService:
             factor_scores["outcome_learning"] = outcome_learning_eval
             factor_scores = self._with_strategy_metadata(factor_scores, order_mode)
             confidence = confidences.get(symbol, combined_score / 100.0)
-            probability = min(0.92, (combined_score / 100.0) * 0.72 + (liquidity_score / 100.0) * 0.12 + (int(chain_eval["score"]) / 100.0) * 0.08)
+            heuristic_score_confidence = min(0.92, (combined_score / 100.0) * 0.72 + (liquidity_score / 100.0) * 0.12 + (int(chain_eval["score"]) / 100.0) * 0.08)
+            probability = None
+            factor_scores["probability_estimate"] = {
+                "probability": None,
+                "source": "unavailable_insufficient_calibration",
+                "heuristic_score_confidence": heuristic_score_confidence,
+                "minimum_calibration_samples": settings.probability_calibration_min_samples,
+            }
             quantity = self.trade_setup_service.position_size(
                 entry_price=prices["entry_price"],
                 stop_loss=prices["stop_loss"],
@@ -877,6 +914,11 @@ class ScannerService:
         return None
 
     def _technical_score(self, snapshot: dict[str, object], trend: str) -> int:
+        if "analysis_ready" in snapshot and not bool(snapshot.get("analysis_ready")):
+            return 0
+        required = ("rsi", "adx", "macd_positive", "ema_alignment", "vwap_above_price", "volume_confirmed", "trend_bullish")
+        if any(snapshot.get(key) is None for key in required):
+            return 0
         bullish = trend.lower() == "bullish"
         if bullish:
             return self.scoring_service.score_symbol(
@@ -987,7 +1029,7 @@ class ScannerService:
         prices: dict[str, float],
         entry_timing_eval: dict[str, object],
         score: int,
-        probability: float,
+        probability: float | None,
         confidence: float,
         quantity: int,
         factor_scores: dict[str, object],

@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import json
 import itertools
+import heapq
 import queue
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -65,6 +66,9 @@ class KiteWebSocketPriceFeed:
         order_update_handler: Callable[[dict[str, Any]], Any] | None = None,
         tick_handler: Callable[[WebSocketTick], Any] | None = None,
         gap_handler: Callable[[dict[str, Any]], Any] | None = None,
+        raw_tick_handler: Callable[[WebSocketTick, dict[str, Any]], Any] | None = None,
+        underlying_tick_handler: Callable[[WebSocketTick], Any] | None = None,
+        latency_metrics: Any | None = None,
         clock: Callable[[], datetime] | None = None,
         market_session_service: MarketSessionService | None = None,
     ) -> None:
@@ -74,6 +78,9 @@ class KiteWebSocketPriceFeed:
         self.order_update_handler = order_update_handler
         self.tick_handler = tick_handler
         self.gap_handler = gap_handler
+        self.raw_tick_handler = raw_tick_handler
+        self.underlying_tick_handler = underlying_tick_handler
+        self.latency_metrics = latency_metrics
         self.clock = clock or ist_now_naive
         self.market_session_service = market_session_service or MarketSessionService(clock=self.clock)
         self._ticker: Any | None = None
@@ -84,6 +91,7 @@ class KiteWebSocketPriceFeed:
         self._subscription_owners: dict[int, dict[str, datetime | None]] = {}
         self._subscription_owner_modes: dict[int, dict[str, str]] = {}
         self._subscription_errors: dict[int, str] = {}
+        self._token_symbols: dict[int, str] = {}
         self._lock = RLock()
         self.running = False
         self.connected = False
@@ -131,6 +139,9 @@ class KiteWebSocketPriceFeed:
         self._pending_candle_persist: dict[tuple[int, str, datetime], WebSocketPremiumCandle] = {}
         self._queued_candle_persist_keys: set[tuple[int, str, datetime]] = set()
         self.event_queue_dropped_count = 0
+        self.event_queue_evicted_warm_count = 0
+        self.event_queue_critical_drop_count = 0
+        self.critical_status: str | None = None
         self.candle_persist_queue_dropped_count = 0
         self.duplicate_start_prevented_count = 0
         self.reconnect_request_count = 0
@@ -275,6 +286,20 @@ class KiteWebSocketPriceFeed:
             logger.info("Kite WebSocket queued subscription while disconnected: %s", sorted(clean_tokens))
             return {"subscribed": [], "queued": sorted(clean_tokens), "reason": "websocket_disconnected"}
         return self._subscribe_connected(clean_tokens)
+
+    def register_token_symbol(self, instrument_token: int, symbol: str) -> None:
+        token = int(instrument_token)
+        if token > 0 and str(symbol or "").strip():
+            with self._lock:
+                self._token_symbols[token] = str(symbol).upper().strip()
+
+    def subscription_context(self, instrument_token: int) -> dict[str, Any]:
+        token = int(instrument_token)
+        with self._lock:
+            owners = sorted(self._subscription_owners.get(token, {}))
+            modes = dict(self._subscription_owner_modes.get(token, {}))
+            symbol = self._token_symbols.get(token)
+        return {"instrument_token": token, "symbol": symbol, "owners": owners, "owner_modes": modes}
 
     def replace_owner_subscriptions(
         self,
@@ -467,6 +492,9 @@ class KiteWebSocketPriceFeed:
                 "event_queue_size": self._event_queue.qsize(),
                 "event_queue_capacity": self._event_queue.maxsize,
                 "event_queue_dropped_count": self.event_queue_dropped_count,
+                "event_queue_evicted_warm_count": self.event_queue_evicted_warm_count,
+                "event_queue_critical_drop_count": self.event_queue_critical_drop_count,
+                "critical_status": self.critical_status,
                 "candle_persist_queue_size": self._candle_persist_queue.qsize(),
                 "candle_persist_queue_capacity": self._candle_persist_queue.maxsize,
                 "candle_persist_queue_dropped_count": self.candle_persist_queue_dropped_count,
@@ -523,6 +551,9 @@ class KiteWebSocketPriceFeed:
             if event.get("entry_blocking"):
                 self._dispatch_gap(event)
         for tick in parsed_ticks:
+            self._record_exchange_receipt_latency(tick)
+            self._run_underlying_tick_handler(tick)
+            self._run_raw_tick_handler(tick)
             self._dispatch_tick(tick)
 
     def _on_close(self, ws: Any, code: int | None, reason: str | None) -> None:
@@ -781,11 +812,55 @@ class KiteWebSocketPriceFeed:
             self._handle_queued_event(event_type, payload)
             return
         self._ensure_event_worker()
+        priority = self._event_priority(event_type, payload)
+        item = (priority, next(self._event_sequence), event_type, payload)
         try:
-            self._event_queue.put_nowait((self._event_priority(event_type, payload), next(self._event_sequence), event_type, payload))
+            self._event_queue.put_nowait(item)
         except queue.Full:
+            retained = False
+            if priority <= 2 and self._evict_warm_event():
+                try:
+                    self._event_queue.put_nowait(item)
+                    retained = True
+                except queue.Full:
+                    retained = False
+            if retained:
+                return
             self.event_queue_dropped_count += 1
-            logger.warning("Kite WebSocket event queue full; dropped event=%s", event_type)
+            critical = priority <= 2
+            if critical:
+                self.event_queue_critical_drop_count += 1
+                self.critical_status = "risk_sensitive_websocket_event_dropped"
+                logger.critical("Kite WebSocket risk-sensitive event queue drop event=%s priority=%s", event_type, priority)
+            else:
+                logger.warning("Kite WebSocket event queue full; dropped warm event=%s", event_type)
+            if self.latency_metrics is not None:
+                try:
+                    self.latency_metrics.record_queue_drop(
+                        critical=critical,
+                        detail={"event_type": event_type, "priority": priority, "queue_capacity": self._event_queue.maxsize},
+                    )
+                except Exception:
+                    logger.exception("latency queue-drop recording failed")
+
+    def _evict_warm_event(self) -> bool:
+        with self._event_queue.mutex:
+            warm_indexes = [index for index, queued in enumerate(self._event_queue.queue) if int(queued[0]) >= 4]
+            if not warm_indexes:
+                return False
+            index = max(warm_indexes, key=lambda item_index: (self._event_queue.queue[item_index][0], self._event_queue.queue[item_index][1]))
+            del self._event_queue.queue[index]
+            heapq.heapify(self._event_queue.queue)
+            self._event_queue.unfinished_tasks = max(0, self._event_queue.unfinished_tasks - 1)
+            self._event_queue.not_full.notify()
+        self.event_queue_dropped_count += 1
+        self.event_queue_evicted_warm_count += 1
+        if self.latency_metrics is not None:
+            self.latency_metrics.record_queue_drop(
+                critical=False,
+                detail={"event_type": "warm_tick_evicted", "queue_capacity": self._event_queue.maxsize},
+            )
+        return True
 
     def _event_priority(self, event_type: str, payload: Any) -> int:
         if event_type == "order_update":
@@ -823,6 +898,34 @@ class KiteWebSocketPriceFeed:
             self.tick_handler(tick)
         except Exception:
             logger.exception("Kite WebSocket tick handler failed")
+
+    def _run_underlying_tick_handler(self, tick: WebSocketTick) -> None:
+        if self.underlying_tick_handler is None:
+            return
+        try:
+            self.underlying_tick_handler(tick)
+        except Exception:
+            logger.exception("canonical underlying tick handler failed")
+
+    def _run_raw_tick_handler(self, tick: WebSocketTick) -> None:
+        if self.raw_tick_handler is None:
+            return
+        try:
+            self.raw_tick_handler(tick, self.subscription_context(tick.instrument_token))
+        except Exception:
+            logger.exception("raw tick capture handler failed")
+
+    def _record_exchange_receipt_latency(self, tick: WebSocketTick) -> None:
+        if self.latency_metrics is None or tick.receive_timestamp is None:
+            return
+        if tick.timestamp_source not in {"exchange_timestamp", "last_trade_time"}:
+            return
+        self.latency_metrics.record_between(
+            "exchange_timestamp_to_local_receipt",
+            tick.timestamp,
+            tick.receive_timestamp,
+            detail={"instrument_token": tick.instrument_token, "timestamp_source": tick.timestamp_source},
+        )
 
     def _run_gap_handler(self, event: dict[str, Any]) -> None:
         if self.gap_handler is None:
