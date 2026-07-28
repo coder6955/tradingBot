@@ -255,6 +255,10 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
         self.assertFalse(result["mixed_lineage"])
 
     def test_kite_interval_translation(self) -> None:
+        from app.providers.kite_auth_state import kite_auth_state
+
+        kite_auth_state.clear()
+
         class Client:
             def __init__(self):
                 self.interval = None

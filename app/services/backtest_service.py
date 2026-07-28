@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import math
 import re
 import statistics
@@ -15,6 +15,7 @@ from app.services.day_type_service import DayTypeService
 from app.services.greeks_service import GreeksService
 from app.services.indicator_service import compute_ema, compute_macd, compute_rsi
 from app.services.market_regime_service import MarketRegimeService
+from app.services.multi_timeframe_context_service import MultiTimeframeContextService
 from app.services.execution_realism_service import ExecutionRealismService
 from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
 from app.services.option_quality_service import OptionQualityService
@@ -84,10 +85,12 @@ class HistoricalScannerReplayFeed:
         underlying: list[Candle],
         option_candles: dict[str, list[Candle]],
         option_snapshots: dict[str, list[OptionQuoteSnapshot]] | None = None,
+        underlying_timeframes: dict[str, list[Candle]] | None = None,
     ) -> None:
         self.symbol = symbol.upper()
         self.timeframe = timeframe
         self.underlying = list(underlying)
+        self.underlying_timeframes = {str(name): list(rows) for name, rows in (underlying_timeframes or {timeframe: underlying}).items()}
         self.option_candles = option_candles
         self.option_snapshots = option_snapshots or {}
         self.current_index = 0
@@ -118,7 +121,8 @@ class HistoricalScannerReplayFeed:
                 "trend_bullish": False,
                 "market_context": "unavailable",
             }
-        rows = [row for row in candles if self._as_datetime(row.timestamp) <= self.current_timestamp]
+        completed_by = self.current_timestamp - timedelta(minutes=1 if self.timeframe == "1minute" else 5)
+        rows = [row for row in candles if self._as_datetime(row.timestamp) <= completed_by]
         if not rows:
             return {
                 "symbol": clean_symbol,
@@ -167,14 +171,26 @@ class HistoricalScannerReplayFeed:
         return dict(self._call_counts)
 
     def candles_for(self, symbol: str, *, current_session_only: bool = False, limit: int | None = None) -> list[Candle]:
-        rows = [row for row in self._candles_for_symbol(symbol.upper()) if self._as_datetime(row.timestamp) <= self.current_timestamp]
+        completed_by = self.current_timestamp - timedelta(minutes=1 if self.timeframe == "1minute" else 5)
+        rows = [row for row in self._candles_for_symbol(symbol.upper()) if self._as_datetime(row.timestamp) <= completed_by]
         if current_session_only:
             session_date = self.current_timestamp.date()
             rows = [row for row in rows if self._as_datetime(row.timestamp).date() == session_date]
         return rows[-limit:] if limit else rows
 
+    def candles_for_timeframe(self, timeframe: str, *, limit: int | None = None) -> list[Candle]:
+        minutes = 1 if timeframe == "1minute" else 5
+        completed_by = self.current_timestamp - timedelta(minutes=minutes)
+        rows = [
+            row
+            for row in self.underlying_timeframes.get(timeframe, [])
+            if self._as_datetime(row.timestamp) <= completed_by
+        ]
+        return rows[-limit:] if limit else rows
+
     def option_candles_for(self, tradingsymbol: str, *, current_session_only: bool = False, limit: int | None = None) -> list[Candle]:
-        rows = [row for row in self.option_candles.get(tradingsymbol, []) if self._as_datetime(row.timestamp) <= self.current_timestamp]
+        completed_by = self.current_timestamp - timedelta(minutes=1 if self.timeframe == "1minute" else 5)
+        rows = [row for row in self.option_candles.get(tradingsymbol, []) if self._as_datetime(row.timestamp) <= completed_by]
         if current_session_only:
             session_date = self.current_timestamp.date()
             rows = [row for row in rows if self._as_datetime(row.timestamp).date() == session_date]
@@ -483,8 +499,8 @@ class BacktestBankNiftyIntelligenceService(BankNiftyIntelligenceService):
     def _recent_candles(self, symbol: str, timeframe: str = "5minute", limit: int = 30) -> list[Candle]:
         return self.feed.candles_for(symbol, limit=limit)
 
-    def _opening_range_status(self, bullish: bool, price: float) -> dict[str, Any]:
-        candles = self._today_candles("BANKNIFTY")
+    def _opening_range_status(self, bullish: bool, price: float, *, candles: list[Candle] | None = None) -> dict[str, Any]:
+        candles = list(candles) if candles is not None else self._today_candles("BANKNIFTY")
         if not candles:
             return {"status": "unavailable", "passed": True, "reason": "opening range candles unavailable"}
         if self.feed.current_timestamp.time() < self._parse_time(settings.banknifty_first_trade_time):
@@ -552,13 +568,33 @@ class BacktestBankNiftyIntelligenceService(BankNiftyIntelligenceService):
 
 
 class BacktestNoopRejectedOpportunityRepository:
+    def market_session(self) -> str:
+        return "BACKTEST"
+
     def save_rejection(self, **_: Any) -> None:
         return None
 
 
 class BacktestNoLookaheadGuard:
     def evaluate(self, **_: Any) -> dict[str, Any]:
-        return {"enabled": False, "passed": True, "reasons": ["disabled in historical scanner parity to avoid lookahead bias"]}
+        return {
+            "enabled": False,
+            "passed": True,
+            "score": 50,
+            "details": {},
+            "reasons": ["shadow diagnostic disabled in historical replay to prevent lookahead"],
+        }
+
+
+class BacktestMultiTimeframeContextService(MultiTimeframeContextService):
+    def __init__(self, feed: HistoricalScannerReplayFeed) -> None:
+        self.feed = feed
+
+    def _load_bulk(self, symbol: str, *, as_of: datetime | None = None) -> dict[str, list[Candle]]:
+        return {
+            "1minute": self.feed.candles_for_timeframe("1minute", limit=80),
+            "5minute": self.feed.candles_for_timeframe("5minute", limit=80),
+        }
 
 
 class BacktestService:
@@ -579,6 +615,7 @@ class BacktestService:
         "only_vwap_premium_quality": {"unsupported": "VWAP/premium/quality ablation needs stored VWAP and option-quality snapshots."},
         "only_trend_quality_premium": {"unsupported": "Quality and premium confirmation are not fully represented in this candle signal replay."},
     }
+    SUPPORTED_TIMEFRAMES = {"1minute", "5minute"}
 
     def run(
         self,
@@ -590,6 +627,7 @@ class BacktestService:
         horizon_candles: int | None = None,
         limit: int = 2000,
     ) -> dict[str, Any]:
+        self._require_supported_timeframe(timeframe)
         side = side.upper()
         direction = (direction or "BOTH").upper()
         horizon = horizon_candles or settings.backtest_horizon_candles
@@ -678,6 +716,7 @@ class BacktestService:
         limit: int = 2000,
         decision_mode: str = "scanner_parity",
     ) -> dict[str, Any]:
+        self._require_supported_timeframe(timeframe)
         symbol = symbol.upper()
         direction = (direction or "BOTH").upper()
         horizon = horizon_candles or settings.backtest_horizon_candles
@@ -747,6 +786,7 @@ class BacktestService:
         limit: int = 3000,
         decision_mode: str = "scanner_parity",
     ) -> dict[str, Any]:
+        self._require_supported_timeframe(timeframe)
         symbol = symbol.upper()
         direction = (direction or "BOTH").upper()
         horizon = horizon_candles or settings.backtest_horizon_candles
@@ -949,6 +989,7 @@ class BacktestService:
         horizon_candles: int | None = None,
         limit: int = 2000,
     ) -> dict[str, Any]:
+        self._require_supported_timeframe(timeframe)
         symbol = symbol.upper()
         direction = (direction or "BOTH").upper()
         horizon = horizon_candles or settings.backtest_horizon_candles
@@ -1019,6 +1060,14 @@ class BacktestService:
             underlying=underlying,
             option_candles=option_candles,
             option_snapshots=self._load_option_snapshots(option_candles),
+            underlying_timeframes={
+                "1minute": underlying
+                if timeframe == "1minute"
+                else self._load_candles(symbol=symbol, timeframe="1minute", limit=max(3000, len(underlying) * 5)),
+                "5minute": underlying
+                if timeframe == "5minute"
+                else self._load_candles(symbol=symbol, timeframe="5minute", limit=max(1000, len(underlying))),
+            },
         )
         scanner = self._historical_scanner(feed)
         trades: list[OptionBacktestTrade] = []
@@ -1118,6 +1167,8 @@ class BacktestService:
             option_premium_confirmation_service=BacktestPremiumConfirmationService(feed),
             option_quality_service=OptionQualityService(BacktestGreeksService(feed)),
             banknifty_intelligence_service=BacktestBankNiftyIntelligenceService(feed),
+            multi_timeframe_context_service=BacktestMultiTimeframeContextService(feed),
+            volatility_edge_service=BacktestNoLookaheadGuard(),
             rejected_opportunity_repository=BacktestNoopRejectedOpportunityRepository(),
             outcome_learning_service=BacktestNoLookaheadGuard(),
             time_bucket_edge_service=BacktestNoLookaheadGuard(),
@@ -1125,6 +1176,10 @@ class BacktestService:
             banknifty_option_prewarm_service=None,
             armed_entry_tracker=None,
         )
+
+    def _require_supported_timeframe(self, timeframe: str) -> None:
+        if str(timeframe) not in self.SUPPORTED_TIMEFRAMES:
+            raise ValueError("strategy replay supports only 1minute and 5minute candles")
 
     def _simulate_option_trade_from_signal(
         self,

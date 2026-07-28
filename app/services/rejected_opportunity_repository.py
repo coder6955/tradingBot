@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import hashlib
 from collections import Counter
-from datetime import datetime, time
+from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime, time, timedelta
 from typing import Any
 
 from app.config import settings
@@ -13,6 +14,10 @@ from app.services.time_utils import ist_now, ist_now_naive
 
 
 class RejectedOpportunityRepository:
+    def market_session(self) -> str:
+        """Public session label used by scanner diagnostic enrichment."""
+        return self._market_session()
+
     """Persist rejected scanner setups for later no-trade review."""
 
     DATA_OR_SESSION_REASON_MARKERS = (
@@ -44,6 +49,13 @@ class RejectedOpportunityRepository:
         "premium is too large",
         "account risk",
     )
+
+    def __init__(self) -> None:
+        self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rejection-writer")
+
+    def save_rejection_async(self, **kwargs: Any) -> Future[RejectedOpportunityRecord]:
+        """Queue non-critical scanner observations away from the decision thread."""
+        return self._writer.submit(self.save_rejection, **kwargs)
 
     def save_rejection(
         self,
@@ -93,11 +105,38 @@ class RejectedOpportunityRepository:
         try:
             now = ist_now_naive()
             lineage = current_strategy_lineage()
+            primary_gate = reasons[0] if reasons else None
+            tradingsymbol = getattr(contract, "tradingsymbol", None)
+            five_minute_marker = self._five_minute_marker(factors)
+            duplicate = (
+                session.query(RejectedOpportunityRecord)
+                .filter(
+                    RejectedOpportunityRecord.symbol == symbol.upper(),
+                    RejectedOpportunityRecord.action == action,
+                    RejectedOpportunityRecord.tradingsymbol == tradingsymbol,
+                    RejectedOpportunityRecord.strategy_version == str(lineage["strategy_version"]),
+                    RejectedOpportunityRecord.config_hash == str(lineage["config_hash"]),
+                    RejectedOpportunityRecord.primary_gate == primary_gate,
+                    RejectedOpportunityRecord.created_at >= now - timedelta(seconds=max(300, int(settings.setup_episode_window_seconds))),
+                )
+                .order_by(RejectedOpportunityRecord.id.desc())
+                .first()
+            )
+            if duplicate is not None and self._five_minute_marker(self._json_dict(duplicate.factor_scores_json)) == five_minute_marker:
+                if duplicate.episode_id:
+                    episode = session.get(SetupEpisodeRecord, int(duplicate.episode_id))
+                    if episode is not None:
+                        episode.observation_count = int(episode.observation_count or 0) + 1
+                        episode.updated_at = now
+                session.commit()
+                session.refresh(duplicate)
+                session.expunge(duplicate)
+                return duplicate
             episode_key = self._episode_key(
                 timestamp=now,
                 symbol=symbol,
                 action=action,
-                tradingsymbol=getattr(contract, "tradingsymbol", None),
+                tradingsymbol=tradingsymbol,
                 strategy_version=str(lineage["strategy_version"]),
                 config_hash=str(lineage["config_hash"]),
             )
@@ -131,7 +170,7 @@ class RejectedOpportunityRepository:
                 strike=getattr(contract, "strike", None),
                 option_type=getattr(contract, "option_type", None),
                 score=int(score or 0),
-                primary_gate=reasons[0] if reasons else None,
+                primary_gate=primary_gate,
                 rejection_source=rejection_source,
                 rejection_context=learning["rejection_context"],
                 market_session=session_label,
@@ -151,6 +190,7 @@ class RejectedOpportunityRepository:
             session.add(record)
             session.commit()
             session.refresh(record)
+            session.expunge(record)
             return record
         finally:
             session.close()
@@ -438,3 +478,20 @@ class RejectedOpportunityRepository:
             return [str(item) for item in data] if isinstance(data, list) else []
         except json.JSONDecodeError:
             return []
+
+    def _json_dict(self, value: str | None) -> dict[str, Any]:
+        if not value:
+            return {}
+        try:
+            data = json.loads(value)
+            return dict(data) if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def _five_minute_marker(self, factors: dict[str, Any]) -> str | None:
+        mtf = factors.get("multi_timeframe", {}) if isinstance(factors.get("multi_timeframe"), dict) else {}
+        for frame in mtf.get("frames", []) if isinstance(mtf.get("frames"), list) else []:
+            if isinstance(frame, dict) and str(frame.get("timeframe")) == "5minute":
+                return str(frame.get("last_completed_at") or "") or None
+        snapshot = factors.get("rejection_snapshot", {}) if isinstance(factors.get("rejection_snapshot"), dict) else {}
+        return str(snapshot.get("five_minute_candle_at") or snapshot.get("candle_timestamp") or "") or None

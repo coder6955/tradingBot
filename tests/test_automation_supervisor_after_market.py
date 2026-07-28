@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from datetime import datetime
 
@@ -71,6 +72,37 @@ class FakeNotificationService:
         return None
 
 
+class FakeLifecycleRepository:
+    def __init__(self, previous: dict[str, object] | None = None) -> None:
+        self.previous = previous
+        self.started: list[dict[str, object]] = []
+        self.finished: list[dict[str, object]] = []
+
+    def latest(self, **kwargs):
+        return dict(self.previous) if self.previous else None
+
+    def latest_run(self, **kwargs):
+        return dict(self.previous) if self.previous else None
+
+    def start(self, **kwargs):
+        self.started.append(dict(kwargs))
+        return {
+            "id": 2,
+            "status": "running",
+            "metadata": dict(kwargs.get("metadata") or {}),
+            "job_name": kwargs.get("job_name"),
+            "trading_date": kwargs.get("trading_date"),
+        }
+
+    def finish(self, **kwargs):
+        self.finished.append(dict(kwargs))
+        return {
+            "id": kwargs["run_id"],
+            "status": kwargs["status"],
+            "metadata": dict(kwargs.get("metadata") or {}),
+        }
+
+
 class FakeAfterMarketResearchService:
     def __init__(self) -> None:
         self.calls: list[datetime] = []
@@ -92,6 +124,7 @@ class FixedClockAutomationSupervisor(AutomationSupervisorService):
         auto_trader_service: FakeAutoTraderService | None = None,
         snapshot_collector_service: FakeSnapshotCollectorService | None = None,
         outcome_service: FakeOutcomeService | None = None,
+        lifecycle_repository: FakeLifecycleRepository | None = None,
     ) -> None:
         self.fixed_now = now
         self.fake_outcome_service = outcome_service or FakeOutcomeService()
@@ -103,6 +136,7 @@ class FixedClockAutomationSupervisor(AutomationSupervisorService):
             risk_management_service=FakeRiskManagementService(),
             notification_service=FakeNotificationService(),
             after_market_research_service=after_market_research_service,
+            lifecycle_repository=lifecycle_repository,
         )
 
     def _now(self) -> datetime:
@@ -115,7 +149,9 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         self.original_enable_live_gap_backfill = settings.enable_live_option_candle_gap_backfill
         self.original_live_gap_interval = settings.live_option_candle_backfill_interval_seconds
         self.original_live_gap_timeframes = settings.live_option_candle_backfill_timeframes
+        self.original_automation_enabled = settings.automation_enabled
         object.__setattr__(settings, "automation_stop_after_after_market_complete", True)
+        object.__setattr__(settings, "automation_enabled", False)
         object.__setattr__(settings, "enable_live_option_candle_gap_backfill", True)
         object.__setattr__(settings, "live_option_candle_backfill_interval_seconds", 120)
         object.__setattr__(settings, "live_option_candle_backfill_timeframes", "1minute")
@@ -125,6 +161,7 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         object.__setattr__(settings, "enable_live_option_candle_gap_backfill", self.original_enable_live_gap_backfill)
         object.__setattr__(settings, "live_option_candle_backfill_interval_seconds", self.original_live_gap_interval)
         object.__setattr__(settings, "live_option_candle_backfill_timeframes", self.original_live_gap_timeframes)
+        object.__setattr__(settings, "automation_enabled", self.original_automation_enabled)
 
     def test_supervisor_runs_research_in_market_closed_branch(self) -> None:
         research = FakeAfterMarketResearchService()
@@ -240,6 +277,51 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         self.assertTrue(
             any(action.get("action") == "automation_stop_after_after_market_complete" for action in result["actions"])
         )
+
+    def test_boot_managed_supervisor_survives_after_market_for_next_session(self) -> None:
+        object.__setattr__(settings, "automation_enabled", True)
+        research = FakeAfterMarketResearchService()
+        supervisor = FixedClockAutomationSupervisor(
+            now=datetime(2026, 7, 3, 16, 0),
+            after_market_research_service=research,
+        )
+        supervisor.running = True
+
+        result = supervisor.run_once({"symbols": "BANKNIFTY"})
+
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(supervisor.running)
+        self.assertFalse(
+            any(action.get("action") == "automation_stop_after_after_market_complete" for action in result["actions"])
+        )
+
+    def test_start_records_and_recovers_unclean_previous_process_run(self) -> None:
+        repository = FakeLifecycleRepository(
+            previous={
+                "id": 1,
+                "status": "running",
+                "metadata": {"boot_id": "old-boot"},
+            }
+        )
+        supervisor = FixedClockAutomationSupervisor(
+            now=datetime(2026, 7, 3, 10, 30),
+            after_market_research_service=FakeAfterMarketResearchService(),
+            lifecycle_repository=repository,
+        )
+
+        async def exercise() -> None:
+            supervisor.start({"symbols": "BANKNIFTY"}, trigger="application_startup")
+            await supervisor.stop(reason="test_shutdown")
+
+        asyncio.run(exercise())
+
+        self.assertEqual(supervisor.recovered_unclean_run_count, 1)
+        self.assertEqual(repository.finished[0]["run_id"], 1)
+        self.assertEqual(repository.finished[0]["status"], "interrupted")
+        self.assertEqual(repository.started[0]["job_name"], "automation_supervisor")
+        self.assertEqual(repository.started[0]["metadata"]["trigger"], "application_startup")
+        self.assertEqual(repository.finished[-1]["status"], "stopped")
+        self.assertEqual(repository.finished[-1]["metadata"]["stop_reason"], "test_shutdown")
 
 
 if __name__ == "__main__":

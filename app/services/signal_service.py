@@ -38,8 +38,9 @@ class SignalService:
         factor_scores: dict[str, object] | None = None,
         risk_notes: list[str] | None = None,
         banknifty_fields: dict[str, object] | None = None,
+        enforce_score_threshold: bool = True,
     ) -> Signal:
-        if score < settings.min_signal_score:
+        if enforce_score_threshold and score < settings.min_signal_score:
             raise ValueError(f"score must be at least {settings.min_signal_score} to qualify")
 
         bullish = trend.lower() == "bullish"
@@ -56,10 +57,16 @@ class SignalService:
         target_2 = target_2 if target_2 is not None else entry_price * 1.2
         target_3 = target_3 if target_3 is not None else entry_price * 1.3
         probability_text = f"calibrated probability estimate of {probability:.0%}" if probability is not None else "an uncalibrated heuristic confidence score"
+        if enforce_score_threshold:
+            qualification_text = f"The score of {score}/100 and {probability_text} exceed the configured threshold."
+        else:
+            qualification_text = (
+                f"Primary safety, structure and execution gates passed; the {score}/100 score is used for ranking only, "
+                f"with {probability_text}."
+            )
         explanation = (
             f"{symbol} shows a {trend} setup with {market_context} market context. "
-            f"The score of {score}/100 and {probability_text} exceed the configured threshold. "
-            "Risk controls must still be followed; this is not a guaranteed-profit trade."
+            f"{qualification_text} Risk controls must still be followed; this is not a guaranteed-profit trade."
         )
 
         banknifty_fields = banknifty_fields or {}

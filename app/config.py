@@ -20,9 +20,14 @@ class Settings:
     app_name: str = "AI Option Trader"
     app_environment: str = os.getenv("APP_ENV", "development")
     strategy_name: str = os.getenv("STRATEGY_NAME", "banknifty_option_buying")
-    strategy_version: str = os.getenv("STRATEGY_VERSION", "banknifty_option_buying_v4")
-    strategy_version_note: str = os.getenv("STRATEGY_VERSION_NOTE", "Hierarchical market state, setup policies, momentum phases, executable contract ranking, and evidence-gated promotion")
-    strategy_change_reason: str = os.getenv("STRATEGY_CHANGE_REASON", "Make option-buying decisions regime-aware, phase-aware, cost-aware, persistent, and independently measurable")
+    strategy_version: str = os.getenv("STRATEGY_VERSION", "banknifty_option_buying_v6")
+    strategy_version_note: str = os.getenv("STRATEGY_VERSION_NOTE", "Price-structure opening and continuation entries with unified opportunity checks and runner exits")
+    strategy_change_reason: str = os.getenv("STRATEGY_CHANGE_REASON", "Improve Bank Nifty intraday option-buying timing while keeping execution and risk gates conservative")
+    active_decision_timeframes: str = os.getenv("ACTIVE_DECISION_TIMEFRAMES", "1minute,5minute")
+    structure_min_completed_candles: int = int(os.getenv("STRUCTURE_MIN_COMPLETED_CANDLES", "6"))
+    opening_structure_min_1m_candles: int = int(os.getenv("OPENING_STRUCTURE_MIN_1M_CANDLES", "5"))
+    opening_structure_min_5m_candles: int = int(os.getenv("OPENING_STRUCTURE_MIN_5M_CANDLES", "3"))
+    opening_structure_end_time: str = os.getenv("OPENING_STRUCTURE_END_TIME", "09:45")
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
     python_version: str = "3.12"
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./app.db")
@@ -105,6 +110,9 @@ class Settings:
     candle_confirmation_timeframe: str = os.getenv("CANDLE_CONFIRMATION_TIMEFRAME", "5minute")
     min_option_buy_delta: float = float(os.getenv("MIN_OPTION_BUY_DELTA", "0.35"))
     max_option_buy_delta: float = float(os.getenv("MAX_OPTION_BUY_DELTA", "0.75"))
+    target_option_buy_delta: float = float(os.getenv("TARGET_OPTION_BUY_DELTA", "0.52"))
+    preferred_option_buy_min_dte: int = int(os.getenv("PREFERRED_OPTION_BUY_MIN_DTE", "1"))
+    preferred_option_buy_max_dte: int = int(os.getenv("PREFERRED_OPTION_BUY_MAX_DTE", "7"))
     max_option_buy_theta_pct: float = float(os.getenv("MAX_OPTION_BUY_THETA_PCT", "12.0"))
     min_option_buy_iv: float = float(os.getenv("MIN_OPTION_BUY_IV", "0.05"))
     max_option_buy_iv: float = float(os.getenv("MAX_OPTION_BUY_IV", "1.20"))
@@ -152,7 +160,7 @@ class Settings:
     after_market_research_limit: int = int(os.getenv("AFTER_MARKET_RESEARCH_LIMIT", "3000"))
     after_market_research_decision_mode: str = os.getenv("AFTER_MARKET_RESEARCH_DECISION_MODE", "scanner_parity")
     after_market_research_step_delay_seconds: float = float(os.getenv("AFTER_MARKET_RESEARCH_STEP_DELAY_SECONDS", "1.0"))
-    automation_stop_after_after_market_complete: bool = os.getenv("AUTOMATION_STOP_AFTER_AFTER_MARKET_COMPLETE", "true").lower() == "true"
+    automation_stop_after_after_market_complete: bool = os.getenv("AUTOMATION_STOP_AFTER_AFTER_MARKET_COMPLETE", "false").lower() == "true"
     enable_strategy_edge_guard: bool = os.getenv("ENABLE_STRATEGY_EDGE_GUARD", "false").lower() == "true"
     min_strategy_trades: int = int(os.getenv("MIN_STRATEGY_TRADES", "30"))
     min_strategy_expectancy_pct: float = float(os.getenv("MIN_STRATEGY_EXPECTANCY_PCT", "0.05"))
@@ -198,7 +206,10 @@ class Settings:
     banknifty_expiry_min_premium_score: int = int(os.getenv("BANKNIFTY_EXPIRY_MIN_PREMIUM_SCORE", "75"))
     option_time_stop_minutes: int = int(os.getenv("OPTION_TIME_STOP_MINUTES", "15"))
     option_time_stop_min_move_pct: float = float(os.getenv("OPTION_TIME_STOP_MIN_MOVE_PCT", "6.0"))
+    option_time_stop_trend_multiplier: float = float(os.getenv("OPTION_TIME_STOP_TREND_MULTIPLIER", "2.0"))
     option_trailing_stop_lock_pct: float = float(os.getenv("OPTION_TRAILING_STOP_LOCK_PCT", "2.0"))
+    option_runner_atr_multiplier: float = float(os.getenv("OPTION_RUNNER_ATR_MULTIPLIER", "1.8"))
+    option_runner_min_risk_trail: float = float(os.getenv("OPTION_RUNNER_MIN_RISK_TRAIL", "0.55"))
     exit_open_trades_before_close_minutes: int = int(os.getenv("EXIT_OPEN_TRADES_BEFORE_CLOSE_MINUTES", "10"))
     enable_time_bucket_filter: bool = os.getenv("ENABLE_TIME_BUCKET_FILTER", "false").lower() == "true"
     min_time_bucket_trades: int = int(os.getenv("MIN_TIME_BUCKET_TRADES", "8"))
@@ -275,7 +286,7 @@ class Settings:
     scanner_response_cache_ttl_seconds: int = int(os.getenv("SCANNER_RESPONSE_CACHE_TTL_SECONDS", "5"))
     scanner_response_stale_ttl_seconds: int = int(os.getenv("SCANNER_RESPONSE_STALE_TTL_SECONDS", "60"))
     scanner_refresh_stuck_seconds: int = int(os.getenv("SCANNER_REFRESH_STUCK_SECONDS", "30"))
-    account_funds_cache_ttl_seconds: int = int(os.getenv("ACCOUNT_FUNDS_CACHE_TTL_SECONDS", "5"))
+    account_funds_cache_ttl_seconds: int = int(os.getenv("ACCOUNT_FUNDS_CACHE_TTL_SECONDS", "60"))
     dashboard_broker_cache_ttl_seconds: int = int(os.getenv("DASHBOARD_BROKER_CACHE_TTL_SECONDS", "60"))
     slow_api_log_threshold_seconds: float = float(os.getenv("SLOW_API_LOG_THRESHOLD_SECONDS", "3.0"))
     option_quote_premium_mismatch_tolerance_pct: float = float(os.getenv("OPTION_QUOTE_PREMIUM_MISMATCH_TOLERANCE_PCT", "25.0"))
@@ -294,6 +305,8 @@ class Settings:
     websocket_reconnect_min_gap_seconds: int = int(os.getenv("WEBSOCKET_RECONNECT_MIN_GAP_SECONDS", "5"))
     websocket_reconnect_window_seconds: int = int(os.getenv("WEBSOCKET_RECONNECT_WINDOW_SECONDS", "60"))
     websocket_reconnect_max_attempts_per_window: int = int(os.getenv("WEBSOCKET_RECONNECT_MAX_ATTEMPTS_PER_WINDOW", "5"))
+    websocket_reconnect_max_delay_seconds: int = int(os.getenv("WEBSOCKET_RECONNECT_MAX_DELAY_SECONDS", "60"))
+    websocket_rate_limit_cooldown_seconds: int = int(os.getenv("WEBSOCKET_RATE_LIMIT_COOLDOWN_SECONDS", "120"))
     websocket_live_stale_blocks: bool = os.getenv("WEBSOCKET_LIVE_STALE_BLOCKS", "true").lower() == "true"
     websocket_live_require_exchange_timestamp: bool = os.getenv("WEBSOCKET_LIVE_REQUIRE_EXCHANGE_TIMESTAMP", "true").lower() == "true"
     websocket_event_queue_size: int = int(os.getenv("WEBSOCKET_EVENT_QUEUE_SIZE", "1000"))
@@ -345,12 +358,14 @@ class Settings:
     tick_quality_require_bid_progress: bool = os.getenv("TICK_QUALITY_REQUIRE_BID_PROGRESS", "true").lower() == "true"
     tick_quality_max_spread_multiplier: float = float(os.getenv("TICK_QUALITY_MAX_SPREAD_MULTIPLIER", "1.5"))
     enable_normalized_entry_chase: bool = os.getenv("ENABLE_NORMALIZED_ENTRY_CHASE", "true").lower() == "true"
-    normalized_entry_chase_max_atr: float = float(os.getenv("NORMALIZED_ENTRY_CHASE_MAX_ATR", "0.50"))
+    normalized_entry_chase_max_atr: float = float(os.getenv("NORMALIZED_ENTRY_CHASE_MAX_ATR", "0.75"))
     normalized_entry_chase_lookback_ticks: int = int(os.getenv("NORMALIZED_ENTRY_CHASE_LOOKBACK_TICKS", "20"))
     fast_rally_window_seconds: float = float(os.getenv("FAST_RALLY_WINDOW_SECONDS", "5.0"))
     fast_rally_trigger_pct: float = float(os.getenv("FAST_RALLY_TRIGGER_PCT", "0.08"))
     fast_rally_rescan_cooldown_seconds: float = float(os.getenv("FAST_RALLY_RESCAN_COOLDOWN_SECONDS", "2.0"))
     fast_scan_context_max_age_seconds: float = float(os.getenv("FAST_SCAN_CONTEXT_MAX_AGE_SECONDS", "90.0"))
+    fast_scan_context_refresh_seconds: float = float(os.getenv("FAST_SCAN_CONTEXT_REFRESH_SECONDS", "30.0"))
+    scheduled_scan_max_rest_calls: int = int(os.getenv("SCHEDULED_SCAN_MAX_REST_CALLS", "3"))
     enable_underlying_candle_pipeline: bool = os.getenv("ENABLE_UNDERLYING_CANDLE_PIPELINE", "true").lower() == "true"
     underlying_candle_symbol: str = os.getenv("UNDERLYING_CANDLE_SYMBOL", "BANKNIFTY")
     enable_raw_tick_capture: bool = os.getenv("ENABLE_RAW_TICK_CAPTURE", "true").lower() == "true"
@@ -365,7 +380,7 @@ class Settings:
     enable_premium_invalidation_exit: bool = os.getenv("ENABLE_PREMIUM_INVALIDATION_EXIT", "true").lower() == "true"
     enable_broker_emergency_sl: bool = os.getenv("ENABLE_BROKER_EMERGENCY_SL", "false").lower() == "true"
     require_broker_protective_stop_for_live_entry: bool = os.getenv("REQUIRE_BROKER_PROTECTIVE_STOP_FOR_LIVE_ENTRY", "true").lower() == "true"
-    enable_partial_booking: bool = os.getenv("ENABLE_PARTIAL_BOOKING", "false").lower() == "true"
+    enable_partial_booking: bool = os.getenv("ENABLE_PARTIAL_BOOKING", "true").lower() == "true"
     partial_target1_pct: float = float(os.getenv("PARTIAL_TARGET1_PCT", "50.0"))
     partial_move_sl_to_cost: bool = os.getenv("PARTIAL_MOVE_SL_TO_COST", "true").lower() == "true"
 

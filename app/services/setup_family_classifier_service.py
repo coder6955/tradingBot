@@ -157,13 +157,13 @@ class SetupFamilyClassifierService:
             abstention = "SETUP_POLICY_SCORE_BELOW_THRESHOLD"
 
         profiles = {
-            "opening_drive": {"time_stop_minutes": 12, "trail_after_r": 1.0, "target_style": "scale_on_expansion"},
-            "compression_expansion": {"time_stop_minutes": 15, "trail_after_r": 1.2, "target_style": "measured_move"},
-            "vwap_continuation": {"time_stop_minutes": 15, "trail_after_r": 1.0, "target_style": "vwap_structure"},
-            "trend_day": {"time_stop_minutes": 22, "trail_after_r": 1.5, "target_style": "runner"},
-            "reversal": {"time_stop_minutes": 10, "trail_after_r": 0.8, "target_style": "fast_mean_reversion"},
-            "expiry": {"time_stop_minutes": 7, "trail_after_r": 0.7, "target_style": "gamma_scalp"},
-            "normal_day": {"time_stop_minutes": 12, "trail_after_r": 1.0, "target_style": "fixed_structure"},
+            "opening_drive": {"time_stop_minutes": 12, "trail_after_r": 1.0, "partial_at_r": 1.0, "target_style": "scale_on_expansion"},
+            "compression_expansion": {"time_stop_minutes": 15, "trail_after_r": 1.2, "partial_at_r": 1.0, "target_style": "measured_move"},
+            "vwap_continuation": {"time_stop_minutes": 15, "trail_after_r": 1.0, "partial_at_r": 1.0, "target_style": "vwap_structure"},
+            "trend_day": {"time_stop_minutes": 22, "trail_after_r": 1.5, "partial_at_r": 1.0, "target_style": "runner"},
+            "reversal": {"time_stop_minutes": 10, "trail_after_r": 0.8, "partial_at_r": 0.8, "target_style": "fast_mean_reversion"},
+            "expiry": {"time_stop_minutes": 7, "trail_after_r": 0.7, "partial_at_r": 0.8, "target_style": "gamma_scalp"},
+            "normal_day": {"time_stop_minutes": 12, "trail_after_r": 1.0, "partial_at_r": 1.0, "target_style": "fixed_structure"},
         }
         return {
             "eligible": eligible,

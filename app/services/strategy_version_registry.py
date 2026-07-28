@@ -10,13 +10,20 @@ from app.services.time_utils import ist_now_naive
 
 
 SETTING_PURPOSES: dict[str, str] = {
-    "min_signal_score": "Minimum weighted score required before a trade can become an accepted opportunity.",
-    "min_market_regime_score": "Minimum broader market context score used to avoid low-quality directional conditions.",
-    "enable_hierarchical_market_state": "Separates structure, volatility, participation, location, and execution before classifying the option-buying regime.",
+    "min_signal_score": "Legacy ranking threshold retained for research; v5 primary gates decide eligibility.",
+    "min_market_regime_score": "Legacy shadow-regime threshold retained for research and comparison.",
+    "enable_hierarchical_market_state": "Collects hierarchical market state as a shadow diagnostic with no active v5 entry authority.",
     "market_state_min_confidence": "Minimum hierarchical state confidence used to label a regime suitable for option buying.",
     "market_state_max_uncertainty": "Maximum tolerated market-state uncertainty before enriched decisions fail closed.",
-    "mtf_min_timeframes": "Minimum completed-candle timeframes needed for multi-timeframe context.",
-    "mtf_min_alignment_score": "Minimum alignment score across independently responsible timeframes.",
+    "mtf_min_timeframes": "Legacy diagnostic threshold; v5 actively requires completed 1-minute and 5-minute agreement.",
+    "mtf_min_alignment_score": "Legacy diagnostic alignment threshold retained for versioned research.",
+    "active_decision_timeframes": "Fixed active v6 strategy timeframes: 1minute and 5minute only.",
+    "structure_min_completed_candles": "Minimum completed candles required before multi-candle price structure may choose a direction.",
+    "opening_structure_min_1m_candles": "Completed one-minute candles required by the opening-session structure policy.",
+    "opening_structure_min_5m_candles": "Completed five-minute candles required by the opening-session structure policy.",
+    "opening_structure_end_time": "Time when opening readiness yields to normal-session candle requirements.",
+    "fast_scan_context_refresh_seconds": "Controlled slow-context refresh interval outside the tick path.",
+    "scheduled_scan_max_rest_calls": "Maximum broker REST calls permitted during one scheduled scan.",
     "momentum_min_entry_score": "Minimum momentum phase quality for an actionable acceleration, breakout, confirmation, or continuation.",
     "momentum_exhaustion_rsi": "Directional RSI extreme used as one exhaustion warning, never as a standalone entry signal.",
     "setup_policy_min_score": "Minimum regime-specific setup-family policy score.",
@@ -38,6 +45,9 @@ SETTING_PURPOSES: dict[str, str] = {
     "min_option_oi": "Minimum selected option open interest needed to avoid poor depth.",
     "min_option_buy_delta": "Lower delta bound for option-buying contracts; avoids too-far OTM options.",
     "max_option_buy_delta": "Upper delta bound for option-buying contracts; avoids overly expensive/deep ITM options.",
+    "target_option_buy_delta": "Preferred absolute delta used to rank executable option-buying contracts.",
+    "preferred_option_buy_min_dte": "Minimum preferred days-to-expiry for option-buying contract ranking.",
+    "preferred_option_buy_max_dte": "Maximum preferred days-to-expiry for option-buying contract ranking.",
     "max_option_buy_theta_pct": "Theta quality guard for option buying; avoids contracts where decay is too heavy.",
     "min_option_buy_iv": "Lower IV sanity bound used by option-quality scoring.",
     "max_option_buy_iv": "Upper IV sanity bound used by option-quality scoring.",
@@ -125,7 +135,10 @@ SETTING_PURPOSES: dict[str, str] = {
     "banknifty_expiry_min_premium_score": "Minimum premium confirmation score needed for expiry/near-expiry option buying.",
     "option_time_stop_minutes": "Maximum time to stay in a trade without sufficient movement.",
     "option_time_stop_min_move_pct": "Minimum favorable move required to avoid time-stop exit.",
+    "option_time_stop_trend_multiplier": "Extends the setup-family time stop only for trend and expansion runners.",
     "option_trailing_stop_lock_pct": "Profit lock level used after target 1 has been reached.",
+    "option_runner_atr_multiplier": "Option ATR multiple subtracted from the runner premium high-watermark.",
+    "option_runner_min_risk_trail": "Minimum original-risk fraction used as the runner trailing distance.",
     "exit_open_trades_before_close_minutes": "Minutes before market close when open trades should be exited.",
     "enable_underlying_invalidation_exit": "Exits when Bank Nifty structure invalidates the original trade idea.",
     "enable_premium_invalidation_exit": "Exits when selected option premium structure invalidates after entry.",
@@ -253,6 +266,7 @@ class StrategyVersionRegistry:
             if str(payload.get("status") or "active") == "active":
                 self._retire_other_active_versions(session, strategy_name=strategy_name, version=version, now=now)
                 record.status = "active"
+                record.retired_at = None
             session.commit()
             session.refresh(record)
             return {"status": "ok", "created": created, "config_drift_detected": drift_detected, "version": self.to_dict(record)}
@@ -306,6 +320,11 @@ class StrategyVersionRegistry:
                 "max_trend_momentum_score",
             ),
             "decision_policy": self._values(
+                "active_decision_timeframes",
+                "structure_min_completed_candles",
+                "opening_structure_min_1m_candles",
+                "opening_structure_min_5m_candles",
+                "opening_structure_end_time",
                 "enable_hierarchical_market_state",
                 "market_state_min_confidence",
                 "market_state_max_uncertainty",
@@ -323,6 +342,9 @@ class StrategyVersionRegistry:
                 "min_option_oi",
                 "min_option_buy_delta",
                 "max_option_buy_delta",
+                "target_option_buy_delta",
+                "preferred_option_buy_min_dte",
+                "preferred_option_buy_max_dte",
                 "max_option_buy_theta_pct",
                 "min_option_buy_iv",
                 "max_option_buy_iv",
@@ -379,6 +401,8 @@ class StrategyVersionRegistry:
                 "fast_rally_trigger_pct",
                 "fast_rally_rescan_cooldown_seconds",
                 "fast_scan_context_max_age_seconds",
+                "fast_scan_context_refresh_seconds",
+                "scheduled_scan_max_rest_calls",
             ),
             "banknifty_specialization": self._values(
                 "enable_banknifty_intelligence",
@@ -406,7 +430,10 @@ class StrategyVersionRegistry:
                 "live_auto_squareoff",
                 "option_time_stop_minutes",
                 "option_time_stop_min_move_pct",
+                "option_time_stop_trend_multiplier",
                 "option_trailing_stop_lock_pct",
+                "option_runner_atr_multiplier",
+                "option_runner_min_risk_trail",
                 "exit_open_trades_before_close_minutes",
                 "enable_underlying_invalidation_exit",
                 "enable_premium_invalidation_exit",
@@ -540,13 +567,16 @@ class StrategyVersionRegistry:
         return result
 
     def entry_logic_summary(self, config_snapshot: dict[str, Any]) -> str:
+        decision = config_snapshot.get("decision_policy", {})
         entry = config_snapshot.get("entry_timing", {})
         premium = config_snapshot.get("premium_confirmation", {})
         return (
-            "Bank Nifty option-buying entries require real market data, a hierarchical market state, multi-timeframe alignment, "
-            "an actionable momentum phase, a regime-specific setup policy, tradable option quality, fresh premium confirmation, "
-            "after-cost candidate utility, and entry timing that is not too early or too late. "
-            f"Current chase limit is {entry.get('max_entry_chase_pct')}% and premium confirmation is "
+            "Experimental Bank Nifty option-buying entries use completed-candle swing, impulse, pullback and breakout-acceptance structure with 1-minute/5-minute directional agreement. "
+            f"The opening policy uses {decision.get('opening_structure_min_1m_candles')} one-minute and "
+            f"{decision.get('opening_structure_min_5m_candles')} five-minute candles until {decision.get('opening_structure_end_time')}; "
+            "normal-session readiness keeps the configured structural minimum. Entries require "
+            "constituent and option-premium participation, executable spread/depth/liquidity, account risk approval, and entry timing that is not too early or too late. "
+            f"All entry paths share a normalized opportunity limit of {entry.get('normalized_entry_chase_max_atr')} scale units, and premium confirmation is "
             f"{'enabled' if premium.get('enable_option_premium_confirmation') else 'disabled'}."
         )
 
@@ -555,7 +585,7 @@ class StrategyVersionRegistry:
         partial = "partial target-1 booking" if exit_rules.get("enable_partial_booking") else "full target-1 square-off"
         return (
             "Long-option exits use the setup-family exit profile and executable sell-side bid/depth pricing, with LTP retained only for diagnostics. "
-            "Priority is stop, time, trailing, invalidation, then targets; live software exits fail closed without safe executable depth. "
+            "Priority is stop, conditional time, premium high-watermark/ATR trailing, invalidation, then targets; live software exits fail closed without safe executable depth. "
             f"Current target-1 behavior is {partial}."
         )
 
@@ -571,8 +601,8 @@ class StrategyVersionRegistry:
         exit_rules = config_snapshot.get("exit_rules", {})
         return (
             "Targets are evaluated against executable sell-side bid/depth rather than LTP-only touches. "
-            f"Target 1 currently {'books ' + str(exit_rules.get('partial_target1_pct')) + '% when partial booking is enabled' if exit_rules.get('enable_partial_booking') else 'closes the full position'}; "
-            f"trailing lock is {exit_rules.get('option_trailing_stop_lock_pct')}% after target progress."
+            f"Target 1 currently {'books one exchange-valid partial of about ' + str(exit_rules.get('partial_target1_pct')) + '% only when at least two lots exist' if exit_rules.get('enable_partial_booking') else 'closes the full position'}; "
+            f"the runner trails by option ATR × {exit_rules.get('option_runner_atr_multiplier')} with an original-risk floor."
         )
 
     def config_hash(self, config_snapshot: dict[str, Any]) -> str:

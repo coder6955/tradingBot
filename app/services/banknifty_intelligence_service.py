@@ -61,6 +61,7 @@ class BankNiftyIntelligenceService:
         prices: dict[str, float],
         premium_eval: dict[str, Any],
         day_type_eval: dict[str, Any],
+        candles: list[Candle] | None = None,
     ) -> dict[str, Any]:
         if not settings.enable_banknifty_intelligence:
             return {"enabled": False, "score": 100, "passed": True, "hard_reasons": [], "soft_reasons": [], "details": {}}
@@ -69,8 +70,8 @@ class BankNiftyIntelligenceService:
         top_banks = self._top_bank_alignment(bullish, market_snapshots)
         private_psu = self._private_psu_strength(top_banks)
         relative = self._relative_strength(bullish, market_snapshots)
-        opening = self._opening_range_status(bullish, float(snapshot.get("price") or 0.0))
-        expected_move = self._expected_move_check(bullish=bullish, snapshot=snapshot, contract=contract, prices=prices)
+        opening = self._opening_range_status(bullish, float(snapshot.get("price") or 0.0), candles=candles)
+        expected_move = self._expected_move_check(bullish=bullish, snapshot=snapshot, contract=contract, prices=prices, candles=candles)
         dte = self._dte_mode(contract.expiry)
         event = self._event_day_mode()
         zone = self._round_zone(float(snapshot.get("price") or 0.0), bullish)
@@ -313,8 +314,8 @@ class BankNiftyIntelligenceService:
             "reason": "Bank Nifty relative strength supports trade" if supports else "Bank Nifty relative strength diverges against trade",
         }
 
-    def _opening_range_status(self, bullish: bool, price: float) -> dict[str, Any]:
-        candles = self._today_candles("BANKNIFTY")
+    def _opening_range_status(self, bullish: bool, price: float, *, candles: list[Candle] | None = None) -> dict[str, Any]:
+        candles = list(candles) if candles is not None else self._today_candles("BANKNIFTY")
         if not candles:
             return {"status": "unavailable", "passed": True, "reason": "opening range candles unavailable"}
         now = ist_now_naive().time()
@@ -353,8 +354,16 @@ class BankNiftyIntelligenceService:
             "reason": reason,
         }
 
-    def _expected_move_check(self, *, bullish: bool, snapshot: dict[str, Any], contract: OptionContract, prices: dict[str, float]) -> dict[str, Any]:
-        candles = self._recent_candles("BANKNIFTY", limit=30)
+    def _expected_move_check(
+        self,
+        *,
+        bullish: bool,
+        snapshot: dict[str, Any],
+        contract: OptionContract,
+        prices: dict[str, float],
+        candles: list[Candle] | None = None,
+    ) -> dict[str, Any]:
+        candles = list(candles)[-30:] if candles is not None else self._recent_candles("BANKNIFTY", limit=30)
         atr = self._atr(candles)
         price = float(snapshot.get("price") or 0.0)
         if price <= 0 or atr <= 0:

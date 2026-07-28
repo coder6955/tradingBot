@@ -4,6 +4,7 @@ from datetime import timedelta
 from typing import Any
 
 from app.config import settings
+from app.services.entry_opportunity_service import EntryOpportunityService
 from app.services.time_utils import ist_now_naive
 from app.services.trade_setup_service import OptionContract
 
@@ -60,17 +61,34 @@ class EntryTimingService:
             target=target,
             stop=stop,
         )
-        chase_reasons = self._chase_reasons(
-            trigger_chase_pct=trigger_chase_pct,
-            move_from_base_pct=move_from_base_pct,
-            remaining_rr=remaining_rr,
-            target_room_pct=target_room_pct,
+        breakout = bool(details.get("breakout")) or (trigger > 0 and current >= trigger)
+        opening_state = str(opening_range_status.get("status") or "") if isinstance(opening_range_status, dict) else ""
+        price_details = price_action.get("details", {}) if isinstance(price_action.get("details"), dict) else {}
+        breakout_accepted = breakout and (
+            bool(details.get("breakout_accepted"))
+            or bool(price_details.get("breakout_accepted"))
+            or opening_state in {"breakout", "breakdown"}
+        )
+        observations = [
+            float(value)
+            for value in (details.get("recent_closes") or [])
+            if self._positive_number(value)
+        ]
+        opportunity = EntryOpportunityService().evaluate(
+            current=current,
+            trigger=trigger,
+            base=base,
+            stop=stop,
+            target=target,
+            spread_pct=spread_pct,
+            observations=observations,
+            volatility_scale=self._float(details.get("premium_atr")),
             expected_move_coverage=expected_move_coverage,
             room_to_level_pct=room_to_level_pct,
-            spread_pct=spread_pct,
+            breakout_accepted=breakout_accepted,
         )
+        chase_reasons = list(opportunity["blockers"])
 
-        breakout = bool(details.get("breakout")) or (trigger > 0 and current >= trigger)
         near_trigger = (
             distance_to_trigger_pct is not None
             and 0 <= distance_to_trigger_pct <= settings.entry_armed_distance_to_trigger_pct
@@ -124,6 +142,9 @@ class EntryTimingService:
             "expected_move_coverage": expected_move_coverage,
             "room_to_level_pct": room_to_level_pct,
             "spread_pct": round(spread_pct, 3),
+            "breakout_accepted": breakout_accepted,
+            "entry_opportunity": opportunity,
+            "opportunity_warnings": list(opportunity["warnings"]),
         }
 
     def _current_premium(self, contract: OptionContract, prices: dict[str, float], details: dict[str, Any]) -> float:
@@ -264,3 +285,15 @@ class EntryTimingService:
                 return None
             current = current.get(key)
         return current
+
+    def _positive_number(self, value: Any) -> bool:
+        try:
+            return float(value) > 0
+        except (TypeError, ValueError):
+            return False
+
+    def _float(self, value: Any) -> float:
+        try:
+            return float(value or 0.0)
+        except (TypeError, ValueError):
+            return 0.0

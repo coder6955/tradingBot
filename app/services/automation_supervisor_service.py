@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import uuid
 from datetime import date, datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -13,6 +15,7 @@ from app.services.notification_service import NotificationService
 from app.services.opportunity_outcome_service import OpportunityOutcomeService
 from app.services.option_snapshot_collector_service import OptionSnapshotCollectorService
 from app.services.risk_management_service import RiskManagementService
+from app.services.runtime_job_repository import RuntimeJobRepository
 
 
 class AutomationSupervisorService:
@@ -29,6 +32,7 @@ class AutomationSupervisorService:
         notification_service: NotificationService | None = None,
         after_market_research_service: Any | None = None,
         market_session_service: MarketSessionService | None = None,
+        lifecycle_repository: RuntimeJobRepository | None = None,
     ) -> None:
         self.data_ingestion_service = data_ingestion_service
         self.snapshot_collector_service = snapshot_collector_service
@@ -38,6 +42,7 @@ class AutomationSupervisorService:
         self.notification_service = notification_service or NotificationService()
         self.after_market_research_service = after_market_research_service
         self.market_session_service = market_session_service or MarketSessionService(clock=self._now)
+        self.lifecycle_repository = lifecycle_repository or RuntimeJobRepository()
         self.task: asyncio.Task[None] | None = None
         self.running = False
         self.config: dict[str, Any] = {}
@@ -52,18 +57,43 @@ class AutomationSupervisorService:
         self.last_actions: list[dict[str, Any]] = []
         self.errors: list[dict[str, Any]] = []
         self.duplicate_start_prevented_count = 0
+        self.boot_id = uuid.uuid4().hex
+        self.process_id = os.getpid()
+        self.started_at: datetime | None = None
+        self.stopped_at: datetime | None = None
+        self.last_stop_reason: str | None = None
+        self.last_start_trigger: str | None = None
+        self.lifecycle_run: dict[str, Any] | None = None
+        self.recovered_unclean_run_count = 0
+        self.supervisor_restart_count = 0
+        self.service_recovery_count = 0
 
-    def start(self, config: dict[str, Any] | None = None) -> dict[str, Any]:
-        if self.running:
+    def start(self, config: dict[str, Any] | None = None, *, trigger: str = "api") -> dict[str, Any]:
+        if self._task_is_healthy():
             self.duplicate_start_prevented_count += 1
             return self.status()
+        if self.running:
+            self.supervisor_restart_count += 1
+            self.running = False
+            self._record_action(
+                {
+                    "action": "recover_stale_supervisor_task",
+                    "status": "ok",
+                    "reason": "running_flag_without_live_task",
+                }
+            )
         self.config = self._normalize_config(config or {})
         self.running = True
+        self.started_at = self._now()
+        self.stopped_at = None
+        self.last_stop_reason = None
+        self.last_start_trigger = str(trigger or "api")
+        self._start_lifecycle_run(trigger=self.last_start_trigger)
         self.task = asyncio.create_task(self._run())
         self.notification_service.send("Automation supervisor started")
         return self.status()
 
-    async def stop(self) -> dict[str, Any]:
+    async def stop(self, *, reason: str = "requested") -> dict[str, Any]:
         self.running = False
         if self.task is not None:
             self.task.cancel()
@@ -73,6 +103,9 @@ class AutomationSupervisorService:
                 pass
             self.task = None
         await self._stop_intraday_services()
+        self.stopped_at = self._now()
+        self.last_stop_reason = str(reason or "requested")
+        self._finish_lifecycle_run(status="stopped", reason=self.last_stop_reason)
         self.notification_service.send("Automation supervisor stopped")
         return self.status()
 
@@ -84,6 +117,19 @@ class AutomationSupervisorService:
             "market_open": market_open,
             "runtime_mode": self.market_session_service.current_runtime_mode(now),
             "duplicate_start_prevented_count": self.duplicate_start_prevented_count,
+            "lifecycle": {
+                "boot_id": self.boot_id,
+                "process_id": self.process_id,
+                "task_healthy": self._task_is_healthy(),
+                "started_at": self._format_dt(self.started_at) if self.started_at else None,
+                "stopped_at": self._format_dt(self.stopped_at) if self.stopped_at else None,
+                "last_start_trigger": self.last_start_trigger,
+                "last_stop_reason": self.last_stop_reason,
+                "current_run": dict(self.lifecycle_run) if self.lifecycle_run else None,
+                "recovered_unclean_run_count": self.recovered_unclean_run_count,
+                "supervisor_restart_count": self.supervisor_restart_count,
+                "service_recovery_count": self.service_recovery_count,
+            },
             "config": self.config or self._normalize_config({}),
             "last_cycle_at": self.last_cycle_at,
             "last_bootstrap_date": self.last_bootstrap_date,
@@ -126,6 +172,9 @@ class AutomationSupervisorService:
                 actions.append({"action": "market_closed", "status": "ok", "message": "intraday Kite scanning services are stopped outside market hours"})
                 if self._should_stop_after_after_market_complete(now, actions):
                     self.running = False
+                    self.stopped_at = now
+                    self.last_stop_reason = "after_market_pipeline_completed"
+                    self._finish_lifecycle_run(status="completed", reason=self.last_stop_reason)
                     actions.append(
                         {
                             "action": "automation_stop_after_after_market_complete",
@@ -141,12 +190,30 @@ class AutomationSupervisorService:
             return {"status": "error", "error": error, "automation": self.status()}
 
     async def _run(self) -> None:
-        while self.running:
-            if self._market_is_open(self._now()):
-                self.run_once()
-            else:
-                await asyncio.to_thread(self.run_once)
-            await asyncio.sleep(30)
+        try:
+            while self.running:
+                try:
+                    if self._market_is_open(self._now()):
+                        self.run_once()
+                    else:
+                        await asyncio.to_thread(self.run_once)
+                except Exception as exc:
+                    self.errors.append(
+                        {
+                            "time": self._format_dt(self._now()),
+                            "error": str(exc),
+                            "error_type": type(exc).__name__,
+                            "source": "automation_supervisor_loop",
+                        }
+                    )
+                if self.running:
+                    await asyncio.sleep(30)
+        finally:
+            if self.running:
+                self.running = False
+                self.stopped_at = self._now()
+                self.last_stop_reason = "supervisor_task_terminated_unexpectedly"
+                self._finish_lifecycle_run(status="failed", reason=self.last_stop_reason)
 
     def _bootstrap_daily_data(self) -> dict[str, Any]:
         symbols = self._symbols()
@@ -205,7 +272,8 @@ class AutomationSupervisorService:
     def _ensure_intraday_services(self) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
         symbols = self._symbols()
-        if not self.snapshot_collector_service.running:
+        if not self._service_is_healthy(self.snapshot_collector_service):
+            self._prepare_service_recovery(self.snapshot_collector_service, "snapshot_collector")
             collector = self.snapshot_collector_service.start(
                 symbols=symbols,
                 interval_seconds=int(self.config["snapshot_interval_seconds"]),
@@ -214,11 +282,13 @@ class AutomationSupervisorService:
             )
             actions.append({"action": "start_snapshot_collector", "status": "ok", "collector": collector})
 
-        if not self.outcome_service.running:
+        if not self._service_is_healthy(self.outcome_service):
+            self._prepare_service_recovery(self.outcome_service, "outcome_monitor")
             monitor = self.outcome_service.start(interval_seconds=int(self.config["outcome_interval_seconds"]))
             actions.append({"action": "start_outcome_monitor", "status": "ok", "monitor": monitor})
 
-        if not self.auto_trader_service.running:
+        if not self._service_is_healthy(self.auto_trader_service):
+            self._prepare_service_recovery(self.auto_trader_service, "auto_trader")
             trader = self.auto_trader_service.start(
                 side=str(self.config["side"]),
                 symbols=symbols,
@@ -265,6 +335,10 @@ class AutomationSupervisorService:
 
     def _should_stop_after_after_market_complete(self, now: datetime, actions: list[dict[str, Any]]) -> bool:
         if not self.running or not bool(settings.automation_stop_after_after_market_complete):
+            return False
+        # A boot-managed supervisor must survive overnight so it can restart
+        # the intraday workers on the next market day without human action.
+        if bool(settings.automation_enabled):
             return False
         market_close = self._parse_time(settings.runtime_market_close_time)
         if now.weekday() >= 5 or now.time() <= market_close:
@@ -358,3 +432,113 @@ class AutomationSupervisorService:
     def _parse_time(self, value: str) -> time:
         hour, minute = value.split(":", 1)
         return time(int(hour), int(minute))
+
+    def _task_is_healthy(self) -> bool:
+        return bool(self.running and self.task is not None and not self.task.done())
+
+    def _service_is_healthy(self, service: Any) -> bool:
+        if not bool(getattr(service, "running", False)):
+            return False
+        task = getattr(service, "task", None)
+        return task is not None and not task.done()
+
+    def _prepare_service_recovery(self, service: Any, service_name: str) -> None:
+        was_running = bool(getattr(service, "running", False))
+        task = getattr(service, "task", None)
+        if not was_running and task is None:
+            return
+        if task is not None and not task.done():
+            return
+        setattr(service, "running", False)
+        setattr(service, "task", None)
+        self.service_recovery_count += 1
+        self._record_action(
+            {
+                "action": "recover_intraday_service",
+                "status": "ok",
+                "service": service_name,
+                "reason": "stale_running_state" if was_running else "completed_task",
+            }
+        )
+
+    def _record_action(self, action: dict[str, Any]) -> None:
+        self.last_actions.append(dict(action))
+        self.last_actions = self.last_actions[-100:]
+
+    def _start_lifecycle_run(self, *, trigger: str) -> None:
+        trading_date = self._now().date().isoformat()
+        try:
+            latest_run = getattr(self.lifecycle_repository, "latest_run", None)
+            previous = (
+                latest_run(job_name="automation_supervisor")
+                if callable(latest_run)
+                else self.lifecycle_repository.latest(job_name="automation_supervisor", trading_date=trading_date)
+            )
+            if previous and previous.get("status") == "running" and previous.get("id"):
+                previous_metadata = dict(previous.get("metadata") or {})
+                previous_metadata.update(
+                    {
+                        "interrupted_detected_by_boot_id": self.boot_id,
+                        "interrupted_detected_by_process_id": self.process_id,
+                    }
+                )
+                self.lifecycle_repository.finish(
+                    run_id=int(previous["id"]),
+                    status="interrupted",
+                    metadata=previous_metadata,
+                    error_message="previous application process ended without a recorded supervisor stop",
+                )
+                self.recovered_unclean_run_count += 1
+            self.lifecycle_run = self.lifecycle_repository.start(
+                job_name="automation_supervisor",
+                trading_date=trading_date,
+                metadata={
+                    "boot_id": self.boot_id,
+                    "process_id": self.process_id,
+                    "trigger": trigger,
+                    "order_mode": self.config.get("order_mode"),
+                    "symbols": self._symbols(),
+                },
+            )
+        except Exception as exc:
+            self.errors.append(
+                {
+                    "time": self._format_dt(self._now()),
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "source": "automation_lifecycle_repository",
+                }
+            )
+
+    def _finish_lifecycle_run(self, *, status: str, reason: str) -> None:
+        run = self.lifecycle_run
+        if not run or not run.get("id"):
+            return
+        metadata = dict(run.get("metadata") or {})
+        metadata.update(
+            {
+                "boot_id": self.boot_id,
+                "process_id": self.process_id,
+                "stop_reason": reason,
+                "last_cycle_at": self.last_cycle_at,
+                "service_recovery_count": self.service_recovery_count,
+            }
+        )
+        try:
+            finished = self.lifecycle_repository.finish(
+                run_id=int(run["id"]),
+                status=status,
+                metadata=metadata,
+                error_message=reason if status in {"failed", "interrupted"} else None,
+            )
+            if finished:
+                self.lifecycle_run = finished
+        except Exception as exc:
+            self.errors.append(
+                {
+                    "time": self._format_dt(self._now()),
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                    "source": "automation_lifecycle_repository",
+                }
+            )

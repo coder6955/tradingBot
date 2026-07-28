@@ -5,6 +5,7 @@ import json
 import itertools
 import heapq
 import queue
+from time import perf_counter
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from threading import Event, RLock, Thread
@@ -127,6 +128,9 @@ class KiteWebSocketPriceFeed:
         self._total_candle_cleanup_deleted = 0
         self._gap_events: list[dict[str, Any]] = []
         self._active_gap_started_at: datetime | None = None
+        self._gap_recovery_count = 0
+        self._last_gap_recovery_at: datetime | None = None
+        self._last_gap_recovery_reason: str | None = None
         self._gap_backfill_attempt_count = 0
         self._gap_backfill_success_count = 0
         self._gap_backfill_failure_count = 0
@@ -153,6 +157,7 @@ class KiteWebSocketPriceFeed:
         self._last_auth_failed_access_token: str | None = None
         self._last_auth_failed_api_key: str | None = None
         self._reconnect_attempt_times: list[datetime] = []
+        self._rate_limit_blocked_until: datetime | None = None
 
     def start(self) -> dict[str, Any]:
         with self._start_stop_lock:
@@ -181,6 +186,17 @@ class KiteWebSocketPriceFeed:
                 self.duplicate_start_prevented_count += 1
                 logger.info("Kite WebSocket duplicate start prevented")
                 return {"started": True, "already_running": True, "duplicate_start_prevented": True}
+            cooldown_remaining = self._rate_limit_cooldown_remaining()
+            if cooldown_remaining > 0:
+                self.connected = False
+                self.websocket_status = "RATE_LIMIT_COOLDOWN"
+                self.reconnect_skipped_reason = "rate_limited_cooldown"
+                self.last_error = "kite_websocket_rate_limited"
+                return {
+                    "started": False,
+                    "reason": "rate_limited_cooldown",
+                    "retry_after_seconds": cooldown_remaining,
+                }
             if not self.api_key or not self.access_token:
                 self.last_error = "missing_kite_api_key_or_access_token"
                 self.websocket_status = "AUTH_FAILED"
@@ -195,7 +211,7 @@ class KiteWebSocketPriceFeed:
                 return {"started": False, "reason": self.last_error}
 
             self._ensure_workers()
-            self._ticker = factory(str(self.api_key), str(self.access_token))
+            self._ticker = self._create_ticker(factory)
             self._wire_callbacks(self._ticker)
             self.running = True
             self.websocket_status = "CONNECTING"
@@ -400,6 +416,16 @@ class KiteWebSocketPriceFeed:
         max_age = max_age_seconds if max_age_seconds is not None else settings.websocket_price_stale_seconds
         return self._age_seconds(tick.timestamp) <= max_age
 
+    def entry_health(self) -> dict[str, Any]:
+        """Return only in-memory fields required by the fast decision path."""
+        with self._lock:
+            return {
+                "connected": bool(self.connected),
+                "entry_blocking_gap": self._active_gap_started_at is not None,
+                "websocket_status": self.websocket_status,
+                "last_tick_at": self.last_tick_at.isoformat(sep=" ") if self.last_tick_at else None,
+            }
+
     def status(self, *, active_trade_tokens: set[int] | None = None, fallback_active: bool = False) -> dict[str, Any]:
         now = self._now()
         session = self.market_session(now)
@@ -490,6 +516,9 @@ class KiteWebSocketPriceFeed:
                 "auth_recovery_hint": self._auth_recovery_hint(),
                 "reconnect_request_count": self.reconnect_request_count,
                 "reconnect_skipped_reason": self.reconnect_skipped_reason,
+                "reconnect_owner": "kite_sdk",
+                "rate_limit_blocked_until": self._rate_limit_blocked_until.isoformat(sep=" ") if self._rate_limit_blocked_until else None,
+                "rate_limit_cooldown_remaining_seconds": self._rate_limit_cooldown_remaining(),
                 "duplicate_start_prevented_count": self.duplicate_start_prevented_count,
                 "event_queue_size": self._event_queue.qsize(),
                 "event_queue_capacity": self._event_queue.maxsize,
@@ -518,12 +547,15 @@ class KiteWebSocketPriceFeed:
     def _on_connect(self, ws: Any, response: Any) -> None:
         self.connected = True
         self.connected_at = self._now()
+        self.last_reconnect_at = self.connected_at if self._active_gap_started_at is not None else self.last_reconnect_at
         self.last_error = None
         self.last_error_code = None
         self.last_error_reason = None
         self.last_disconnect_reason = None
         self.reconnect_skipped_reason = None
+        self._rate_limit_blocked_until = None
         self.websocket_status = "CONNECTED"
+        self._finish_global_gap("websocket_connected")
         logger.info("Kite WebSocket connected")
         with self._lock:
             desired = set(self._desired_tokens)
@@ -531,8 +563,10 @@ class KiteWebSocketPriceFeed:
             self._subscribe_connected(desired)
 
     def _on_ticks(self, ws: Any, ticks: list[dict[str, Any]]) -> None:
+        callback_started = perf_counter()
         parsed_ticks: list[WebSocketTick] = []
         gap_events: list[dict[str, Any]] = []
+        verified_tick_recovered_gap = False
         with self._lock:
             for payload in ticks or []:
                 tick = self._parse_tick(payload)
@@ -549,6 +583,23 @@ class KiteWebSocketPriceFeed:
                     parsed_ticks.append(tick)
                 else:
                     self.ignored_tick_count += 1
+            if (
+                parsed_ticks
+                and self._active_gap_started_at is not None
+                and self._can_recover_from_verified_tick_locked(parsed_ticks)
+            ):
+                self.connected = True
+                self.connected_at = self.connected_at or self._now()
+                self.last_reconnect_at = self._now()
+                self.last_error = None
+                self.last_error_code = None
+                self.last_error_reason = None
+                self.last_disconnect_reason = None
+                self.reconnect_skipped_reason = None
+                self.websocket_status = "CONNECTED"
+                verified_tick_recovered_gap = True
+        if verified_tick_recovered_gap:
+            self._finish_global_gap("verified_fresh_tick")
         for event in gap_events:
             if event.get("entry_blocking"):
                 self._dispatch_gap(event)
@@ -557,6 +608,12 @@ class KiteWebSocketPriceFeed:
             self._run_underlying_tick_handler(tick)
             self._run_raw_tick_handler(tick)
             self._dispatch_tick(tick)
+        if self.latency_metrics is not None:
+            self.latency_metrics.record(
+                "websocket_callback_duration",
+                (perf_counter() - callback_started) * 1000.0,
+                detail={"tick_count": len(parsed_ticks)},
+            )
 
     def _on_close(self, ws: Any, code: int | None, reason: str | None) -> None:
         self.connected = False
@@ -570,6 +627,7 @@ class KiteWebSocketPriceFeed:
             self.websocket_status = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
             self.reconnect_skipped_reason = "market_closed"
             self.last_error = None
+            self._stop_sdk_reconnect(ws)
             logger.info("Kite WebSocket closed outside market hours; reconnect skipped: code=%s reason=%s", code, reason)
             return
         if self._is_auth_failure(code, reason):
@@ -578,14 +636,17 @@ class KiteWebSocketPriceFeed:
             self.reconnect_skipped_reason = "auth_failed"
             self.last_error = reason or f"closed:{code}"
             self._mark_auth_failed(self.last_error)
+            self._stop_sdk_reconnect(ws)
             self._signal_workers_to_stop()
             logger.error("Kite WebSocket authentication failed; Kite re-login required: code=%s reason=%s", code, reason)
             return
         if self._is_rate_limited(code, reason):
             self.running = False
-            self.websocket_status = "MAX_RETRIES_EXCEEDED"
-            self.reconnect_skipped_reason = "rate_limited"
+            self.websocket_status = "RATE_LIMIT_COOLDOWN"
+            self.reconnect_skipped_reason = "rate_limited_cooldown"
             self.last_error = reason or f"closed:{code}"
+            self._activate_rate_limit_cooldown()
+            self._stop_sdk_reconnect(ws)
             self._signal_workers_to_stop()
             logger.error("Kite WebSocket reconnect skipped due to broker rate limit: code=%s reason=%s", code, reason)
             return
@@ -593,8 +654,7 @@ class KiteWebSocketPriceFeed:
         self.last_error = reason or f"closed:{code}"
         self._start_global_gap("websocket_disconnected")
         logger.warning("Kite WebSocket disconnected: code=%s reason=%s", code, reason)
-        if self._request_reconnect(ws):
-            self.websocket_status = "RECONNECTING"
+        self._await_sdk_reconnect(ws)
 
     def _on_error(self, ws: Any, code: int | None, reason: str | None) -> None:
         self.last_error_code = code
@@ -605,6 +665,7 @@ class KiteWebSocketPriceFeed:
             self.websocket_status = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
             self.reconnect_skipped_reason = "market_closed"
             self.last_error = None
+            self._stop_sdk_reconnect(ws)
             logger.info("Kite WebSocket error ignored outside market hours: code=%s reason=%s session=%s", code, reason, session)
             return
         self.last_error = reason or f"error:{code}"
@@ -614,66 +675,77 @@ class KiteWebSocketPriceFeed:
             self.websocket_status = "AUTH_FAILED"
             self.reconnect_skipped_reason = "auth_failed"
             self._mark_auth_failed(self.last_error)
+            self._stop_sdk_reconnect(ws)
             self._signal_workers_to_stop()
             logger.error("Kite WebSocket authentication failed; Kite re-login required: code=%s reason=%s", code, reason)
             return
         if self._is_rate_limited(code, reason):
             self.running = False
-            self.websocket_status = "MAX_RETRIES_EXCEEDED"
-            self.reconnect_skipped_reason = "rate_limited"
+            self.websocket_status = "RATE_LIMIT_COOLDOWN"
+            self.reconnect_skipped_reason = "rate_limited_cooldown"
+            self._activate_rate_limit_cooldown()
+            self._stop_sdk_reconnect(ws)
             self._signal_workers_to_stop()
             logger.error("Kite WebSocket reconnect skipped due to broker rate limit: code=%s reason=%s", code, reason)
             return
         self.websocket_status = "ERROR"
         self._start_global_gap("websocket_error")
         logger.warning("Kite WebSocket error: code=%s reason=%s", code, reason)
-        if self._request_reconnect(ws):
-            self.websocket_status = "RECONNECTING"
+        self._await_sdk_reconnect(ws)
 
-    def _request_reconnect(self, ws: Any) -> bool:
+    def _await_sdk_reconnect(self, ws: Any) -> bool:
+        """Leave reconnect scheduling to KiteTicker's single retry factory."""
         if not settings.websocket_reconnect_enabled:
             self.running = False
             self.reconnect_skipped_reason = "reconnect_disabled"
+            self._stop_sdk_reconnect(ws)
             self._signal_workers_to_stop()
             return False
-        reconnect = getattr(ws, "reconnect", None)
-        if not callable(reconnect):
-            self.running = False
-            self.reconnect_skipped_reason = "reconnect_unavailable"
-            self._signal_workers_to_stop()
-            return False
-        now = self._now()
-        min_gap = max(0, int(settings.websocket_reconnect_min_gap_seconds))
-        if self.last_reconnect_at is not None and (now - self.last_reconnect_at).total_seconds() < min_gap:
-            self.reconnect_skipped_reason = "reconnect_backoff"
-            self.websocket_status = "RECONNECT_COOLDOWN"
-            logger.warning("Kite WebSocket reconnect skipped during backoff window")
-            return False
-        window_seconds = max(1, int(settings.websocket_reconnect_window_seconds))
-        self._reconnect_attempt_times = [
-            attempt for attempt in self._reconnect_attempt_times if (now - attempt).total_seconds() <= window_seconds
-        ]
-        max_attempts = max(1, int(settings.websocket_reconnect_max_attempts_per_window))
-        if len(self._reconnect_attempt_times) >= max_attempts:
-            self.running = False
-            self.websocket_status = "MAX_RETRIES_EXCEEDED"
-            self.reconnect_skipped_reason = "max_reconnect_attempts"
-            self._signal_workers_to_stop()
-            logger.error("Kite WebSocket reconnect max attempts exceeded in %ss window", window_seconds)
-            return False
+        self.websocket_status = "RECONNECTING"
+        self.reconnect_skipped_reason = None
+        return True
+
+    def _create_ticker(self, factory: Callable[..., Any]) -> Any:
         try:
-            self.websocket_status = "RECONNECTING"
-            self.reconnect_skipped_reason = None
-            self.reconnect_request_count += 1
-            self.last_reconnect_at = now
-            self._reconnect_attempt_times.append(now)
-            reconnect()
-            return True
-        except Exception as exc:
-            self.last_error = str(exc)
-            self.websocket_status = "ERROR"
-            logger.warning("Kite WebSocket reconnect request failed: %s", exc)
-            return False
+            return factory(
+                str(self.api_key),
+                str(self.access_token),
+                reconnect=bool(settings.websocket_reconnect_enabled),
+                reconnect_max_tries=max(1, int(settings.websocket_reconnect_max_attempts_per_window)),
+                reconnect_max_delay=max(5, int(settings.websocket_reconnect_max_delay_seconds)),
+            )
+        except TypeError:
+            # Small test/local adapters may expose only the two credential args.
+            return factory(str(self.api_key), str(self.access_token))
+
+    def _stop_sdk_reconnect(self, ws: Any | None = None) -> None:
+        seen: set[int] = set()
+        for target in (ws, self._ticker):
+            if target is None or id(target) in seen:
+                continue
+            seen.add(id(target))
+            stop_retry = getattr(target, "stop_retry", None)
+            if callable(stop_retry):
+                try:
+                    stop_retry()
+                except Exception as exc:
+                    logger.warning("Kite WebSocket stop-retry failed: %s", exc)
+
+    def _activate_rate_limit_cooldown(self) -> None:
+        now = self._now()
+        if self._rate_limit_blocked_until is None or now >= self._rate_limit_blocked_until:
+            self._rate_limit_blocked_until = now + timedelta(
+                seconds=max(30, int(settings.websocket_rate_limit_cooldown_seconds))
+            )
+
+    def _rate_limit_cooldown_remaining(self) -> int:
+        if self._rate_limit_blocked_until is None:
+            return 0
+        remaining = (self._rate_limit_blocked_until - self._now()).total_seconds()
+        if remaining <= 0:
+            self._rate_limit_blocked_until = None
+            return 0
+        return max(1, int(remaining + 0.999))
 
     def _on_reconnect(self, ws: Any, attempts_count: int | None) -> None:
         session = self.market_session()
@@ -682,6 +754,7 @@ class KiteWebSocketPriceFeed:
             self.websocket_status = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
             self.reconnect_skipped_reason = "market_closed"
             self.last_error = None
+            self._stop_sdk_reconnect(ws)
             logger.info("Kite WebSocket reconnect skipped outside market hours: %s", session)
             return
         self.reconnect_count += 1
@@ -689,7 +762,6 @@ class KiteWebSocketPriceFeed:
         self._ensure_workers()
         self.reconnect_skipped_reason = None
         self.websocket_status = "RECONNECTING"
-        self._finish_global_gap("websocket_reconnect")
         logger.info("Kite WebSocket reconnect attempt: %s", attempts_count)
         with self._lock:
             desired = set(self._desired_tokens)
@@ -1588,8 +1660,27 @@ class KiteWebSocketPriceFeed:
                 "backfill_status": "not_applicable_global_gap",
             }
             self._active_gap_started_at = None
+            self._gap_recovery_count += 1
+            self._last_gap_recovery_at = end
+            self._last_gap_recovery_reason = str(reason)
             self._record_gap_locked(event)
         self._dispatch_gap(event)
+
+    def _can_recover_from_verified_tick_locked(self, ticks: list[WebSocketTick]) -> bool:
+        if not self.running or self.market_session() != "REGULAR_MARKET":
+            return False
+        if self.websocket_status in {"AUTH_FAILED", "RATE_LIMIT_COOLDOWN", "MAX_RETRIES_EXCEEDED"}:
+            return False
+        now = self._now()
+        max_age = max(1.0, float(settings.websocket_price_stale_seconds))
+        for tick in ticks:
+            received_at = tick.receive_timestamp
+            if received_at is None or float(tick.price or 0.0) <= 0:
+                continue
+            age = abs((now - received_at.replace(tzinfo=None)).total_seconds())
+            if age <= max_age:
+                return True
+        return False
 
     def _record_gap_locked(self, event: dict[str, Any]) -> None:
         self._gap_events.append(dict(event))
@@ -1650,6 +1741,9 @@ class KiteWebSocketPriceFeed:
             "active_gap_duration_seconds": active_seconds,
             "max_gap_seconds": settings.max_websocket_gap_seconds,
             "gap_count": len(self._gap_events),
+            "recovery_count": self._gap_recovery_count,
+            "last_recovery_at": self._last_gap_recovery_at.isoformat(sep=" ") if self._last_gap_recovery_at else None,
+            "last_recovery_reason": self._last_gap_recovery_reason,
             "latest_gap": self._gap_events[-1] if self._gap_events else None,
             "recent_gaps": list(self._gap_events[-10:]),
             "backfill_enabled": settings.enable_websocket_gap_backfill,

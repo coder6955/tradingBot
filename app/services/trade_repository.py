@@ -527,6 +527,20 @@ class TradeRepository:
         finally:
             session.close()
 
+    def update_stop_loss(self, trade_id: int, *, stop_loss: float) -> TradeRecord:
+        session = get_session()
+        try:
+            record = session.get(TradeRecord, trade_id)
+            if record is None:
+                raise ValueError(f"trade {trade_id} was not found")
+            record.stop_loss = float(stop_loss)
+            record.updated_at = ist_now_naive()
+            session.commit()
+            session.refresh(record)
+            return record
+        finally:
+            session.close()
+
     def _apply_mfe_mae(self, record: TradeRecord, *, price: float, price_timestamp: datetime | None = None) -> bool:
         try:
             observed_price = float(price)

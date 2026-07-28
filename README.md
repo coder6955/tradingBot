@@ -6,9 +6,9 @@ This project is an AI-assisted options trading scanner for the Indian stock mark
 - Scan Bank Nifty options for score-ranked option-buying setups; probability stays unavailable until calibrated evidence is sufficient.
 - Use Kite Connect for NSE/NFO instruments, quotes, candles, profile, margins, positions, and orders.
 - Fall back to deterministic mock data when Kite credentials are not configured.
-- Check technical score, option liquidity, premium risk, stop loss, targets, quantity, and risk/reward before a trade.
-- Check market regime, India VIX, price action, CPR/pivots, previous-day levels, option-chain PCR, OI support/resistance, max-pain approximation, bid/ask spread, volume, OI, timing, and configured event blocks before a trade.
-- Classify multi-timeframe structure, five-dimensional market state, volatility edge, momentum phase, and a regime-specific setup family before entry.
+- Hard-block entries only for unsafe, stale, unavailable, or untradable conditions: data freshness, completed 1-minute/5-minute disagreement, weak constituent participation, premium trigger failure, liquidity/depth/spread, risk/reward, and risk preflight.
+- Keep broader market regime, India VIX, price action, option-chain context, volatility, momentum, setup-family, and learned-edge analysis as shadow diagnostics until measured evidence justifies promotion.
+- Build one immutable fast-scan context on the scheduled path. WebSocket rally events validate that cached context in memory without broker REST calls, database reads, synchronous fallback scans, or a second order-routing path.
 - Rank executable contracts and candidates using ask/bid, spread, depth, OI/volume, Greeks/DTE when available, reward/risk, costs, uncertainty, and contract stickiness.
 - Persist/recover armed entries with owner-based WebSocket subscriptions and expose whether each token is queued, subscribed, or fresh-tick verified.
 - Use setup-family time/trailing/target exit profiles while preserving hard stops, and keep research/evidence promotion outside the live scanner path.
@@ -42,6 +42,9 @@ MIN_RISK_REWARD=1.2
 MAX_BID_ASK_SPREAD_PCT=5.0
 MIN_OPTION_VOLUME=500
 MIN_OPTION_OI=5000
+ACTIVE_DECISION_TIMEFRAMES=1minute,5minute
+FAST_SCAN_CONTEXT_REFRESH_SECONDS=30
+SCHEDULED_SCAN_MAX_REST_CALLS=3
 ENFORCE_MARKET_HOURS=false
 BLOCKED_EVENT_DATES=
 BLOCKED_SYMBOLS=
@@ -97,7 +100,7 @@ Example paper order body using a signal returned by the scanner:
 }
 ```
 
-Signals are score-ranked trade setups, not guaranteed-profit trades. Heuristic score confidence is not a calibrated probability. Validate broker margins, slippage, spread, event risk, and risk limits before enabling live orders.
+Signals are score-ranked trade setups, not guaranteed-profit trades. Scores rank candidates but do not override the primary safety and execution gates. Heuristic confidence is not a calibrated probability. Keep paper mode enabled until replay, latency, slippage, and protective-order verification pass.
 
 ## Run tests
 

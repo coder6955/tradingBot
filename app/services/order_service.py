@@ -170,7 +170,15 @@ class OrderService:
             raise ValueError("signal stop loss must be positive")
         if not signal.target_1 or signal.target_1 <= signal.entry_price:
             raise ValueError("signal target_1 must be above entry price")
-        if signal.score < settings.min_signal_score:
+        factors = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+        strategy_metadata = factors.get("strategy_metadata") if isinstance(factors.get("strategy_metadata"), dict) else {}
+        decision_policy = factors.get("decision_policy") if isinstance(factors.get("decision_policy"), dict) else {}
+        ranking_only_score = (
+            decision_policy.get("primary_gates_passed") is True
+            and decision_policy.get("score_role") == "ranking_only"
+            and strategy_metadata.get("strategy_version") == settings.strategy_version
+        )
+        if signal.score < settings.min_signal_score and not ranking_only_score:
             raise ValueError("signal score is below threshold")
         expiry = self._signal_expiry_date(signal)
         if expiry is None:
@@ -180,7 +188,6 @@ class OrderService:
             raise ValueError("signal option contract is expired")
         if settings.block_expiry_day_option_buying and expiry <= today:
             raise ValueError("expiry-day option buying is blocked")
-        factors = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
         if not factors or "strategy_metadata" not in factors:
             raise ValueError("order signal must come from scanner diagnostics/opportunity with strategy metadata")
 

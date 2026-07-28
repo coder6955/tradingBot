@@ -10,11 +10,12 @@ VENV_SITE_PACKAGES = PROJECT_ROOT / ".venv" / "Lib" / "site-packages"
 if VENV_SITE_PACKAGES.exists() and str(VENV_SITE_PACKAGES) not in sys.path:
     sys.path.append(str(VENV_SITE_PACKAGES))
 
-from sqlalchemy import BigInteger, Column, DateTime, Float, Integer, String, Text, UniqueConstraint, create_engine, inspect, text
+from sqlalchemy import BigInteger, Column, DateTime, Float, Integer, String, Text, UniqueConstraint, create_engine, event, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.config import settings
 from app.services.time_utils import ist_now_naive
+from app.services.io_call_metrics_service import io_call_metrics
 
 Base = declarative_base()
 engine = None
@@ -368,6 +369,7 @@ def init_db(database_url: Optional[str] = None) -> None:
     url = database_url or settings.database_url
     connect_args = {"connect_timeout": 5} if url.startswith("mysql") else {}
     engine = create_engine(url, future=True, connect_args=connect_args)
+    event.listen(engine, "before_cursor_execute", _record_database_query)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     Base.metadata.create_all(bind=engine)
     _ensure_candle_columns()
@@ -379,6 +381,10 @@ def init_db(database_url: Optional[str] = None) -> None:
     _ensure_runtime_job_run_columns()
     _ensure_raw_tick_columns()
     _mark_legacy_rejected_outcomes_low_confidence()
+
+
+def _record_database_query(*_: object) -> None:
+    io_call_metrics.record_database()
 
 
 def _ensure_candle_columns() -> None:

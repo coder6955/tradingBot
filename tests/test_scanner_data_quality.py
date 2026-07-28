@@ -40,6 +40,8 @@ class BankNiftyQualityFeed:
             "ema_21": 57980,
             "day_high": 58200,
             "day_low": 57800,
+            "previous_day_close": 57900 if symbol == "BANKNIFTY" else 24900,
+            "day_open": 57920 if symbol == "BANKNIFTY" else 24920,
             "room_to_level_pct": 1.0,
         }
         if symbol == "INDIAVIX":
@@ -71,10 +73,25 @@ class BankNiftyQualityFeed:
         ]
 
     def get_quotes(self, instruments):
-        return {instrument: {**self.quote_payload, "quote_timestamp": datetime.now().isoformat(sep=" ")} for instrument in instruments}
+        payload = dict(self.quote_payload)
+        depth = payload.get("depth", {}) if isinstance(payload.get("depth"), dict) else {}
+        payload["depth"] = {
+            "buy": [{**row, "quantity": row.get("quantity", 1000)} for row in depth.get("buy", [])],
+            "sell": [{**row, "quantity": row.get("quantity", 1000)} for row in depth.get("sell", [])],
+        }
+        return {instrument: {**payload, "quote_timestamp": datetime.now().isoformat(sep=" ")} for instrument in instruments}
 
     def call_counts(self):
         return {"quote": 1, "historical_data": 0, "instruments": 1}
+
+
+class IncompleteCanonicalFeed(BankNiftyQualityFeed):
+    def get_snapshot(self, symbol: str) -> dict[str, object]:
+        return {
+            **super().get_snapshot(symbol),
+            "analysis_ready": False,
+            "data_quality_reasons": ["insufficient_completed_5minute_structure_candles"],
+        }
 
 
 class FakeWebSocketPremiumFeed:
@@ -271,6 +288,7 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.temp_db.close()
         init_db(f"sqlite:///{self.temp_db.name}")
+        self._insert_underlying_candles()
         self._insert_premium_candles("BANKNIFTY26JUL58000CE")
 
     def tearDown(self) -> None:
@@ -304,6 +322,29 @@ class ScannerDataQualityTests(unittest.TestCase):
         finally:
             session.close()
 
+    def _insert_underlying_candles(self) -> None:
+        session = get_session()
+        try:
+            now = datetime.now().replace(second=0, microsecond=0)
+            for timeframe, minutes in (("1minute", 1), ("5minute", 5)):
+                for idx in range(24):
+                    close = 57900.0 + idx * 8.0
+                    session.add(
+                        Candle(
+                            symbol="BANKNIFTY",
+                            timeframe=timeframe,
+                            timestamp=now - timedelta(minutes=(24 - idx) * minutes),
+                            open_price=close - 4,
+                            high_price=close + 6,
+                            low_price=close - 6,
+                            close_price=close,
+                            volume=1000 + idx * 10,
+                        )
+                    )
+            session.commit()
+        finally:
+            session.close()
+
     def _replace_premium_candles(self, symbol: str, *, start: datetime, closes: list[float], volumes: list[float] | None = None) -> None:
         session = get_session()
         try:
@@ -332,6 +373,19 @@ class ScannerDataQualityTests(unittest.TestCase):
             rejected_opportunity_repository=RejectedOpportunityRepository(),
         )
         return scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")[0]
+
+    def test_incomplete_canonical_candles_return_scored_diagnostic_without_crashing(self) -> None:
+        scanner = ScannerService(
+            feed=IncompleteCanonicalFeed({}),
+            rejected_opportunity_repository=RejectedOpportunityRepository(),
+        )
+
+        result = scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["score"], 0)
+        self.assertFalse(result[0]["passed"])
+        self.assertIn("canonical completed-candle analysis was not ready", result[0]["reasons"])
 
     def test_zero_live_quote_with_valid_premium_candles_rejects_before_fake_prices(self) -> None:
         result = self._scanner_result(
@@ -422,10 +476,10 @@ class ScannerDataQualityTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("UNKNOWN_DATA_MISSING: insufficient IV history", result["factor_scores"]["volatility_edge"]["reasons"])
-        self.assertNotIn("UNKNOWN_DATA_MISSING: insufficient IV history", result["reasons"])
+        self.assertIn("volatility_edge_deferred_outside_live_decision_path", result["factor_scores"]["volatility_edge"]["reasons"])
+        self.assertNotIn("volatility_edge_deferred_outside_live_decision_path", result["reasons"])
 
-    def test_volatility_edge_hard_gate_blocks_when_enabled(self) -> None:
+    def test_volatility_edge_remains_shadow_when_legacy_hard_gate_is_enabled(self) -> None:
         object.__setattr__(settings, "enable_volatility_edge_hard_gate", True)
 
         result = self._scanner_result(
@@ -438,7 +492,8 @@ class ScannerDataQualityTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("UNKNOWN_DATA_MISSING: insufficient IV history", result["reasons"])
+        self.assertIn("volatility_edge_deferred_outside_live_decision_path", result["factor_scores"]["volatility_edge"]["reasons"])
+        self.assertNotIn("volatility_edge_deferred_outside_live_decision_path", result["reasons"])
 
     def test_rejected_opportunity_metadata_includes_volatility_edge(self) -> None:
         repo = RejectedOpportunityRepository()
@@ -451,7 +506,7 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.assertIn("volatility_edge", factors)
         self.assertIn("reasons", factors["volatility_edge"])
 
-    def test_banknifty_regime_filter_blocks_scanner_signal(self) -> None:
+    def test_duplicate_banknifty_regime_filter_is_shadow_only(self) -> None:
         object.__setattr__(settings, "enable_banknifty_regime_filter", True)
         scanner = ScannerService(
             feed=BankNiftyQualityFeed(
@@ -470,7 +525,7 @@ class ScannerDataQualityTests(unittest.TestCase):
         result = scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")[0]
 
         self.assertFalse(result["passed"])
-        self.assertIn("opening_trap_structure", result["reasons"])
+        self.assertNotIn("opening_trap_structure", result["reasons"])
         self.assertEqual(result["factor_scores"]["banknifty_regime_filter"]["classification"], "NO_BUY_REGIME")
 
     def test_scanner_registers_armed_setup_when_entry_timing_is_armed(self) -> None:
@@ -489,7 +544,7 @@ class ScannerDataQualityTests(unittest.TestCase):
         tracker = FakeArmedEntryTracker()
         try:
             object.__setattr__(settings, "enable_option_premium_confirmation", False)
-            object.__setattr__(settings, "enable_banknifty_intelligence", False)
+            object.__setattr__(settings, "enable_banknifty_intelligence", True)
             object.__setattr__(settings, "enable_kite_websocket", True)
             object.__setattr__(settings, "min_signal_score", 0)
             object.__setattr__(settings, "min_market_regime_score", 1)
@@ -542,7 +597,7 @@ class ScannerDataQualityTests(unittest.TestCase):
         tracker = FakeArmedEntryTracker()
         try:
             object.__setattr__(settings, "enable_option_premium_confirmation", True)
-            object.__setattr__(settings, "enable_banknifty_intelligence", False)
+            object.__setattr__(settings, "enable_banknifty_intelligence", True)
             object.__setattr__(settings, "enable_kite_websocket", True)
             object.__setattr__(settings, "min_signal_score", 0)
             object.__setattr__(settings, "early_arm_min_score", 1)
@@ -581,7 +636,7 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.assertGreater(tracker.calls[0]["entry_timing"]["entry_trigger_price"], tracker.calls[0]["entry_timing"]["current_premium"])
         self.assertIn("premium_confirmation_pending", tracker.calls[0]["entry_timing"]["reasons"])
 
-    def test_scanner_early_arm_does_not_bypass_non_premium_hard_gate(self) -> None:
+    def test_scanner_early_arm_ignores_shadow_regime_veto(self) -> None:
         originals = {
             "enable_option_premium_confirmation": settings.enable_option_premium_confirmation,
             "enable_banknifty_regime_filter": settings.enable_banknifty_regime_filter,
@@ -600,7 +655,7 @@ class ScannerDataQualityTests(unittest.TestCase):
         try:
             object.__setattr__(settings, "enable_option_premium_confirmation", True)
             object.__setattr__(settings, "enable_banknifty_regime_filter", True)
-            object.__setattr__(settings, "enable_banknifty_intelligence", False)
+            object.__setattr__(settings, "enable_banknifty_intelligence", True)
             object.__setattr__(settings, "enable_kite_websocket", True)
             object.__setattr__(settings, "min_signal_score", 0)
             object.__setattr__(settings, "early_arm_min_score", 1)
@@ -633,10 +688,10 @@ class ScannerDataQualityTests(unittest.TestCase):
                 object.__setattr__(settings, key, value)
 
         self.assertFalse(result["passed"])
-        self.assertIn("opening_trap_structure", result["reasons"])
-        self.assertEqual(len(tracker.calls), 0)
-        self.assertEqual(result["factor_scores"]["armed_entry"]["reason"], "hard_gate_failed_before_early_arming")
-        self.assertNotEqual(result["entry_timing_state"], "ARMED_FOR_ENTRY")
+        self.assertNotIn("opening_trap_structure", result["reasons"])
+        self.assertEqual(len(tracker.calls), 1)
+        self.assertTrue(result["factor_scores"]["armed_entry"]["registered"])
+        self.assertEqual(result["entry_timing_state"], "ARMED_FOR_ENTRY")
 
     def test_scanner_early_arm_is_paper_only_by_default(self) -> None:
         scanner = ScannerService(feed=BankNiftyQualityFeed({}), rejected_opportunity_repository=RejectedOpportunityRepository())

@@ -11,6 +11,19 @@ from app.services.time_utils import ist_now_naive
 class RuntimeJobRepository:
     """Durable idempotency/status store for runtime jobs."""
 
+    def latest_run(self, *, job_name: str) -> dict[str, Any] | None:
+        session = get_session()
+        try:
+            row = (
+                session.query(RuntimeJobRunRecord)
+                .filter(RuntimeJobRunRecord.job_name == job_name)
+                .order_by(RuntimeJobRunRecord.id.desc())
+                .first()
+            )
+            return self.to_dict(row) if row else None
+        finally:
+            session.close()
+
     def latest(self, *, job_name: str, trading_date: str) -> dict[str, Any] | None:
         session = get_session()
         try:

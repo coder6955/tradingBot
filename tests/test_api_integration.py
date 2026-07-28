@@ -213,7 +213,7 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("Active Trade / Exit Watch", html)
         self.assertIn("Latest Watch", html)
         self.assertIn("System Thought Feed", html)
-        self.assertIn("V4 Strategy &amp; Market Session", html)
+        self.assertIn("V5 Strategy &amp; Market Session", html)
         self.assertIn("Market Data Pipeline", html)
         self.assertIn("WebSocket &amp; Subscription Ownership", html)
         self.assertIn("Armed Entry Lifecycle", html)
@@ -326,6 +326,113 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(payload["count"], 1)
         self.assertEqual(payload["events"][0]["type"], "rejected_opportunity")
         self.assertIn("waiting_for_entry_trigger", payload["events"][0]["message"])
+
+    def test_automation_error_event_explains_missing_field_and_source(self) -> None:
+        event = api._decision_event_from_error(
+            {"time": "21 Jul 2026, 10:01:05 AM IST", "error": "'score'", "error_type": "KeyError", "source": "scheduled_scan"}
+        )
+
+        self.assertEqual(event["title"], "Automation error: scheduled scan")
+        self.assertIn("required field 'score' was missing", event["message"])
+        self.assertEqual(event["source"], "scheduled_scan")
+        self.assertEqual(event["error_type"], "KeyError")
+
+    def test_fast_candidate_gate_failure_is_a_decision_not_an_automation_error(self) -> None:
+        event = api._decision_event_from_auto_decision(
+            {
+                "time": "23 Jul 2026, 02:33:30 PM IST",
+                "source": "fast_rally_candidate_validation",
+                "passed": False,
+                "reason": "one_minute_and_five_minute_direction_disagree",
+                "direction": "bullish",
+                "move_pct": 0.1083,
+            }
+        )
+
+        self.assertEqual(event["type"], "candidate_validation")
+        self.assertEqual(event["severity"], "warn")
+        self.assertEqual(event["title"], "Fast-rally candidate rejected")
+        self.assertNotIn("Automation error", event["title"])
+        self.assertIn("one_minute_and_five_minute_direction_disagree", event["message"])
+
+    def test_fast_rally_dispatch_suppression_explains_why_validation_did_not_run(self) -> None:
+        event = api._decision_event_from_auto_decision(
+            {
+                "time": "23 Jul 2026, 02:33:29 PM IST",
+                "event_type": "fast_rally_dispatch",
+                "source": "banknifty_fast_rally",
+                "scheduled": False,
+                "passed": False,
+                "stage": "suppressed",
+                "reason": "fast_rescan_cooldown",
+                "direction": "bullish",
+                "move_pct": 0.1083,
+            }
+        )
+
+        self.assertEqual(event["type"], "fast_rally_dispatch")
+        self.assertEqual(event["severity"], "warn")
+        self.assertEqual(event["title"], "Fast-rally validation suppressed")
+        self.assertIn("fast_rescan_cooldown", event["message"])
+
+    def test_decision_feed_timestamp_sorting_handles_display_and_iso_formats(self) -> None:
+        newer_iso = api._decision_sort_timestamp("2026-07-23T15:10:13 IST")
+        older_display = api._decision_sort_timestamp("23 Jul 2026, 02:33:30 PM IST")
+
+        self.assertGreater(newer_iso, older_display)
+
+    def test_scan_heartbeat_explains_zero_actionable_opportunities(self) -> None:
+        event = api._decision_event_from_scan_heartbeat(
+            {
+                "time": "23 Jul 2026, 03:10:13 PM IST",
+                "source": "scheduled_scan",
+                "opportunity_count": 0,
+                "placed_count": 0,
+            }
+        )
+
+        self.assertEqual(event["type"], "scan_heartbeat")
+        self.assertEqual(event["title"], "Scheduled scan completed")
+        self.assertIn("no actionable opportunity", event["message"])
+
+    def test_decision_feed_places_new_scan_heartbeat_above_older_fast_rejection(self) -> None:
+        original_scan_result = api.auto_trader_service.last_scan_result
+        original_decisions = list(api.auto_trader_service.decision_events)
+        original_errors = list(api.auto_trader_service.errors)
+        original_executions = list(api.auto_trader_service.executions)
+        try:
+            api.auto_trader_service.last_scan_result = {
+                "time": "23 Jul 2026, 03:10:13 PM IST",
+                "source": "scheduled_scan",
+                "opportunity_count": 0,
+                "placed_count": 0,
+            }
+            api.auto_trader_service.decision_events = [
+                {
+                    "time": "23 Jul 2026, 02:33:30 PM IST",
+                    "source": "fast_rally_candidate_validation",
+                    "passed": False,
+                    "reason": "one_minute_and_five_minute_direction_disagree",
+                    "direction": "bullish",
+                }
+            ]
+            api.auto_trader_service.errors = []
+            api.auto_trader_service.executions = []
+            with (
+                patch.object(api.opportunity_repository, "list_opportunities", return_value=[]),
+                patch.object(api.rejected_opportunity_repository, "list_rejections", return_value=[]),
+                patch.object(api.trade_repository, "list_trades", return_value=[]),
+            ):
+                payload = self.client.get("/dashboard/decision-feed?limit=10").json()
+
+            self.assertEqual(payload["events"][0]["type"], "scan_heartbeat")
+            self.assertEqual(payload["events"][1]["type"], "candidate_validation")
+            self.assertEqual(payload["events"][1]["title"], "Fast-rally candidate rejected")
+        finally:
+            api.auto_trader_service.last_scan_result = original_scan_result
+            api.auto_trader_service.decision_events = original_decisions
+            api.auto_trader_service.errors = original_errors
+            api.auto_trader_service.executions = original_executions
 
     def test_scanner_diagnostics_endpoint(self) -> None:
         with patch.object(api, "get_scanner_service", return_value=FakeScanner()):

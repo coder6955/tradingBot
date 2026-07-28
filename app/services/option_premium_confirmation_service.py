@@ -117,6 +117,13 @@ class OptionPremiumConfirmationService:
         last_close = closes[-1]
         prev_close = closes[-2]
         recent_high = max(float(candle.high_price) for candle in candles[:-1])
+        recent_low = min(float(candle.low_price) for candle in candles[-8:])
+        true_ranges: list[float] = []
+        previous_close = closes[0]
+        for high, low, close in zip(highs[1:], lows[1:], closes[1:]):
+            true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+            previous_close = close
+        premium_atr = sum(true_ranges[-14:]) / max(1, len(true_ranges[-14:]))
         avg_volume = sum(volumes[:-1]) / max(len(volumes[:-1]), 1)
         total_volume = sum(volumes)
         if total_volume > 0:
@@ -183,6 +190,8 @@ class OptionPremiumConfirmationService:
                 "premium_change_pct": round(premium_change_pct, 2),
                 "last_change_pct": round(last_change_pct, 2),
                 "recent_high": round(recent_high, 2),
+                "recent_low": round(recent_low, 2),
+                "premium_atr": round(premium_atr, 2),
                 "option_vwap": round(option_vwap, 2),
                 "breakout": breakout,
                 "volume_expansion": volume_expansion,

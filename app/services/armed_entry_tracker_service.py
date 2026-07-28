@@ -12,6 +12,7 @@ from uuid import uuid4
 from app.config import settings
 from app.models import Signal
 from app.services.entry_timing_service import EntryTimingService
+from app.services.entry_opportunity_service import EntryOpportunityService
 from app.services.kite_websocket_price_feed import WebSocketTick
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
 from app.services.risk_management_service import RiskManagementService
@@ -238,6 +239,41 @@ class ArmedEntryTrackerService:
         )
         logger.info("armed_entry_registered %s", {"setup_id": setup.setup_id, "tradingsymbol": setup.tradingsymbol, "trigger": setup.entry_trigger_price})
         return payload
+
+    def register_from_fast_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
+        """Promote a slow-path prepared plan after zero-I/O fast validation."""
+        order_mode = str(plan.get("order_mode") or "paper").lower()
+        if order_mode != "paper":
+            return {"registered": False, "reason": "fast_candidate_promotion_paper_only"}
+        payload = plan.get("contract")
+        if not isinstance(payload, dict):
+            return {"registered": False, "reason": "fast_candidate_contract_plan_missing"}
+        allowed = {item.name for item in fields(OptionContract)}
+        try:
+            contract = OptionContract(**{key: value for key, value in payload.items() if key in allowed})
+        except (TypeError, ValueError) as exc:
+            return {"registered": False, "reason": "fast_candidate_contract_plan_invalid", "message": str(exc)}
+        factors = dict(plan.get("factor_scores") or {})
+        factors["fast_candidate_promotion"] = {
+            "promoted": True,
+            "source": "banknifty_fast_rally",
+            "strategy_version": settings.strategy_version,
+        }
+        return self.register_from_scan(
+            symbol=str(plan.get("symbol") or "BANKNIFTY"),
+            action=str(plan.get("action") or ""),
+            side=str(plan.get("side") or "BUY"),
+            contract=contract,
+            prices=dict(plan.get("prices") or {}),
+            entry_timing=dict(plan.get("entry_timing") or {}),
+            score=int(plan.get("score") or 0),
+            probability=float(plan["probability"]) if plan.get("probability") is not None else None,
+            confidence=float(plan.get("confidence") or 0.0),
+            quantity=int(plan.get("quantity") or contract.lot_size or 0),
+            factor_scores=factors,
+            order_mode=order_mode,
+            reasons=[str(reason) for reason in (plan.get("reasons") or [])],
+        )
 
     def on_tick(self, tick: WebSocketTick) -> list[dict[str, Any]]:
         token = self._int(tick.instrument_token)
@@ -542,35 +578,25 @@ class ArmedEntryTrackerService:
         return self._to_dict(self._setups[setup_id])
 
     def _entry_checks(self, setup: ArmedEntrySetup, *, executable_price: float, spread_pct: float) -> list[str]:
-        reasons: list[str] = []
-        chase_pct = ((executable_price - setup.entry_trigger_price) / max(setup.entry_trigger_price, 0.01)) * 100
-        move_from_base_pct = ((executable_price - setup.current_premium_at_arming) / max(setup.current_premium_at_arming, 0.01)) * 100
-        target1_room_pct = ((setup.target_1 - executable_price) / max(executable_price, 0.01)) * 100 if setup.target_1 > executable_price else 0.0
-        risk = executable_price - setup.stop_loss
-        reward = setup.target_1 - executable_price
-        remaining_rr = reward / risk if risk > 0 and reward > 0 else 0.0
-        if settings.enable_normalized_entry_chase:
-            observations = [float(value) for value in setup.recent_premiums if float(value) > 0]
-            observed_range = max(observations) - min(observations) if len(observations) >= 2 else 0.0
-            spread_scale = setup.entry_trigger_price * max(setup.cached_spread_pct, spread_pct, 0.05) / 100.0
-            chase_scale = max(observed_range, spread_scale * 3.0, setup.entry_trigger_price * 0.002, 0.15)
-            normalized_chase = max(0.0, executable_price - setup.entry_trigger_price) / chase_scale
-            setup.latest_normalized_chase = round(normalized_chase, 4)
-            setup.latest_chase_scale = round(chase_scale, 4)
-            if normalized_chase > settings.normalized_entry_chase_max_atr:
-                reasons.extend(["entry_too_late", "chase_risk_high", "normalized_chase_risk_high"])
-        else:
-            if chase_pct > setup.max_entry_chase_pct:
-                reasons.extend(["entry_too_late", "chase_risk_high"])
-            if move_from_base_pct > setup.max_premium_move_from_base_pct:
-                reasons.extend(["entry_too_late", "chase_risk_high"])
-        if target1_room_pct < setup.min_target1_room_pct:
-            reasons.append("insufficient_target_room_after_entry")
-        if remaining_rr < setup.min_remaining_risk_reward:
-            reasons.append("remaining_rr_compressed")
-        if spread_pct > settings.max_bid_ask_spread_pct:
-            reasons.append("spread_widened_after_trigger")
-        return list(dict.fromkeys(reasons))
+        timing = setup.factor_scores.get("entry_timing", {}) if isinstance(setup.factor_scores, dict) else {}
+        timing = timing if isinstance(timing, dict) else {}
+        initial = timing.get("entry_opportunity", {}) if isinstance(timing.get("entry_opportunity"), dict) else {}
+        opportunity = EntryOpportunityService().evaluate(
+            current=executable_price,
+            trigger=setup.entry_trigger_price,
+            base=setup.current_premium_at_arming,
+            stop=setup.stop_loss,
+            target=setup.target_1,
+            spread_pct=max(spread_pct, setup.cached_spread_pct),
+            observations=setup.recent_premiums,
+            volatility_scale=self._float(initial.get("opportunity_scale")),
+            expected_move_coverage=self._optional_float(timing.get("expected_move_coverage")),
+            room_to_level_pct=self._optional_float(timing.get("room_to_level_pct")),
+            breakout_accepted=bool(timing.get("breakout_accepted")),
+        )
+        setup.latest_normalized_chase = float(opportunity["normalized_chase"])
+        setup.latest_chase_scale = float(opportunity["opportunity_scale"])
+        return list(opportunity["blockers"])
 
     def _mark_rejected(self, setup_id: str, state: str, reasons: list[str]) -> dict[str, Any]:
         with self._lock:
@@ -627,6 +653,12 @@ class ArmedEntryTrackerService:
             **setup.factor_scores,
             "entry_source": "event_driven_websocket",
             "armed_entry": metadata,
+            "decision_policy": {
+                "primary_gates_passed": True,
+                "event_confirmation_passed": True,
+                "score_role": "ranking_only",
+                "indicator_role": "diagnostic_only",
+            },
         }
         return Signal(
             symbol=setup.symbol,
@@ -668,7 +700,16 @@ class ArmedEntryTrackerService:
             "premium_move_from_base_pct": round(move_from_base_pct, 3),
             "spread_pct": round(spread_pct, 3),
             "tick_quality": self._tick_quality_metadata(setup),
+            "normalized_chase": setup.latest_normalized_chase,
+            "opportunity_scale": setup.latest_chase_scale,
         }
+
+    def _optional_float(self, value: Any) -> float | None:
+        try:
+            parsed = float(value)
+            return parsed if parsed > 0 else None
+        except (TypeError, ValueError):
+            return None
 
     def _tick_quality_confirmation(
         self,

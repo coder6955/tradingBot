@@ -11,11 +11,11 @@ from app.services.time_utils import ist_today
 class DayTypeService:
     """Classify intraday structure so option buying is favored on expansion days."""
 
-    def evaluate(self, *, symbol: str, trend: str, timeframe: str = "5minute") -> dict[str, Any]:
+    def evaluate(self, *, symbol: str, trend: str, timeframe: str = "5minute", candles: list[Candle] | None = None) -> dict[str, Any]:
         if not settings.enable_day_type_filter:
             return {"enabled": False, "score": 100, "passed": True, "reasons": [], "details": {}}
 
-        candles = self._today_candles(symbol=symbol.upper(), timeframe=timeframe)
+        candles = list(candles) if candles is not None else self._today_candles(symbol=symbol.upper(), timeframe=timeframe)
         if len(candles) < 6:
             return {
                 "enabled": True,

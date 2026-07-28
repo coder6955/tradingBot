@@ -7,6 +7,7 @@ from unittest.mock import patch
 from app.services.market_regime_service import MarketRegimeService
 from app.services.momentum_phase_service import MomentumPhaseService
 from app.services.multi_timeframe_context_service import MultiTimeframeContextService
+from app.services.completed_structure_service import classify_completed_structure
 from app.services.setup_family_classifier_service import SetupFamilyClassifierService
 from app.services.trade_candidate_ranking_service import TradeCandidateRankingService
 from app.services.trade_setup_service import OptionContract, TradeSetupService
@@ -18,22 +19,45 @@ from app.services.trade_exit_service import TradeExitService
 def candles(step: float, count: int = 30):
     rows = []
     price = 58000.0
+    start = datetime(2026, 7, 20, 9, 15)
     for index in range(count):
         close = price + step * index
-        rows.append(SimpleNamespace(open_price=close - step / 2, high_price=close + 8, low_price=close - 8, close_price=close, volume=1000 + index))
+        rows.append(
+            SimpleNamespace(
+                open_price=close - step / 2,
+                high_price=close + 8,
+                low_price=close - 8,
+                close_price=close,
+                volume=1000 + index,
+                timestamp=start + timedelta(minutes=index),
+            )
+        )
     return rows
 
 
 class InstitutionalDecisionServiceTests(unittest.TestCase):
+    def test_one_completed_candle_spike_cannot_choose_direction(self) -> None:
+        result = classify_completed_structure([58000, 58000, 58000, 58000, 58000, 58400])
+
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["direction"], "neutral")
+
     def test_multi_timeframe_service_keeps_timeframe_responsibilities_separate(self) -> None:
         service = MultiTimeframeContextService()
-        with patch.object(service, "_load", side_effect=lambda symbol, aliases, limit: candles(8.0)):
-            result = service.evaluate(symbol="BANKNIFTY", trend="bullish", snapshot={"trend_bullish": True})
+        result = service.evaluate(
+            symbol="BANKNIFTY",
+            trend="bullish",
+            snapshot={"trend_bullish": True},
+            candle_sets={"1minute": candles(8.0), "5minute": candles(8.0)},
+        )
 
         self.assertTrue(result["passed"])
-        self.assertGreaterEqual(result["available_timeframes"], 5)
-        self.assertEqual(result["responsibilities"]["1minute"], "entry_trigger")
-        self.assertEqual(result["responsibilities"]["30minute"], "structural_bias")
+        self.assertEqual(result["available_timeframes"], 2)
+        self.assertEqual(result["responsibilities"]["1minute"], "entry_timing_and_fast_confirmation")
+        self.assertEqual(
+            result["responsibilities"]["5minute"],
+            "setup_direction_regime_day_structure_and_completed_confirmation",
+        )
         self.assertEqual(result["responsibilities"]["tick"], "execution_and_fill_confirmation")
 
     def test_hierarchical_market_state_exposes_dimensions_and_invalidation(self) -> None:
@@ -45,7 +69,7 @@ class InstitutionalDecisionServiceTests(unittest.TestCase):
             banknifty={"trend_bullish": True},
             vix={"price": 14},
             snapshot={"trend_bullish": True, "volume_confirmed": True},
-            multi_timeframe={"available_timeframes": 5, "alignment_score": 82},
+            multi_timeframe={"available_timeframes": 2, "alignment_score": 82},
             volatility_eval={"score": 72, "classification": "expansion_supported"},
             premium_eval={"score": 78, "details": {"breakout": True, "spread_pct": 0.8}},
             price_action_eval={"score": 80, "details": {}},

@@ -8,8 +8,10 @@ from typing import Any, Dict, List
 from app.config import settings
 from app.providers.token_store import load_access_token
 from app.services.database import Candle, get_session
+from app.services.completed_structure_service import classify_completed_structure
 from app.services.indicator_service import compute_ema, compute_macd, compute_rsi
 from app.services.time_utils import ist_now_naive, to_ist_naive
+from app.services.io_call_metrics_service import io_call_metrics
 
 try:
     from kiteconnect import KiteConnect
@@ -34,6 +36,7 @@ class KiteFeed:
     }
 
     def __init__(self) -> None:
+        self.market_data_coordinator: Any | None = None
         self._instrument_cache: Dict[str, List[Dict[str, Any]]] = {}
         self._instrument_cache_at: Dict[str, datetime] = {}
         # Analysis snapshots are candle-derived. Broad context quotes must never
@@ -80,8 +83,12 @@ class KiteFeed:
         }
         snapshots = {symbol: self._default_snapshot(symbol) for symbol in unique_symbols}
         try:
-            self._call_counts["quote"] += 1
-            quotes = self.client.quote(list(instruments_by_symbol.values()))  # type: ignore
+            if self.market_data_coordinator is not None:
+                self._call_counts["quote"] += 1
+                quotes = self.market_data_coordinator.quote(list(instruments_by_symbol.values()))
+            else:
+                self._record_broker_call("quote")
+                quotes = self.client.quote(list(instruments_by_symbol.values()))  # type: ignore
         except Exception:
             quotes = {}
 
@@ -114,6 +121,8 @@ class KiteFeed:
                         "volume_confirmed": bool(volume and volume > 0),
                     }
                 )
+                if symbol == "BANKNIFTY":
+                    snapshots[symbol] = self._stored_snapshot(symbol, snapshots[symbol])
                 self._context_snapshot_cache[symbol] = (now, snapshots[symbol])
             else:
                 snapshots[symbol] = self._stored_snapshot(symbol, snapshots[symbol])
@@ -135,8 +144,12 @@ class KiteFeed:
             # try common NSE format
             kite_symbol = self._kite_symbol(symbol)
             instrument = f"NSE:{kite_symbol}" if ":" not in kite_symbol else kite_symbol
-            self._call_counts["quote"] += 1
-            q = self.client.quote([instrument])  # type: ignore
+            if self.market_data_coordinator is not None:
+                self._call_counts["quote"] += 1
+                q = self.market_data_coordinator.quote([instrument])
+            else:
+                self._record_broker_call("quote")
+                q = self.client.quote([instrument])  # type: ignore
             # q structure may vary; try to extract last_price
             last_price = None
             quote_payload: dict[str, Any] = {}
@@ -180,8 +193,8 @@ class KiteFeed:
             now = ist_now_naive()
             to_dt = now
             from_dt = now - timedelta(days=14)
-            self._call_counts["historical_data"] += 1
-            hist = self.client.historical_data(token, from_dt, to_dt, "15minute")  # type: ignore
+            self._record_broker_call("historical_data")
+            hist = self.client.historical_data(token, from_dt, to_dt, "5minute")  # type: ignore
             if hist and isinstance(hist, list):
                 closes = [float(c["close"]) for c in hist if "close" in c]
                 highs = [float(c["high"]) for c in hist if "high" in c]
@@ -250,13 +263,18 @@ class KiteFeed:
         cached_at = self._instrument_cache_at.get(exchange)
         ttl = timedelta(seconds=max(1, settings.kite_instrument_cache_ttl_seconds))
         if exchange not in self._instrument_cache or cached_at is None or ist_now_naive() - cached_at > ttl:
+            if self.market_data_coordinator is not None:
+                self._call_counts["instruments"] += 1
+                self._instrument_cache[exchange] = self.market_data_coordinator.instruments(exchange)
+                self._instrument_cache_at[exchange] = ist_now_naive()
+                return self._instrument_cache[exchange]
             persisted = self._load_persisted_instruments(exchange, ttl)
             if persisted is not None:
                 self._instrument_cache[exchange] = persisted
                 self._instrument_cache_at[exchange] = ist_now_naive()
                 return self._instrument_cache[exchange]
             try:
-                self._call_counts["instruments"] += 1
+                self._record_broker_call("instruments")
                 self._instrument_cache[exchange] = self.client.instruments(exchange)  # type: ignore
                 self._instrument_cache_at[exchange] = ist_now_naive()
                 self._save_persisted_instruments(exchange, self._instrument_cache[exchange])
@@ -281,8 +299,12 @@ class KiteFeed:
         if not missing:
             return result
         try:
-            self._call_counts["quote"] += 1
-            fetched = self.client.quote(missing)  # type: ignore
+            if self.market_data_coordinator is not None:
+                self._call_counts["quote"] += 1
+                fetched = self.market_data_coordinator.quote(missing)
+            else:
+                self._record_broker_call("quote")
+                fetched = self.client.quote(missing)  # type: ignore
             stamp = ist_now_naive()
             for key, value in fetched.items():
                 payload = dict(value) if isinstance(value, dict) else value
@@ -303,6 +325,10 @@ class KiteFeed:
     def reset_call_counts(self) -> None:
         for key in self._call_counts:
             self._call_counts[key] = 0
+
+    def _record_broker_call(self, operation: str) -> None:
+        self._call_counts[operation] = self._call_counts.get(operation, 0) + 1
+        io_call_metrics.record_rest(operation)
 
     def _cached_snapshot(self, symbol: str) -> Dict[str, Any] | None:
         cached = self._snapshot_cache.get(symbol.upper())
@@ -408,20 +434,59 @@ class KiteFeed:
 
     def _stored_snapshot(self, symbol: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
         candles = self._recent_stored_candles(symbol)
-        if len(candles) < 26:
-            reasons = ["insufficient_canonical_current_session_candles"]
+        now = ist_now_naive()
+        try:
+            opening_hour, opening_minute = (int(part) for part in settings.opening_structure_end_time.split(":", 1))
+        except (TypeError, ValueError):
+            opening_hour, opening_minute = 9, 45
+        latest_candle_date = None
+        if candles:
+            latest_timestamp = candles[-1].get("date")
+            latest_candle_date = latest_timestamp.date() if isinstance(latest_timestamp, datetime) else None
+        opening_session = (
+            latest_candle_date == now.date()
+            and now.replace(hour=9, minute=15, second=0, microsecond=0).time()
+            <= now.time()
+            < now.replace(hour=opening_hour, minute=opening_minute, second=0, microsecond=0).time()
+        )
+        required_candles = (
+            max(3, settings.opening_structure_min_5m_candles)
+            if opening_session
+            else max(6, settings.structure_min_completed_candles)
+        )
+        if len(candles) < required_candles:
+            reasons = ["insufficient_completed_5minute_structure_candles"]
             if not snapshot.get("is_real_data") or float(snapshot.get("price") or 0.0) <= 0:
                 reasons.append("fresh_ltp_unavailable")
-            return {**snapshot, "analysis_ready": False, "indicators_available": False, "data_quality_reasons": reasons, "canonical_candle_count": len(candles)}
+            return {
+                **snapshot,
+                "analysis_ready": False,
+                "indicators_available": False,
+                "data_quality_reasons": reasons,
+                "canonical_candle_count": len(candles),
+                "required_structure_candle_count": required_candles,
+                "structure_direction": "neutral",
+            }
 
+        opens = [float(c["open"]) for c in candles]
         closes = [float(c["close"]) for c in candles]
         highs = [float(c["high"]) for c in candles]
         lows = [float(c["low"]) for c in candles]
         volumes = [float(c.get("volume", 0.0)) for c in candles]
-        rsi = compute_rsi(closes)[-1]
-        ema_9 = compute_ema(closes, 9)[-1]
-        ema_21 = compute_ema(closes, 21)[-1]
-        macd, signal = compute_macd(closes)
+        structure = classify_completed_structure(
+            closes,
+            opens=opens,
+            highs=highs,
+            lows=lows,
+            volumes=volumes,
+            min_candles=required_candles,
+            opening_session=opening_session,
+        )
+        indicators_available = len(candles) >= 26
+        rsi = compute_rsi(closes)[-1] if indicators_available else None
+        ema_9 = compute_ema(closes, 9)[-1] if indicators_available else None
+        ema_21 = compute_ema(closes, 21)[-1] if indicators_available else None
+        macd, signal = compute_macd(closes) if indicators_available else ([], [])
         typical_price_volume = [
             ((highs[idx] + lows[idx] + closes[idx]) / 3) * volumes[idx]
             for idx in range(min(len(highs), len(lows), len(closes), len(volumes)))
@@ -442,25 +507,38 @@ class KiteFeed:
             "quote_timestamp": snapshot.get("quote_timestamp"),
             "candle_timestamp": candles[-1]["date"] if candles else None,
             "candle_confirmation_close": closes[-1],
-            "rsi": int(rsi),
-            "macd": round(macd[-1], 4) if macd else 0.0,
-            "macd_signal": round(signal[-1], 4) if signal else 0.0,
-            "macd_positive": bool(macd and signal and macd[-1] > signal[-1]),
-            "ema_9": round(ema_9, 2),
-            "ema_21": round(ema_21, 2),
-            "ema_alignment": ema_9 > ema_21,
+            "rsi": int(rsi) if rsi is not None else None,
+            "macd": round(macd[-1], 4) if macd else None,
+            "macd_signal": round(signal[-1], 4) if signal else None,
+            "macd_positive": bool(macd and signal and macd[-1] > signal[-1]) if indicators_available else None,
+            "ema_9": round(ema_9, 2) if ema_9 is not None else None,
+            "ema_21": round(ema_21, 2) if ema_21 is not None else None,
+            "ema_alignment": bool(ema_9 > ema_21) if ema_9 is not None and ema_21 is not None else None,
             "vwap": round(vwap, 2),
             "vwap_above_price": float(snapshot.get("price") or 0.0) > vwap,
             "volume_confirmed": volumes[-1] > avg_volume * 1.15 if avg_volume else False,
-            "adx": self._simple_trend_strength(closes),
-            "trend_bullish": float(snapshot.get("price") or 0.0) >= ema_21 and ema_9 >= ema_21,
-            "indicators_available": True,
+            "adx": self._simple_trend_strength(closes) if indicators_available else None,
+            "trend_bullish": structure["direction"] == "bullish",
+            "structure_direction": structure["direction"],
+            "completed_structure": structure,
+            "indicators_available": indicators_available,
             "analysis_ready": bool(snapshot.get("is_real_data")) and float(snapshot.get("price") or 0.0) > 0,
             "data_quality_reasons": [] if bool(snapshot.get("is_real_data")) and float(snapshot.get("price") or 0.0) > 0 else ["fresh_ltp_unavailable"],
             "canonical_candle_count": len(candles),
+            "required_structure_candle_count": required_candles,
             "candle_source": "canonical_current_session_completed",
         }
-        stored["market_context"] = "strong" if stored["adx"] >= 20 and stored["volume_confirmed"] else "neutral"
+        stored["legacy_indicator_shadow"] = {
+            "available": indicators_available,
+            "rsi": stored["rsi"],
+            "ema_9": stored["ema_9"],
+            "ema_21": stored["ema_21"],
+            "macd": stored["macd"],
+            "macd_signal": stored["macd_signal"],
+            "adx": stored["adx"],
+            "active_decision_role": "diagnostic_only",
+        }
+        stored["market_context"] = "strong" if float(structure.get("strength") or 0.0) >= 0.55 else "neutral"
         stored.update(self._daily_levels(candles))
         return stored
 

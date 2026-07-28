@@ -33,14 +33,15 @@ flowchart LR
     WS --> Underlying["Canonical BANKNIFTY 1m/5m candles"]
     WS --> Raw["Async raw-tick capture"]
     WS --> Rally["BankNiftyFastRallyService"]
-    Rally --> Auto["AutoTraderService"]
-    Auto --> Scanner["ScannerService"]
+    Rally --> Fast["Cached zero-I/O candidate validation"]
+    Fast --> Armed
+    Auto["AutoTraderService"] --> Scanner["Scheduled ScannerService"]
     Coordinator --> Scanner
     Candles --> Scanner
-    Scanner --> State["Hierarchical market state"]
-    State --> Phase["Momentum phase and setup policy"]
-    Phase --> Setup["Executable contract and candidate ranking"]
-    Setup --> Decision["Safety gates and capped weighted score"]
+    Scanner --> Context["Bulk completed 1m/5m context"]
+    Context --> Setup["Executable contract selection"]
+    Setup --> Decision["Primary safety gates then candidate ranking"]
+    Scanner -.-> Shadow["Deferred/shadow diagnostics"]
     Decision --> Armed["ArmedEntryTrackerService"]
     Armed --> Orders["OrderService"]
     Auto --> Orders
@@ -65,15 +66,15 @@ flowchart LR
 | `KiteWebSocketPriceFeed` | Tick ingestion, ownership-based subscriptions, priority event delivery, gap reporting, and premium candle construction. |
 | `UnderlyingCandleService` | Builds exchange-timestamped, current-session canonical `BANKNIFTY` 1-minute candles and completed 5-minute aggregates without lookahead. |
 | `RawTickCaptureService` / `TickReplayService` | Asynchronously retain replay-relevant ordered ticks and replay them by capture sequence. |
-| `FastScanContextService` | Holds a bounded-age immutable snapshot of slow evidence for fast candidate promotion and rejects stale/config-mismatched contexts. |
+| `FastScanContextService` | Holds completed 1m/5m state, direction/regime/day structure, constituent participation, freshness/gaps, lineage and prewarmed option details. Cached validation performs no REST or database work. |
 | `LatencyMetricsService` | Keeps bounded latency samples, tail percentiles, queue drops, last events, and strategy/config lineage. |
 | `BankNiftyIntelligenceService` | Loads a locally versioned official NSE Indices 14-member weight snapshot, measures available weight coverage, and keeps stale or incomplete constituent evidence from creating false confidence. |
 | `ExecutablePriceService` | Converts long-option bid depth into a conservative quantity-aware sell price and classifies whether the quote is safe for paper targets or live software exits. |
 | `BankNiftyOptionPrewarmService` | Keeps the nearest-expiry ATM ± configured strike depth CE/PE band warm. The current default depth is 3. |
 | `BankNiftyFastRallyService` | Detects short-window Bank Nifty acceleration and requests an immediate scan. |
-| `AutoTraderService` | Runs scheduled scans, serialized fast rescans, optional order routing, and duplicate live-order protection. |
+| `AutoTraderService` | Runs scheduled scans, serialized cache-only fast validations, explicit call-budget accounting, optional order routing, and duplicate live-order protection. |
 | `ScannerService` | Builds and evaluates Bank Nifty opportunities, records accepted/rejected outcomes, and registers early armed setups. |
-| `MultiTimeframeContextService` | Assigns daily/30m/15m/5m/1m evidence to structure, bias, session character, regime, and trigger responsibilities; ticks remain execution-only. |
+| `MultiTimeframeContextService` | Loads only completed 1-minute and 5-minute Bank Nifty candles in one bounded query. The 5-minute frame owns setup/regime/day structure; 1-minute owns entry timing. |
 | `MarketRegimeService` | Classifies structure, volatility, participation, location, and execution into a confidence/uncertainty-aware option-buying regime with invalidation. |
 | `MomentumPhaseService` / `SetupFamilyClassifierService` | Separates formation, acceleration, breakout, confirmation, continuation, exhaustion and failure, then applies a regime-specific setup/exit policy. |
 | `TradeCandidateRankingService` | Orders candidates using reward/risk, spread, costs, liquidity, uncertainty and policy quality without mislabeling utility as probability. |
@@ -101,6 +102,8 @@ At application startup:
 6. If the market is open, an initial scanner refresh is requested.
 7. If automation is configured, the automation supervisor starts its market-hours lifecycle.
 
+The supervisor is process-restart aware. Each start writes a durable runtime-job record containing a process boot ID and PID. If the next process finds an unfinished run for the same trading date, it closes that run as interrupted before starting a new one. A boot-managed supervisor remains alive after the after-market pipeline so it can restart intraday workers on the next market day. Every cycle verifies that the collector, auto trader, and outcome monitor have both a running flag and a live task; stale `running=true` state is repaired and the worker is restarted.
+
 Shutdown stops the market-data runtime, canonical candle and raw-tick writers, automation supervisor, snapshot collector, auto trader, and outcome monitor.
 
 ## WebSocket subscription model
@@ -127,11 +130,17 @@ Order execution is moved off the WebSocket callback path so a broker/database op
 
 An armed setup is operational only when its subscription is broker-requested or fresh-tick verified. Disconnected subscriptions are explicitly queued; subscription failures cancel registration instead of displaying a false armed state. Valid setup payloads are stored in `armed_entries`, rehydrated after restart, and resubscribed under the original owner.
 
+A connection gap is cleared only by positive recovery evidence: the SDK connection callback or a fresh received tick while the regular market is open. A reconnect-attempt callback does not clear the gate. Fresh ticks also repair a missed SDK connection callback by restoring `CONNECTED` state and emitting one recovered-gap event. Status exposes recovery count, time, and reason.
+
 ## Decision hierarchy
 
-The scanner keeps safety gates, weighted evidence, and policy suitability separate. Daily/30-minute candles establish structure and bias, 15-minute candles describe the session, 5-minute candles classify the tradable regime, 1-minute candles form the trigger, and ticks confirm executable entry/exit. Missing higher-timeframe evidence increases uncertainty; lower-timeframe momentum cannot substitute for it.
+The experimental v6 entry policy uses only completed `1minute` and `5minute` candles. Five-minute evidence owns setup direction, market regime, opening/day structure and completed-candle confirmation. Direction comes from explicit swing progression, multi-candle impulse breadth, pullback retention and breakout acceptance; moving averages are not direction inputs and one candle cannot choose CE or PE. Until 09:45 IST, the opening policy is ready with five completed 1-minute and three completed 5-minute candles. After that, both frames require `STRUCTURE_MIN_COMPLETED_CANDLES` (six by default). One-minute evidence owns entry timing and fast confirmation. Ticks are execution evidence only. Daily, 15-minute and 30-minute candles are not queried, generated or evaluated by the strategy.
 
-Market state reports structure, volatility, participation, location and execution dimensions plus regime, confidence, uncertainty, option-buying suitability, abstention and invalidation. Momentum is classified as formation, acceleration, breakout, confirmation, continuation, exhaustion or failure. Setup families own distinct entry/invalidation/exit policies. Candidate utility remains an after-cost ordering tool until independent outcomes can calibrate probability and expectancy.
+Active entry gates are limited to session/data/WebSocket safety, 1m/5m agreement, Bank Nifty constituent participation, selected-option premium participation, executable spread/depth/liquidity/freshness, normalized remaining opportunity and account risk. `EntryOpportunityService` is shared by scheduled timing, fast-rally validation and armed-tick execution. Nearby levels and expected-move context warn rather than veto only after explicit breakout acceptance; numerical target room and remaining reward/risk still cannot be bypassed. Weighted scoring ranks candidates only after these gates pass. `MIN_SIGNAL_SCORE` is retained for legacy/manual provenance and research but cannot veto a current-version scanner candidate whose primary-gate proof is attached. EMA, MACD, RSI and ADX remain diagnostic fields and have no readiness, direction, score or order authority.
+
+Scheduled scans refresh immutable slow context and a complete paper candidate plan on a completed candle or a controlled 30–60 second interval. A fast-rally event reads that context and the latest prewarmed WebSocket option book directly. Stale/missing context or quotes reject safely; pre-confirmation never falls back to REST, database reads/writes, backfill, margins or instrument downloads. A passing validation promotes the prepared plan through `ArmedEntryTrackerService`, outside the zero-I/O validation budget, where account risk, durable state, subscription ownership and tick quality are rechecked. This is plan promotion into the existing order path, not a second order path. Fast promotion remains paper-only.
+
+Fast-rally observability covers detection, dispatch, suppression, cached validation, and failure. Status retains the latest below-threshold observation and threshold progress, direction counts, callback result/error, validation counters, suppression reasons, and the last cached decision. Every threshold crossing creates a dispatch event; cooldown, an already-running validation, a stopped auto trader, thread-start failure, gate rejection, and validation exception therefore remain visible in the decision feed. Any REST or database activity measured during cached validation forces a safe `fast_candidate_io_budget_exceeded` rejection.
 
 ## Tick and premium-candle handling
 
@@ -152,6 +161,8 @@ Raw ticks for `core_market`, `banknifty_prewarm`, `armed:*`, and `active_trade` 
 
 Historical bootstrap is explicit and broker-backed: `POST /data/ingest/banknifty-canonical-bootstrap` requests canonical `BANKNIFTY` `1minute` and `5minute` history, stores only completed regular-session candles with exchange timestamps, and skips duplicates. It never fabricates gaps or treats option/`WS_TOKEN:*` candles as underlying history.
 
+Historical replay applies the same two-timeframe boundary. Every candle, quote and option snapshot is filtered to the replay timestamp, completed-candle cutoffs are enforced, and future database rows cannot affect an earlier decision.
+
 ## Constituent intelligence
 
 `app/data/banknifty_constituents_2026-06-30.json` is the reviewed hot-path authority for the 14-member Nifty Bank snapshot. It records the official source/effective date, exact weights and strategy lineage. The refresh script accepts a separately downloaded official NSE Indices sector payload, validates membership and total weight, and refuses an unreviewed constituent change. Staleness is visible and removes hard-gate authority; available-data coverage is calculated by official index weight, with a defensive per-bank hard-gate cap so a few observations cannot dominate.
@@ -160,9 +171,9 @@ Historical bootstrap is explicit and broker-backed: `POST /data/ingest/banknifty
 
 For a long option, LTP is diagnostic only. A full quantity-covered five-level bid book produces a depth-weighted executable sell price. Partial depth uses the worst visible bid conservatively but cannot prove a target fill or authorize a live software exit. A best bid without quantity may support paper execution but is live-unsafe; LTP alone never fills a target or exit. Stored exit evidence includes LTP, best bid/ask, executable price, coverage, spread, source, quote time, first rule and all simultaneous rules.
 
-Exit priority is deterministic: stop, time/near-close, trailing, underlying/premium invalidation, then targets. Optional invalidation and partial-booking behavior remains configuration-controlled and must earn out-of-sample support; the exit-rule ablation report explicitly reports when counterfactual paths are unavailable.
+Exit priority is deterministic: stop, conditional time/near-close, high-watermark trailing, underlying/premium invalidation, then targets. At the setup profile's R multiple, positions of at least two exchange lots book a whole-lot partial once and retain at least one whole-lot runner. One-lot positions cannot manufacture an invalid fractional partial. Live partial execution remains disabled until a broker-fill confirmation state machine earns evidence.
 
-Time-stop duration, trailing activation and target style come from the persisted setup-family exit profile. No profile may weaken the original hard stop.
+Time-stop duration, trailing activation, partial R and target style come from the persisted setup-family exit profile. Trend/expansion runners receive the configured time extension; normal and reversal setups do not. The runner trails the option premium high-watermark by the greater of option ATR distance and an original-risk floor, with move-to-cost behavior after a partial when enabled. No profile may weaken the original hard stop.
 
 ## Latency measurement
 
@@ -178,6 +189,8 @@ Not every absence of ticks means the feed is broken:
 - Token-scoped blocking events affect only setups for the relevant token; connection-scoped events may affect every armed setup.
 
 These semantics prevent illiquid or temporarily quiet contracts from cancelling unrelated opportunities while still protecting entries during genuine feed loss.
+
+KiteTicker is the sole reconnect scheduler. Application callbacks update health/gap state but never call `reconnect()` themselves, avoiding duplicate retry loops from paired error/close callbacks. The SDK is created with bounded retries and exponential delay. Authentication, market-close and broker `429 TooManyRequests` outcomes stop the SDK retry factory. A 429 also starts a persisted-in-service cooldown during which subscription requests may remain queued but cannot create a new WebSocket connection.
 
 ## Persistence and operational records
 
@@ -195,6 +208,10 @@ The database layer stores, among other records:
 
 Accepted and rejected opportunities must remain explainable. A hard-gate rejection, armed-entry expiry, chase rejection, data-gap cancellation, or order failure should retain its reason in repository records and diagnostics.
 
+Scanner diagnostic enrichment depends only on the rejection repository's public `market_session()` capability. The scanner-parity backtest injects a no-op repository that reports `BACKTEST`, retains rejection diagnostics in the replay result, and never writes rejected-opportunity rows or depends on private live-repository methods.
+
+Repeated scanner rejections share an episode. An identical gate/contract/5-minute state increments the episode rather than inserting another rejection row; a gate change, contract change, new completed 5-minute state, or new episode creates a new record. Automation rejection persistence is queued away from the decision thread, while orders, trades, risk, armed entries and reconciliation remain synchronous and durable.
+
 Opportunities, rejection observations/episodes, validations, trades, raw replays, and latency events carry strategy version and config hash. Mixed hashes are surfaced and block professional readiness; paper mode may continue visibly, while direct live routing fails closed on unregistered drift.
 
 ## Configuration authority
@@ -211,7 +228,14 @@ Safety-sensitive defaults include:
 - `ARMED_ENTRY_VALID_SECONDS=90`
 - `FAST_RALLY_WINDOW_SECONDS=5.0`
 - `FAST_RALLY_TRIGGER_PCT=0.08`
-- `STRATEGY_VERSION=banknifty_option_buying_v4`
+- `STRATEGY_VERSION=banknifty_option_buying_v6`
+- `ACTIVE_DECISION_TIMEFRAMES=1minute,5minute`
+- `STRUCTURE_MIN_COMPLETED_CANDLES=6`
+- `OPENING_STRUCTURE_MIN_1M_CANDLES=5`
+- `OPENING_STRUCTURE_MIN_5M_CANDLES=3`
+- `SCHEDULED_SCAN_MAX_REST_CALLS=3`
+- `WEBSOCKET_RECONNECT_MAX_DELAY_SECONDS=60`
+- `WEBSOCKET_RATE_LIMIT_COOLDOWN_SECONDS=120`
 - `ENABLE_HIERARCHICAL_MARKET_STATE=true`
 - `ARMED_ENTRY_RECOVERY_ENABLED=true`
 - `REQUIRE_BROKER_PROTECTIVE_STOP_FOR_LIVE_ENTRY=true`
@@ -242,6 +266,8 @@ Use these endpoints to understand the running system:
 | `GET /trades` | Persisted paper/live trade lifecycle records. |
 | `GET /trades/exit-alerts` | Stuck or mismatched live exits. |
 | `GET /broker/reconciliation/status` | Broker/local mismatch and live-trading block status. |
+
+The dashboard decision feed parses mixed display/ISO timestamps into chronological values before sorting. A failed fast-rally gate validation is shown as a normal candidate rejection, not an automation error; only exceptions and operational failures enter the automation error stream. The feed also includes the latest scheduled-scan heartbeat so a healthy scan cycle with zero actionable opportunities is visible without persisting one event every 30 seconds.
 
 ## Maintenance checklist
 

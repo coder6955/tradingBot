@@ -21,7 +21,18 @@ class BankNiftyFastRallyService:
         self._ticks: deque[tuple[datetime, float]] = deque(maxlen=512)
         self._lock = RLock()
         self.last_event: dict[str, Any] | None = None
+        self.last_observation: dict[str, Any] | None = None
+        self.last_callback_result: dict[str, Any] | None = None
+        self.last_callback_error: dict[str, Any] | None = None
         self.trigger_count = 0
+        self.target_tick_count = 0
+        self.evaluated_tick_count = 0
+        self.invalid_price_count = 0
+        self.callback_scheduled_count = 0
+        self.callback_suppressed_count = 0
+        self.callback_error_count = 0
+        self.trigger_count_by_direction = {"bullish": 0, "bearish": 0}
+        self.suppressed_reasons: dict[str, int] = {}
 
     def set_underlying_token(self, token: int | None) -> None:
         self.underlying_token = int(token) if token else None
@@ -32,20 +43,46 @@ class BankNiftyFastRallyService:
         now = (tick.receive_timestamp or tick.timestamp).replace(tzinfo=None)
         price = float(tick.price or 0.0)
         if price <= 0:
+            with self._lock:
+                self.invalid_price_count += 1
             return None
         window_seconds = max(1.0, float(settings.fast_rally_window_seconds))
         cutoff = now - timedelta(seconds=max(window_seconds * 6.0, 30.0))
         with self._lock:
+            self.target_tick_count += 1
             self._ticks.append((now, price))
             while self._ticks and self._ticks[0][0] < cutoff:
                 self._ticks.popleft()
             window = [(timestamp, value) for timestamp, value in self._ticks if timestamp >= now - timedelta(seconds=window_seconds)]
             if len(window) < 2:
+                self.last_observation = {
+                    "timestamp": now.isoformat(sep=" "),
+                    "price": round(price, 2),
+                    "window_samples": len(window),
+                    "window_seconds": window_seconds,
+                    "threshold_pct": max(0.01, float(settings.fast_rally_trigger_pct)),
+                    "move_pct": 0.0,
+                    "direction": None,
+                    "reason": "insufficient_window_samples",
+                }
                 return None
+            self.evaluated_tick_count += 1
             base = float(window[0][1])
             move_pct = ((price - base) / max(base, 0.01)) * 100.0
             threshold = max(0.01, float(settings.fast_rally_trigger_pct))
             direction = "bullish" if move_pct >= threshold else "bearish" if move_pct <= -threshold else None
+            self.last_observation = {
+                "timestamp": now.isoformat(sep=" "),
+                "price": round(price, 2),
+                "base_price": round(base, 2),
+                "window_samples": len(window),
+                "window_seconds": window_seconds,
+                "threshold_pct": threshold,
+                "move_pct": round(move_pct, 4),
+                "threshold_progress_pct": round(min(100.0, abs(move_pct) / threshold * 100.0), 2),
+                "direction": direction,
+                "reason": "threshold_crossed" if direction else "below_threshold",
+            }
             if direction is None:
                 return None
             detected_at = ist_now_naive()
@@ -65,8 +102,33 @@ class BankNiftyFastRallyService:
             }
             self.last_event = event
             self.trigger_count += 1
+            self.trigger_count_by_direction[direction] = self.trigger_count_by_direction.get(direction, 0) + 1
         if self.callback is not None:
-            self.callback(dict(event))
+            try:
+                callback_result = self.callback(dict(event))
+                normalized_result = dict(callback_result) if isinstance(callback_result, dict) else {"result": callback_result}
+                with self._lock:
+                    self.last_callback_result = normalized_result
+                    self.last_callback_error = None
+                    if bool(normalized_result.get("scheduled")):
+                        self.callback_scheduled_count += 1
+                    else:
+                        self.callback_suppressed_count += 1
+                        reason = str(normalized_result.get("reason") or "callback_not_scheduled")
+                        self.suppressed_reasons[reason] = self.suppressed_reasons.get(reason, 0) + 1
+                    event["dispatch"] = normalized_result
+                    self.last_event = dict(event)
+            except Exception as exc:
+                error = {
+                    "time": ist_now_naive().isoformat(sep=" "),
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+                with self._lock:
+                    self.callback_error_count += 1
+                    self.last_callback_error = error
+                    event["dispatch"] = {"scheduled": False, "reason": "fast_rally_callback_failed", **error}
+                    self.last_event = dict(event)
         if self.latency_metrics is not None:
             if tick.receive_timestamp is None:
                 self.latency_metrics.record_missing("receive_to_fast_rally_detection", detail={"direction": direction, "reason": "receive_timestamp_missing"})
@@ -90,6 +152,19 @@ class BankNiftyFastRallyService:
             return {
                 "underlying_token": self.underlying_token,
                 "trigger_count": self.trigger_count,
+                "trigger_count_by_direction": dict(self.trigger_count_by_direction),
+                "target_tick_count": self.target_tick_count,
+                "evaluated_tick_count": self.evaluated_tick_count,
+                "invalid_price_count": self.invalid_price_count,
                 "buffered_ticks": len(self._ticks),
+                "window_seconds": max(1.0, float(settings.fast_rally_window_seconds)),
+                "threshold_pct": max(0.01, float(settings.fast_rally_trigger_pct)),
+                "last_observation": dict(self.last_observation) if self.last_observation else None,
                 "last_event": dict(self.last_event) if self.last_event else None,
+                "last_callback_result": dict(self.last_callback_result) if self.last_callback_result else None,
+                "last_callback_error": dict(self.last_callback_error) if self.last_callback_error else None,
+                "callback_scheduled_count": self.callback_scheduled_count,
+                "callback_suppressed_count": self.callback_suppressed_count,
+                "callback_error_count": self.callback_error_count,
+                "suppressed_reasons": dict(self.suppressed_reasons),
             }

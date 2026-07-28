@@ -42,6 +42,7 @@ from app.services.banknifty_fast_rally_service import BankNiftyFastRallyService
 from app.services.banknifty_intelligence_service import BankNiftyIntelligenceService
 from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed
 from app.services.latency_metrics_service import LatencyMetricsService
+from app.services.io_call_metrics_service import io_call_metrics
 from app.services.raw_tick_capture_service import RawTickCaptureService
 from app.services.underlying_candle_service import UnderlyingCandleService
 from app.services.volatility_edge_service import VolatilityEdgeService
@@ -247,7 +248,7 @@ day_type_service = DayTypeService()
 option_premium_confirmation_service = OptionPremiumConfirmationService()
 time_bucket_edge_service = TimeBucketEdgeService(backtest_service=backtest_service)
 volatility_edge_service = VolatilityEdgeService()
-fast_scan_context_service = FastScanContextService()
+fast_scan_context_service = FastScanContextService(kite_websocket_price_feed)
 outcome_learning_service = OutcomeLearningService()
 opportunity_analytics_service = OpportunityAnalyticsService()
 execution_analytics_service = ExecutionAnalyticsService()
@@ -292,6 +293,8 @@ def get_kite_provider() -> KiteProvider:
 
 
 market_data_coordinator = MarketDataCoordinator(get_kite_provider)
+if shared_kite_feed is not None:
+    shared_kite_feed.market_data_coordinator = market_data_coordinator
 active_trade_price_feed.market_data_coordinator = market_data_coordinator
 application_context = ApplicationContext(
     market_session_service=market_session_service,
@@ -390,6 +393,7 @@ auto_trader_service = AutoTraderService(
     notification_service=notification_service,
     latency_metrics=latency_metrics_service,
     fast_scan_context_service=fast_scan_context_service,
+    fast_candidate_promoter=armed_entry_tracker_service,
 )
 banknifty_fast_rally_service = BankNiftyFastRallyService(auto_trader_service.request_fast_rescan, latency_metrics=latency_metrics_service)
 
@@ -445,7 +449,7 @@ async def startup_automation() -> None:
     threading.Thread(target=_run_startup_maintenance, name="startup-maintenance", daemon=True).start()
     threading.Thread(target=_run_startup_broker_sync, name="startup-broker-sync", daemon=True).start()
     if settings.automation_enabled:
-        automation_supervisor_service.start()
+        automation_supervisor_service.start(trigger="application_startup")
 
 
 def _run_startup_maintenance() -> None:
@@ -516,7 +520,7 @@ async def shutdown_background_services() -> None:
     application_context.market_data_runtime_service.stop()
     underlying_candle_service.stop()
     raw_tick_capture_service.stop()
-    await automation_supervisor_service.stop()
+    await automation_supervisor_service.stop(reason="application_shutdown")
     await option_snapshot_collector_service.stop()
     await auto_trader_service.stop()
     await opportunity_outcome_service.stop()
@@ -533,6 +537,7 @@ def market_data_pipeline_status() -> dict[str, object]:
         "canonical_underlying_candles": underlying_candle_service.status(),
         "raw_tick_capture": raw_tick_capture_service.status(),
         "latency": latency_metrics_service.report(),
+        "io_call_budgets": io_call_metrics.report(),
         "fast_scan_context": fast_scan_context_service.status(),
         "websocket": kite_websocket_price_feed.status(),
     }
@@ -549,7 +554,7 @@ def banknifty_constituent_status() -> dict[str, object]:
 
 @app.get("/runtime/latency", tags=["01 System"], summary="Read end-to-end trading-path latency percentiles")
 def runtime_latency() -> dict[str, object]:
-    return latency_metrics_service.report()
+    return {**latency_metrics_service.report(), "io_call_budgets": io_call_metrics.report()}
 
 
 @app.get("/db/health", tags=["01 System"], summary="Check database connectivity")
@@ -903,7 +908,7 @@ async def command_center_dashboard() -> HTMLResponse:
         <a class="linkbtn secondary" href="/research/after-market/status" target="_blank">After-Market</a>
         <a class="linkbtn secondary" href="/research/evidence-matrix" target="_blank">Evidence Matrix</a>
         <a class="linkbtn secondary" href="/research/strategy-promotion" target="_blank">Promotion Gate</a>
-        <a class="linkbtn secondary" href="/strategy/versions/current" target="_blank">Strategy V4</a>
+        <a class="linkbtn secondary" href="/strategy/versions/current" target="_blank">Strategy Version</a>
         <a class="linkbtn secondary" href="/runtime/status" target="_blank">Runtime</a>
         <a class="linkbtn secondary" href="/market-data/pipeline-status" target="_blank">Pipeline</a>
         <a class="linkbtn secondary" href="/runtime/latency" target="_blank">Latency</a>
@@ -923,7 +928,7 @@ async def command_center_dashboard() -> HTMLResponse:
       </div>
     </section>
     <section class="panel">
-      <h2>V4 Strategy &amp; Market Session</h2>
+      <h2>V5 Strategy &amp; Market Session</h2>
       <div class="status" id="strategyCards"></div>
       <div class="summary-line" id="strategySummary"></div>
     </section>
@@ -1308,7 +1313,7 @@ function renderDecisionFeed(feed) {
   const events = feed.events || [];
   if (!events.length) { el.innerHTML = `<div class="empty">No scanner thoughts recorded yet.</div>`; return; }
   el.innerHTML = events.map(item => {
-    const meta = [item.tradingsymbol, item.score !== undefined && item.score !== null ? `score ${item.score}` : null, item.status, item.outcome]
+    const meta = [item.tradingsymbol, item.score !== undefined && item.score !== null ? `score ${item.score}` : null, item.source, item.error_type, item.status, item.outcome]
       .filter(Boolean).join(" | ");
     return `<div class="feed-item ${esc(item.severity || "warn")}">
       <div class="feed-head"><div class="feed-title">${esc(item.title)}</div><div class="feed-time">${esc(item.time || "")}</div></div>
@@ -1643,16 +1648,109 @@ def _decision_event_from_execution(item: dict[str, object]) -> dict[str, object]
     }
 
 
+def _decision_event_from_auto_decision(item: dict[str, object]) -> dict[str, object]:
+    event_type = str(item.get("event_type") or "fast_rally_candidate_validation")
+    passed = bool(item.get("passed"))
+    direction = str(item.get("direction") or "").lower()
+    reason = str(item.get("reason") or ("candidate_passed" if passed else "candidate_rejected"))
+    move_pct = item.get("move_pct")
+    move_text = f"; Bank Nifty move {float(move_pct):.4f}%" if isinstance(move_pct, (int, float)) else ""
+    if event_type == "fast_rally_dispatch":
+        scheduled = bool(item.get("scheduled"))
+        stage = str(item.get("stage") or ("queued" if scheduled else "suppressed"))
+        return {
+            "time": item.get("time"),
+            "sort_time": item.get("time"),
+            "type": "fast_rally_dispatch",
+            "severity": "watch" if scheduled else "warn",
+            "title": "Fast-rally validation queued" if scheduled else "Fast-rally validation suppressed",
+            "message": f"{stage}: {reason}{move_text}",
+            "source": item.get("source") or "banknifty_fast_rally",
+            "direction": direction or None,
+            "reason": reason,
+            "scheduled": scheduled,
+        }
+    return {
+        "time": item.get("time"),
+        "sort_time": item.get("time"),
+        "type": "candidate_validation",
+        "severity": "ok" if passed else ("bad" if item.get("error") else "warn"),
+        "title": f"Fast-rally candidate {'validated' if passed else 'rejected'}",
+        "message": f"{reason}{move_text}" + (f"; {item.get('error')}" if item.get("error") else ""),
+        "source": item.get("source") or "fast_rally_candidate_validation",
+        "direction": direction or None,
+        "reason": reason,
+        "error_type": item.get("error_type"),
+    }
+
+
+def _decision_event_from_scan_heartbeat(item: dict[str, object]) -> dict[str, object]:
+    count = int(item.get("opportunity_count") or 0)
+    placed = int(item.get("placed_count") or 0)
+    if count:
+        noun = "opportunity" if count == 1 else "opportunities"
+        message = f"Scheduled scan completed with {count} actionable {noun}."
+        if placed:
+            message += f" {placed} order action{'s' if placed != 1 else ''} queued."
+    else:
+        message = "Scheduled scan completed; no actionable opportunity passed all primary gates."
+    return {
+        "time": item.get("time"),
+        "sort_time": item.get("time"),
+        "type": "scan_heartbeat",
+        "severity": "ok" if count else "watch",
+        "title": "Scheduled scan completed",
+        "message": message,
+        "source": item.get("source") or "scheduled_scan",
+        "opportunity_count": count,
+        "placed_count": placed,
+    }
+
+
 def _decision_event_from_error(item: dict[str, object]) -> dict[str, object]:
+    source = str(item.get("source") or "automation")
+    error_type = str(item.get("error_type") or "")
+    raw_error = str(item.get("error") or "Unknown automation failure")
+    if error_type == "KeyError" or (len(raw_error) >= 3 and raw_error[0] == raw_error[-1] and raw_error[0] in {"'", '"'}):
+        field = raw_error.strip("'\"") or "unknown"
+        message = f"The {source.replace('_', ' ')} could not complete because required field '{field}' was missing."
+    elif raw_error == "scheduled_scan_rest_call_budget_exceeded":
+        message = (
+            f"The scheduled scan used {item.get('rest_calls')} broker calls, above its allowed budget of "
+            f"{item.get('budget')}; candidates were suppressed safely."
+        )
+    else:
+        message = raw_error
     return {
         "time": item.get("time"),
         "sort_time": str(item.get("time") or ""),
         "type": "auto_error",
         "severity": "bad",
-        "title": "Automation error",
-        "message": item.get("error"),
+        "title": f"Automation error: {source.replace('_', ' ')}",
+        "message": message,
+        "source": source,
+        "error_type": error_type or None,
+        "raw_error": raw_error,
         "order_key": item.get("order_key"),
     }
+
+
+def _decision_sort_timestamp(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    text = str(value or "").strip()
+    if not text:
+        return datetime.min
+    iso_text = text[:-4] if text.endswith(" IST") else text
+    try:
+        parsed = datetime.fromisoformat(iso_text.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=None)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(text, "%d %b %Y, %I:%M:%S %p IST")
+    except ValueError:
+        return datetime.min
 
 
 def _json_dict(value: str | None) -> dict[str, object]:
@@ -1973,7 +2071,7 @@ def get_option_snapshot_collector_status() -> dict[str, object]:
     tags=["12 Automation"],
     summary="Start one-switch automation supervisor",
     description=(
-        "Automatically handles daily candle ingestion, market-hour option snapshot collection, auto scanning, "
+        "Automatically handles session candle ingestion, market-hour option snapshot collection, auto scanning, "
         "and outcome monitoring. Orders stay disabled unless `place_orders=true`; live orders still require live config and `confirm_live=true`."
     ),
     dependencies=PROTECTED_ROUTE,
@@ -1998,7 +2096,7 @@ async def start_automation(
     ),
 ) -> dict[str, object]:
     merged_payload = runtime_trading_config_service.automation_payload(payload or {})
-    return automation_supervisor_service.start(merged_payload)
+    return automation_supervisor_service.start(merged_payload, trigger="api_start")
 
 
 @app.post(
@@ -2008,7 +2106,7 @@ async def start_automation(
     dependencies=PROTECTED_ROUTE,
 )
 async def stop_automation() -> dict[str, object]:
-    return await automation_supervisor_service.stop()
+    return await automation_supervisor_service.stop(reason="api_stop")
 
 
 @app.post(
@@ -2207,6 +2305,7 @@ def get_research_settings() -> dict[str, object]:
             "max_bid_ask_spread_pct": settings.max_bid_ask_spread_pct,
         },
         "backtest": {
+            "supported_timeframes": ["1minute", "5minute"],
             "default_horizon_candles": settings.backtest_horizon_candles,
             "mode": "underlying_rule_replay",
             "historical_option_snapshots": option_history_repository.count_snapshots(),
@@ -2235,15 +2334,17 @@ def get_research_settings() -> dict[str, object]:
             "min_win_rate_pct": settings.min_strategy_win_rate_pct,
         },
         "institutional_decision_policy": {
-            "hierarchical_market_state": settings.enable_hierarchical_market_state,
-            "min_market_state_confidence": settings.market_state_min_confidence,
-            "max_market_state_uncertainty": settings.market_state_max_uncertainty,
-            "mtf_min_timeframes": settings.mtf_min_timeframes,
-            "mtf_min_alignment_score": settings.mtf_min_alignment_score,
-            "momentum_min_entry_score": settings.momentum_min_entry_score,
-            "setup_policy_min_score": settings.setup_policy_min_score,
-            "candidate_min_utility_score": settings.candidate_min_utility_score,
-            "note": "Candidate utility orders opportunities; it is not a calibrated probability or profit forecast.",
+            "active_timeframes": ["1minute", "5minute"],
+            "structure_min_completed_candles": settings.structure_min_completed_candles,
+            "direction_source": "completed_multi_candle_price_structure",
+            "legacy_indicator_role": "diagnostic_only",
+            "score_role": "ranking_only_after_primary_gates",
+            "five_minute_role": "setup direction, regime, day structure, and completed-candle confirmation",
+            "one_minute_role": "entry timing and fast confirmation",
+            "shadow_only_layers": ["hierarchical_market_state", "momentum_phase", "setup_family_adjustment", "candidate_utility", "duplicate_regime_scores"],
+            "fast_context_max_age_seconds": settings.fast_scan_context_max_age_seconds,
+            "scheduled_scan_max_rest_calls": settings.scheduled_scan_max_rest_calls,
+            "note": "Shadow layers are collected for research and cannot block, approve, or adjust an entry.",
         },
         "evidence_governance": {
             "minimum_trades_per_cell": settings.evidence_matrix_min_trades,
@@ -3699,9 +3800,13 @@ def get_dashboard_decision_feed(limit: int = 30) -> dict[str, object]:
         events.append(_decision_event_from_trade(record))
     for item in auto_trader_service.executions[-limit:]:
         events.append(_decision_event_from_execution(item))
+    for item in auto_trader_service.recent_decision_events(limit=limit):
+        events.append(_decision_event_from_auto_decision(item))
+    if auto_trader_service.last_scan_result:
+        events.append(_decision_event_from_scan_heartbeat(auto_trader_service.last_scan_result))
     for item in auto_trader_service.errors[-limit:]:
         events.append(_decision_event_from_error(item))
-    events = sorted(events, key=lambda item: str(item.get("sort_time") or ""), reverse=True)[:limit]
+    events = sorted(events, key=lambda item: _decision_sort_timestamp(item.get("sort_time")), reverse=True)[:limit]
     for item in events:
         item.pop("sort_time", None)
     return {"status": "ok", "count": len(events), "events": events}

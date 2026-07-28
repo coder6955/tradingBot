@@ -125,7 +125,7 @@ This file records decisions that should survive individual conversations and cod
 
 ## D018 — Use two-stage fast candidate promotion
 
-**Status:** Accepted  
+**Status:** Superseded by D032  
 **Decision:** Tick acceleration promotes only Bank Nifty against an immutable, versioned, bounded-age slow context; stage B uses the normal scanner primitives under the shared scan lock.  
 **Why:** A full-universe rescan is slow, while a separate fast strategy would diverge from scheduled decisions.  
 **Consequence:** Stale or config-mismatched context rejects the fast candidate, and event-driven live entry stays disabled.
@@ -202,7 +202,7 @@ This file records decisions that should survive individual conversations and cod
 
 ## D029 — Use hierarchical state, phase, and setup policies
 
-**Status:** Accepted
+**Status:** Superseded for active entry by D032; retained as shadow research
 **Decision:** Structure, volatility, participation, location and execution form a confidence/uncertainty-aware market state. Multi-timeframe responsibilities are fixed, momentum has an explicit lifecycle, and each setup family owns its entry, invalidation and exit policy.
 **Why:** One aggregate score cannot distinguish formation from exhaustion, a trend from a transition, or price momentum from option-buying suitability.
 **Consequence:** Only unsafe or untradable conditions become hard gates. Weighted inputs stay capped, every abstention has a code, and setup-family score adjustments are bounded.
@@ -220,3 +220,52 @@ This file records decisions that should survive individual conversations and cod
 **Decision:** Heavy readiness runs only in the after-market worker lane; ordinary readiness requests serve completed cache. Evidence is segmented by setup, regime, time, DTE, direction, volatility, execution and participation, and promotion never changes runtime configuration.
 **Why:** Research work can delay trigger/order processing, and a self-modifying live strategy destroys lineage and invites overfitting.
 **Consequence:** Rejected observations never enter trade expectancy, insufficient cells fail visibly, and a human must register any new strategy version.
+
+## D032 — Use a two-timeframe cache-first experimental entry path
+
+**Status:** Accepted as experimental v5  
+**Decision:** Active entry evaluation uses completed 5-minute candles for setup direction, regime, day/opening structure and candle confirmation, completed 1-minute candles for entry timing, and WebSocket ticks for execution. Scheduled scans refresh one immutable slow context from a bulk 1m/5m read. Fast-rally validation consumes only that context and prewarmed in-memory option bid/ask/depth.  
+**Why:** The former fast-rally path validated a cache and then reran the complete scanner, causing avoidable REST, database and persistence latency. Higher-timeframe and overlapping policy layers added complexity without independent evidence of incremental expectancy, and replay dependencies could observe future database state.  
+**Consequence:** Daily/15m/30m strategy candles are unsupported. Fast validation has a zero-REST/zero-database pre-confirmation budget and rejects stale evidence without fallback. Active gates are limited to session/data/feed safety, 1m/5m agreement, constituent and premium participation, executable quote quality, chase/remaining reward-risk and account risk. Hierarchical state, momentum, setup-family adjustments, candidate utility, volatility/learned edge and duplicate regimes are shadow-only. Replay is timestamp-bounded, repeated rejections are episode-deduplicated, live event entry remains disabled, and promotion remains manual.
+
+## D033 — Remove legacy indicator and score authority from v5 eligibility
+
+**Status:** Accepted as a v5 correctness fix  
+**Decision:** Current-session analysis becomes ready after at least six completed 5-minute candles and a fresh LTP. Direction is classified from the completed multi-candle price sequence and must then agree with completed 1-minute structure. EMA, MACD, RSI and ADX remain diagnostic-only. `MIN_SIGNAL_SCORE` remains a legacy/manual safety guard, but current-version scanner signals may pass signal creation and order validation below it only when they carry explicit proof that all primary gates passed and score is ranking-only.  
+**Why:** The implementation incorrectly required 26 current-session 5-minute candles solely to calculate EMA/MACD, suppressing every morning candidate until roughly 11:25, and hidden score checks contradicted D032 even after the scanner gates passed.  
+**Consequence:** With uninterrupted canonical data, structural analysis can start after the sixth completed 5-minute candle (normally about 09:45 IST) without allowing one candle or an indicator crossover to select CE/PE. Neutral structure still abstains, 1m/5m disagreement still blocks, all execution and account-risk gates remain intact, and untrusted/manual low-score signals remain blocked.
+
+## D034 — Give WebSocket reconnect ownership exclusively to KiteTicker
+
+**Status:** Accepted  
+**Decision:** KiteTicker's retry factory is the only component allowed to schedule reconnects. Application error/close callbacks record state and gaps but do not call `reconnect()`. The SDK receives bounded retry/delay settings. Authentication, market-close and broker-rate-limit callbacks call `stop_retry()`, and a broker 429 blocks all newly requested WebSocket starts for a configurable cooldown.  
+**Why:** KiteTicker already automatically retries a lost connection and invokes both error and close callbacks for one unclean loss. Manually reconnecting from both callbacks created competing attempts; setting only the application `running` flag on 429 did not stop the SDK factory or later subscription-driven starts.  
+**Consequence:** One `1006` produces one SDK-managed exponential retry sequence. A `429 TooManyRequests` produces no further upgrade attempts during the default 120-second cooldown, desired subscriptions remain queued, and runtime status identifies `kite_sdk` as reconnect owner plus the cooldown deadline/remaining seconds.
+
+## D035 — Make runtime continuity evidence-driven and observable
+
+**Status:** Accepted
+**Decision:** A boot-managed automation supervisor persists one lifecycle run per process, survives the after-market pipeline, repairs stale child-task state, and records unclean prior runs. A WebSocket connection gap clears only on a confirmed connection or verified fresh tick. Every fast-rally threshold crossing records dispatch and cached-validation outcomes, and cached validation fails closed on any measured REST or database I/O.
+**Why:** A boolean `running` flag can outlive a dead task, an after-market self-stop can leave the next session unattended, reconnect-attempt callbacks do not prove data resumed, and silent cooldown/error suppression makes missed rallies impossible to diagnose.
+**Consequence:** Mid-session process replacement is auditable, intraday workers restart without manual intervention, stale feed gaps self-heal only from positive evidence, and the decision feed explains every detected rally from dispatch through validation. Live risk and order gates remain unchanged.
+
+## D036 — Replace average direction with explicit price structure and an opening policy
+
+**Status:** Accepted as experimental v6  
+**Decision:** CE/PE direction is based on completed-candle swing progression, multi-candle impulse breadth, controlled pullback retention and breakout acceptance. Until 09:45 IST, opening readiness requires five completed 1-minute and three completed 5-minute candles; normal-session readiness remains six on both frames.  
+**Why:** Average relationships obscure whether movement is impulse, pullback or accepted breakout, and the v5 six-by-five-minute requirement could not act before roughly 09:45.  
+**Consequence:** A single candle still cannot choose direction, 1m/5m agreement remains mandatory, and the app can evaluate a real opening-drive setup from about 09:30 when canonical data is continuous.
+
+## D037 — Use one normalized opportunity model and promote prepared fast plans
+
+**Status:** Accepted as experimental v6  
+**Decision:** Scheduled timing, fast-rally validation and armed-tick execution use `EntryOpportunityService` for normalized chase, target room and remaining reward/risk. Expected-move and nearby-level context cease being unconditional vetoes only after breakout acceptance. Scheduled scans cache a complete paper plan; fast validation may promote it into the normal durable armed-entry path after zero-I/O validation.  
+**Why:** Three inconsistent late-entry calculations could reject the same price differently, while a validator that only observed an already-armed setup could not recover a fast rally missed between scans.  
+**Consequence:** The actual ask is still rechecked, account risk and subscription health still fail closed, validation remains zero-I/O, promotion/persistence occurs outside that budget, and live event entry remains disabled.
+
+## D038 — Prefer executable DTE/delta contracts and manage a whole-lot runner
+
+**Status:** Accepted as experimental v6  
+**Decision:** Expiry-day buying policy is applied during selection, so a blocked same-day expiry moves selection to the next broker-listed expiry. Ranking prefers executable liquidity, configured DTE and delta without requiring unavailable Greeks. Exit profiles book one exchange-valid whole-lot partial at a configured R multiple only when at least two lots exist, then trail the runner from premium high-watermark using option ATR and original risk. Trend/expansion setups receive a longer conditional time stop.  
+**Why:** Selecting a contract that later fails the expiry gate wastes the setup; fixed full-target exits truncate trend days; fractional-lot partials are not executable; and one universal 15-minute stop ignores setup behavior.  
+**Consequence:** One-lot trades remain indivisible, normal/reversal time stops remain tighter, live partials stay disabled until broker-fill confirmation is built, and chronological after-cost evidence is still required before any live promotion.

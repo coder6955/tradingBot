@@ -64,6 +64,18 @@ class StrategyVersionRegistryTests(unittest.TestCase):
         self.assertEqual(version["latest_config_snapshot"]["entry_filters"]["min_signal_score"], 85)
         self.assertIn("Bump STRATEGY_VERSION", version["config_drift_warning"])
 
+    def test_reactivating_a_previous_version_clears_retired_timestamp(self) -> None:
+        registry = StrategyVersionRegistry()
+        registry.ensure_current_version()
+        object.__setattr__(settings, "strategy_version", "banknifty_option_buying_test_v2")
+        registry.ensure_current_version()
+        object.__setattr__(settings, "strategy_version", "banknifty_option_buying_test_v1")
+
+        result = registry.ensure_current_version()
+
+        self.assertEqual(result["version"]["status"], "active")
+        self.assertIsNone(result["version"]["retired_at"])
+
 
 if __name__ == "__main__":
     unittest.main()

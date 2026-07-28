@@ -102,13 +102,14 @@ class BacktestScannerParityTests(unittest.TestCase):
         self.assertIn("legacy", result["legacy_mode_available"])
 
     def test_scanner_parity_backtest_does_not_persist_rejected_rows(self) -> None:
-        result = BacktestService().run_option_premium(
-            symbol="BANKNIFTY",
-            timeframe="5minute",
-            direction="PUT",
-            horizon_candles=8,
-            limit=90,
-        )
+        with self.assertNoLogs("app.services.scanner_service", level="WARNING"):
+            result = BacktestService().run_option_premium(
+                symbol="BANKNIFTY",
+                timeframe="5minute",
+                direction="PUT",
+                horizon_candles=8,
+                limit=90,
+            )
         session = get_session()
         try:
             rejected_count = session.query(RejectedOpportunityRecord).count()

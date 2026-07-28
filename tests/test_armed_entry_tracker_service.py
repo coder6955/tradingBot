@@ -159,7 +159,13 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
             probability=0.78,
             confidence=0.86,
             quantity=15,
-            factor_scores={"score_breakdown": {"score": 86}},
+            factor_scores={
+                "score_breakdown": {"score": 86},
+                "strategy_metadata": {
+                    "strategy_name": settings.strategy_name,
+                    "strategy_version": settings.strategy_version,
+                },
+            },
             order_mode=order_mode,
         )
         self.assertTrue(result["registered"])
@@ -275,6 +281,9 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
         self.assertEqual(call["metadata"]["armed_setup_id"], setup_id)
         self.assertTrue(call["metadata"]["tick_quality"]["confirmed"])
         self.assertEqual(call["signal"].entry_price, 105.2)
+        self.assertTrue(call["signal"].factor_scores["decision_policy"]["primary_gates_passed"])
+        self.assertTrue(call["signal"].factor_scores["decision_policy"]["event_confirmation_passed"])
+        self.assertEqual(call["signal"].factor_scores["decision_policy"]["score_role"], "ranking_only")
 
     def test_deterministic_fast_rally_replay_enters_after_dense_tick_confirmation(self) -> None:
         setup_id = self._register()

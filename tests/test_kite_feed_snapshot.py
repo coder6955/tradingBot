@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, time, timedelta
 
 from app.services.database import Candle, get_session, init_db
@@ -82,7 +83,19 @@ class KiteFeedSnapshotTests(unittest.TestCase):
         feed = KiteFeed()
         feed.client = client
 
-        snapshot = feed.get_snapshot("BANKNIFTY")
+        stored_candles = [
+            {
+                "date": session_end - timedelta(minutes=(30 - index) * 5),
+                "open": 58000 + index - 5,
+                "high": 58000 + index + 10,
+                "low": 58000 + index - 10,
+                "close": 58000 + index,
+                "volume": 1000 + index,
+            }
+            for index in range(30)
+        ]
+        with patch.object(feed, "_recent_stored_candles", return_value=stored_candles):
+            snapshot = feed.get_snapshot("BANKNIFTY")
 
         self.assertEqual(snapshot["source"], "stored_candles")
         self.assertTrue(snapshot["is_real_data"])
@@ -103,6 +116,101 @@ class KiteFeedSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot["source"], "kite")
         self.assertTrue(snapshot["is_real_data"])
         self.assertEqual(client.historical_calls, 0)
+
+    def test_six_completed_candles_make_structure_ready_without_legacy_indicators(self) -> None:
+        now = ist_now_naive().replace(second=0, microsecond=0)
+        session_day = now.date() - timedelta(days=1)
+        while session_day.weekday() >= 5:
+            session_day -= timedelta(days=1)
+        session = get_session()
+        try:
+            for index in range(6):
+                price = 58000 + index * 25
+                session.add(
+                    Candle(
+                        symbol="BANKNIFTY",
+                        timeframe="5minute",
+                        timestamp=datetime.combine(session_day, time(9, 15)) + timedelta(minutes=index * 5),
+                        open_price=price - 10,
+                        high_price=price + 15,
+                        low_price=price - 15,
+                        close_price=price,
+                        volume=1000 + index,
+                    )
+                )
+            session.commit()
+        finally:
+            session.close()
+
+        feed = KiteFeed()
+        feed.client = HistoricalBlockingClient()
+        stored_candles = [
+            {
+                "date": datetime.combine(session_day, time(9, 15)) + timedelta(minutes=index * 5),
+                "open": 58000 + index * 25 - 10,
+                "high": 58000 + index * 25 + 15,
+                "low": 58000 + index * 25 - 15,
+                "close": 58000 + index * 25,
+                "volume": 1000 + index,
+            }
+            for index in range(6)
+        ]
+        with patch.object(feed, "_recent_stored_candles", return_value=stored_candles):
+            snapshot = feed.get_snapshot("BANKNIFTY")
+
+        self.assertTrue(snapshot["analysis_ready"])
+        self.assertEqual(snapshot["structure_direction"], "bullish")
+        self.assertEqual(snapshot["canonical_candle_count"], 6)
+        self.assertFalse(snapshot["indicators_available"])
+        self.assertIsNone(snapshot["ema_21"])
+        self.assertIsNone(snapshot["macd"])
+        self.assertEqual(snapshot["legacy_indicator_shadow"]["active_decision_role"], "diagnostic_only")
+
+    def test_fewer_than_six_completed_candles_report_exact_structure_shortfall(self) -> None:
+        now = ist_now_naive().replace(second=0, microsecond=0)
+        session_day = now.date() - timedelta(days=1)
+        while session_day.weekday() >= 5:
+            session_day -= timedelta(days=1)
+        session = get_session()
+        try:
+            for index in range(5):
+                price = 58000 + index * 20
+                session.add(
+                    Candle(
+                        symbol="BANKNIFTY",
+                        timeframe="5minute",
+                        timestamp=datetime.combine(session_day, time(9, 15)) + timedelta(minutes=index * 5),
+                        open_price=price - 5,
+                        high_price=price + 10,
+                        low_price=price - 10,
+                        close_price=price,
+                        volume=1000,
+                    )
+                )
+            session.commit()
+        finally:
+            session.close()
+
+        feed = KiteFeed()
+        feed.client = HistoricalBlockingClient()
+        stored_candles = [
+            {
+                "date": datetime.combine(session_day, time(9, 15)) + timedelta(minutes=index * 5),
+                "open": 58000 + index * 20 - 5,
+                "high": 58000 + index * 20 + 10,
+                "low": 58000 + index * 20 - 10,
+                "close": 58000 + index * 20,
+                "volume": 1000,
+            }
+            for index in range(5)
+        ]
+        with patch.object(feed, "_recent_stored_candles", return_value=stored_candles):
+            snapshot = feed.get_snapshot("BANKNIFTY")
+
+        self.assertFalse(snapshot["analysis_ready"])
+        self.assertEqual(snapshot["canonical_candle_count"], 5)
+        self.assertEqual(snapshot["required_structure_candle_count"], 6)
+        self.assertIn("insufficient_completed_5minute_structure_candles", snapshot["data_quality_reasons"])
 
     def test_instruments_use_persistent_cache_after_restart(self) -> None:
         original_file = settings.kite_instrument_cache_file

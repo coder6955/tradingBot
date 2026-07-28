@@ -24,6 +24,29 @@ class SignalEngineTests(unittest.TestCase):
         self.assertGreater(signal.score, 80)
         self.assertGreater(signal.confidence, 0.8)
 
+    def test_ranking_only_scanner_path_can_generate_below_legacy_score_threshold(self) -> None:
+        signal_service = SignalService()
+        with self.assertRaises(ValueError):
+            signal_service.generate_signal(
+                symbol="BANKNIFTY",
+                score=55,
+                confidence=0.55,
+                trend="bullish",
+                market_context="neutral",
+            )
+
+        signal = signal_service.generate_signal(
+            symbol="BANKNIFTY",
+            score=55,
+            confidence=0.55,
+            trend="bullish",
+            market_context="neutral",
+            enforce_score_threshold=False,
+        )
+
+        self.assertEqual(signal.score, 55)
+        self.assertIn("ranking only", signal.explanation)
+
 
 if __name__ == "__main__":
     unittest.main()

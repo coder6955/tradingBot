@@ -163,6 +163,8 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
             "websocket_reconnect_min_gap_seconds": settings.websocket_reconnect_min_gap_seconds,
             "websocket_reconnect_window_seconds": settings.websocket_reconnect_window_seconds,
             "websocket_reconnect_max_attempts_per_window": settings.websocket_reconnect_max_attempts_per_window,
+            "websocket_reconnect_max_delay_seconds": settings.websocket_reconnect_max_delay_seconds,
+            "websocket_rate_limit_cooldown_seconds": settings.websocket_rate_limit_cooldown_seconds,
             "websocket_event_queue_size": settings.websocket_event_queue_size,
             "websocket_candle_persist_queue_size": settings.websocket_candle_persist_queue_size,
             "enable_market_data_gap_detection": settings.enable_market_data_gap_detection,
@@ -180,6 +182,8 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         object.__setattr__(settings, "websocket_reconnect_min_gap_seconds", 5)
         object.__setattr__(settings, "websocket_reconnect_window_seconds", 60)
         object.__setattr__(settings, "websocket_reconnect_max_attempts_per_window", 5)
+        object.__setattr__(settings, "websocket_reconnect_max_delay_seconds", 60)
+        object.__setattr__(settings, "websocket_rate_limit_cooldown_seconds", 120)
         object.__setattr__(settings, "enable_market_data_gap_detection", True)
         object.__setattr__(settings, "max_websocket_gap_seconds", 10)
         object.__setattr__(settings, "websocket_live_gap_polling_fallback", True)
@@ -574,6 +578,53 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         finally:
             feed.stop()
 
+    def test_reconnect_attempt_does_not_clear_gap_until_connection_is_confirmed(self) -> None:
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=regular_market_now)
+        try:
+            feed.start()
+            ticker = feed._ticker
+            feed._on_error(ticker, 1006, "temporary disconnect")
+
+            feed._on_reconnect(ticker, 1)
+            self.assertTrue(feed.status()["data_gap"]["active_gap"])
+
+            feed._on_connect(ticker, {"reconnected": True})
+            status = feed.status()
+            self.assertFalse(status["data_gap"]["active_gap"])
+            self.assertEqual(status["data_gap"]["recovery_count"], 1)
+            self.assertEqual(status["data_gap"]["last_recovery_reason"], "websocket_connected")
+            self.assertEqual(status["websocket_status"], "CONNECTED")
+        finally:
+            feed.stop()
+
+    def test_verified_fresh_tick_self_heals_gap_when_sdk_connect_callback_is_missing(self) -> None:
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=regular_market_now)
+        try:
+            feed.start()
+            ticker = feed._ticker
+            feed._on_error(ticker, 1006, "temporary disconnect")
+            self.assertTrue(feed.status()["data_gap"]["active_gap"])
+
+            feed._on_ticks(
+                ticker,
+                [
+                    {
+                        "instrument_token": 260105,
+                        "last_price": 58150,
+                        "exchange_timestamp": regular_market_now(),
+                    }
+                ],
+            )
+
+            status = feed.status()
+            self.assertTrue(status["websocket_connected"])
+            self.assertEqual(status["websocket_status"], "CONNECTED")
+            self.assertFalse(status["data_gap"]["active_gap"])
+            self.assertEqual(status["data_gap"]["recovery_count"], 1)
+            self.assertEqual(status["data_gap"]["last_recovery_reason"], "verified_fresh_tick")
+        finally:
+            feed.stop()
+
     def test_owner_subscription_rotates_with_overlap_and_mode_priority(self) -> None:
         now = {"value": regular_market_now()}
         feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=lambda: now["value"])
@@ -711,7 +762,7 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertIsNone(status["last_error"])
         self.assertFalse(status["websocket_connected"])
 
-    def test_websocket_error_during_market_requests_reconnect(self) -> None:
+    def test_websocket_error_during_market_leaves_reconnect_to_kite_sdk(self) -> None:
         reconnect_calls: list[bool] = []
 
         class ErrorTicker(FakeTicker):
@@ -723,12 +774,13 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         feed._on_error(ErrorTicker("k", "t"), 1006, "connection was closed uncleanly (None)")
         status = feed.status()
 
-        self.assertEqual(reconnect_calls, [True])
+        self.assertEqual(reconnect_calls, [])
         self.assertEqual(status["market_session"], "REGULAR_MARKET")
         self.assertEqual(status["websocket_status"], "RECONNECTING")
         self.assertEqual(status["last_error"], "connection was closed uncleanly (None)")
         self.assertTrue(status["data_gap"]["data_gap_detected"])
         self.assertFalse(status["websocket_connected"])
+        self.assertEqual(status["reconnect_owner"], "kite_sdk")
 
     def test_websocket_auth_failure_does_not_reconnect(self) -> None:
         reconnect_calls: list[bool] = []
@@ -789,7 +841,7 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         self.assertFalse(status["relogin_required"])
         self.assertFalse(status["auth_failure_token_still_loaded"])
 
-    def test_websocket_reconnect_uses_local_backoff(self) -> None:
+    def test_error_and_close_callbacks_do_not_create_duplicate_reconnect_requests(self) -> None:
         reconnect_calls: list[bool] = []
 
         class ErrorTicker(FakeTicker):
@@ -800,13 +852,56 @@ class KiteWebSocketPriceFeedTests(unittest.TestCase):
         ticker = ErrorTicker("k", "t")
 
         feed._on_error(ticker, 1006, "connection was closed uncleanly (None)")
-        feed._on_error(ticker, 1006, "connection was closed uncleanly (None)")
+        feed._on_close(ticker, 1006, "connection was closed uncleanly (None)")
         status = feed.status()
 
-        self.assertEqual(reconnect_calls, [True])
-        self.assertEqual(status["reconnect_request_count"], 1)
-        self.assertEqual(status["reconnect_skipped_reason"], "reconnect_backoff")
-        self.assertEqual(status["websocket_status"], "RECONNECT_COOLDOWN")
+        self.assertEqual(reconnect_calls, [])
+        self.assertEqual(status["reconnect_request_count"], 0)
+        self.assertIsNone(status["reconnect_skipped_reason"])
+        self.assertEqual(status["websocket_status"], "RECONNECTING")
+
+    def test_rate_limit_stops_sdk_retry_and_blocks_new_connection_attempts(self) -> None:
+        stop_retry_calls: list[bool] = []
+
+        class RateLimitedTicker(FakeTicker):
+            def stop_retry(self) -> None:
+                stop_retry_calls.append(True)
+
+        ticker = RateLimitedTicker("k", "t")
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=RateLimitedTicker, clock=regular_market_now)
+        feed._ticker = ticker
+
+        feed._on_error(ticker, 1006, "WebSocket connection upgrade failed (429 - TooManyRequests)")
+        feed._on_close(ticker, 1006, "WebSocket connection upgrade failed (429 - TooManyRequests)")
+        start_result = feed.start()
+        status = feed.status()
+
+        self.assertEqual(len(stop_retry_calls), 2)
+        self.assertFalse(start_result["started"])
+        self.assertEqual(start_result["reason"], "rate_limited_cooldown")
+        self.assertGreaterEqual(start_result["retry_after_seconds"], 119)
+        self.assertEqual(status["websocket_status"], "RATE_LIMIT_COOLDOWN")
+        self.assertEqual(status["reconnect_skipped_reason"], "rate_limited_cooldown")
+        self.assertGreaterEqual(status["rate_limit_cooldown_remaining_seconds"], 119)
+
+    def test_real_ticker_factory_receives_single_owner_reconnect_limits(self) -> None:
+        captured: dict[str, object] = {}
+
+        class ConfiguredTicker(FakeTicker):
+            def __init__(self, api_key: str, access_token: str, **kwargs) -> None:
+                super().__init__(api_key, access_token)
+                captured.update(kwargs)
+
+        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=ConfiguredTicker, clock=regular_market_now)
+        try:
+            result = feed.start()
+        finally:
+            feed.stop()
+
+        self.assertTrue(result["started"])
+        self.assertEqual(captured["reconnect"], settings.websocket_reconnect_enabled)
+        self.assertEqual(captured["reconnect_max_tries"], settings.websocket_reconnect_max_attempts_per_window)
+        self.assertEqual(captured["reconnect_max_delay"], settings.websocket_reconnect_max_delay_seconds)
 
     def test_noreconnect_does_not_mark_exhausted_outside_market(self) -> None:
         feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=FakeTicker, clock=weekend_now)

@@ -20,6 +20,8 @@ class LatencyMetricsService:
         "fast_rally_detection_to_scan_start",
         "scheduled_scan_duration",
         "fast_rally_scan_duration",
+        "websocket_callback_duration",
+        "cached_candidate_decision_duration",
         "scan_start_to_armed_state",
         "armed_state_to_confirmation",
         "confirmation_to_order_submission",
@@ -100,6 +102,10 @@ class LatencyMetricsService:
             "dropped_event_count": dropped,
             "critical_dropped_event_count": critical,
             "sample_limit_per_metric": self.sample_limit,
+            "acceptance_targets_ms": {
+                "websocket_callback_p95": 5.0,
+                "cached_candidate_decision_p95": 100.0,
+            },
             **current_strategy_lineage(),
         }
 

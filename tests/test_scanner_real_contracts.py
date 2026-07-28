@@ -32,7 +32,7 @@ class ScannerRealContractTests(unittest.TestCase):
 
         self.assertEqual(opportunities, [])
 
-    def test_bearish_technical_score_rewards_bearish_alignment(self) -> None:
+    def test_legacy_indicators_do_not_change_active_technical_score(self) -> None:
         scanner = ScannerService(feed=HighScoreFeedWithoutOptions())  # type: ignore[arg-type]
         snapshot = {
             "rsi": 44,
@@ -45,9 +45,22 @@ class ScannerRealContractTests(unittest.TestCase):
             "market_context": "strong",
         }
 
-        score = scanner._technical_score(snapshot, "bearish")
+        aligned_score = scanner._technical_score(snapshot, "bearish")
+        snapshot.update(
+            {
+                "rsi": 90,
+                "adx": 2,
+                "macd_positive": True,
+                "ema_alignment": True,
+                "vwap_above_price": True,
+                "volume_confirmed": False,
+                "trend_bullish": True,
+            }
+        )
+        opposed_score = scanner._technical_score(snapshot, "bearish")
 
-        self.assertGreaterEqual(score, 80)
+        self.assertEqual(aligned_score, 50)
+        self.assertEqual(opposed_score, 50)
 
 
 if __name__ == "__main__":

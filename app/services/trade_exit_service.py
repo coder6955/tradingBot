@@ -87,7 +87,13 @@ class TradeExitService:
                 "price_rejection_reason": reason,
             }
         self._record_price_excursion(trade, current_tick)
-        quantity = int(trade.remaining_quantity or trade.filled_quantity or trade.placed_quantity or trade.requested_quantity or 0)
+        quantity = int(
+            getattr(trade, "remaining_quantity", 0)
+            or getattr(trade, "filled_quantity", 0)
+            or getattr(trade, "placed_quantity", 0)
+            or getattr(trade, "requested_quantity", 0)
+            or 0
+        )
         execution = self.executable_price_service.for_long_exit(current_tick, quantity=quantity)
         current_price = execution.executable_price
         if current_price is None:
@@ -646,6 +652,8 @@ class TradeExitService:
                 triggered.append("target_3")
             if trade.target_2 is not None and price >= float(trade.target_2):
                 triggered.append("target_2")
+            if self._can_partial_at_r(trade, price):
+                triggered.append("partial_target_1")
             if trade.target_1 is not None and price >= float(trade.target_1):
                 triggered.append("target_1")
         unique = list(dict.fromkeys(triggered))
@@ -661,15 +669,20 @@ class TradeExitService:
         execution: ExecutableExitPrice,
     ) -> dict[str, Any] | None:
         price = float(execution.executable_price or tick.price)
-        if outcome != "target_1" or not settings.enable_partial_booking:
+        if outcome not in {"target_1", "partial_target_1"} or not settings.enable_partial_booking:
             return None
         quantity = int(trade.remaining_quantity or trade.filled_quantity or trade.placed_quantity or trade.requested_quantity or 0)
-        if quantity <= 1:
+        lot_size = self._trade_lot_size(trade)
+        if self._has_partial_exit(trade) or lot_size <= 0 or quantity < lot_size * 2:
             return None
-        partial_qty = int(quantity * (settings.partial_target1_pct / 100))
+        total_lots = quantity // lot_size
+        partial_lots = max(1, int(total_lots * (settings.partial_target1_pct / 100)))
+        partial_qty = min((total_lots - 1) * lot_size, partial_lots * lot_size)
         if partial_qty <= 0 or partial_qty >= quantity:
             return None
-        if trade.mode == "live" and not settings.live_auto_squareoff:
+        # Live partial fills need their own broker-confirmation state machine.
+        # Keep the new scaling policy in paper until that evidence exists.
+        if str(trade.mode).lower() == "live":
             return None
         squareoff = self._squareoff_quantity(provider, trade, price, partial_qty)
         updated = self.trade_repository.record_partial_exit(int(trade.id), quantity=partial_qty, exit_price=price)
@@ -700,7 +713,12 @@ class TradeExitService:
         if created_at is None:
             return None
         created_ist = created_at.replace(tzinfo=ZoneInfo("Asia/Kolkata")) if created_at.tzinfo is None else created_at.astimezone(ZoneInfo("Asia/Kolkata"))
-        if ist_now() < created_ist + timedelta(minutes=configured_minutes):
+        target_style = str(profile.get("target_style") or "fixed_structure")
+        trend_runner = target_style in {"runner", "scale_on_expansion", "measured_move"}
+        effective_minutes = configured_minutes
+        if trend_runner:
+            effective_minutes = max(configured_minutes, round(configured_minutes * settings.option_time_stop_trend_multiplier))
+        if ist_now() < created_ist + timedelta(minutes=effective_minutes):
             return None
         entry = float(trade.average_price or trade.entry_price or 0.0)
         if entry <= 0:
@@ -725,6 +743,7 @@ class TradeExitService:
         risk = max(entry - stop, 0.01)
         activation = min(target_1, entry + risk * trail_after_r)
         high_since_entry = self._high_since_entry(str(trade.tradingsymbol), trade.created_at)
+        high_since_entry = max(high_since_entry, float(getattr(trade, "highest_price_during_trade", 0.0) or 0.0))
         if high_since_entry < activation:
             return None
         target_style = str(profile.get("target_style") or "fixed_structure")
@@ -733,10 +752,85 @@ class TradeExitService:
             lock_pct = min(lock_pct, 1.0)
         elif target_style == "runner":
             lock_pct = max(lock_pct, 3.0)
+        premium_atr = self._premium_atr(str(trade.tradingsymbol), trade.created_at)
+        trail_distance = max(
+            premium_atr * settings.option_runner_atr_multiplier,
+            risk * settings.option_runner_min_risk_trail,
+            0.05,
+        )
+        high_watermark_stop = high_since_entry - trail_distance
         locked_stop = entry * (1 + lock_pct / 100)
-        if price <= locked_stop:
+        if self._has_partial_exit(trade) and settings.partial_move_sl_to_cost:
+            locked_stop = max(locked_stop, entry)
+        dynamic_stop = max(locked_stop, high_watermark_stop)
+        if price <= dynamic_stop:
             return "trailing_stop"
         return None
+
+    def _can_partial_at_r(self, trade: Any, price: float) -> bool:
+        if not settings.enable_partial_booking or self._has_partial_exit(trade) or str(trade.side).upper() != "BUY":
+            return False
+        entry = float(trade.average_price or trade.entry_price or 0.0)
+        stop = float(trade.stop_loss or 0.0)
+        quantity = int(
+            getattr(trade, "remaining_quantity", 0)
+            or getattr(trade, "filled_quantity", 0)
+            or getattr(trade, "placed_quantity", 0)
+            or getattr(trade, "requested_quantity", 0)
+            or 0
+        )
+        lot_size = self._trade_lot_size(trade)
+        if entry <= stop or lot_size <= 0 or quantity < lot_size * 2:
+            return False
+        profile = self._exit_profile(trade)
+        partial_at_r = max(0.5, float(profile.get("partial_at_r") or 1.0))
+        return price >= entry + (entry - stop) * partial_at_r
+
+    def _has_partial_exit(self, trade: Any) -> bool:
+        raw = getattr(trade, "partial_exit_json", None)
+        if not raw:
+            return False
+        try:
+            rows = json.loads(raw) if isinstance(raw, str) else raw
+            return isinstance(rows, list) and bool(rows)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+
+    def _trade_lot_size(self, trade: Any) -> int:
+        raw = getattr(trade, "order_response_json", None)
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = {}
+        factors = payload.get("signal_factor_scores", {}) if isinstance(payload, dict) else {}
+        contract = factors.get("contract", {}) if isinstance(factors, dict) else {}
+        try:
+            lot_size = int(contract.get("lot_size") or 0) if isinstance(contract, dict) else 0
+        except (TypeError, ValueError):
+            lot_size = 0
+        return lot_size
+
+    def _premium_atr(self, tradingsymbol: str, created_at: datetime | None) -> float:
+        if not tradingsymbol:
+            return 0.0
+        session = get_session()
+        try:
+            query = session.query(Candle).filter(Candle.symbol == tradingsymbol)
+            if created_at is not None:
+                query = query.filter(Candle.timestamp >= created_at.replace(tzinfo=None))
+            rows = list(reversed(query.order_by(Candle.timestamp.desc()).limit(20).all()))
+        finally:
+            session.close()
+        if len(rows) < 2:
+            return 0.0
+        true_ranges: list[float] = []
+        previous = float(rows[0].close_price)
+        for row in rows[1:]:
+            high = float(row.high_price)
+            low = float(row.low_price)
+            true_ranges.append(max(high - low, abs(high - previous), abs(low - previous)))
+            previous = float(row.close_price)
+        return sum(true_ranges[-14:]) / max(1, len(true_ranges[-14:]))
 
     def _exit_profile(self, trade: Any) -> dict[str, Any]:
         raw = getattr(trade, "order_response_json", None)

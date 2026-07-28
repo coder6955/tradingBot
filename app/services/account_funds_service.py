@@ -21,6 +21,11 @@ class AccountFundsService:
         margins = self._margins()
         return self._available_cash(margins)
 
+    @classmethod
+    def invalidate_cache(cls) -> None:
+        cls._cached_margins = None
+        cls._cached_margins_at = None
+
     def _margins(self) -> dict[str, Any]:
         now = ist_now_naive()
         ttl = max(0, int(settings.account_funds_cache_ttl_seconds))

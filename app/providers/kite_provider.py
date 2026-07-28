@@ -11,6 +11,7 @@ except ModuleNotFoundError:
 from app.config import settings
 from app.providers.kite_auth_state import is_kite_token_exception, kite_auth_state
 from app.providers.token_store import load_access_token
+from app.services.io_call_metrics_service import io_call_metrics
 
 
 class KiteProvider:
@@ -112,14 +113,7 @@ class KiteProvider:
         internal = str(interval or "").strip().lower()
         supported = {
             "1minute": "minute",
-            "minute": "minute",
-            "3minute": "3minute",
             "5minute": "5minute",
-            "10minute": "10minute",
-            "15minute": "15minute",
-            "30minute": "30minute",
-            "60minute": "60minute",
-            "day": "day",
         }
         if internal not in supported:
             raise ValueError(f"unsupported Kite historical interval: {interval}")
@@ -168,12 +162,19 @@ class KiteProvider:
             trigger_price=trigger_price,
             validity=validity,
         )
+        self._invalidate_funds_cache()
         return {"status": "submitted", "order_id": order_id}
 
     def cancel_order(self, order_id: str, variety: str = "regular") -> Dict[str, Any]:
         self._ensure_ready()
         cancelled = self._call(self.client.cancel_order, variety=variety, order_id=order_id)  # type: ignore
+        self._invalidate_funds_cache()
         return {"status": "cancelled", "order_id": cancelled or order_id}
+
+    def _invalidate_funds_cache(self) -> None:
+        from app.services.account_funds_service import AccountFundsService
+
+        AccountFundsService.invalidate_cache()
 
     def _ensure_ready(self) -> None:
         if kite_auth_state.relogin_required:
@@ -186,6 +187,7 @@ class KiteProvider:
             raise RuntimeError("kiteconnect is not installed")
 
     def _call(self, func: Any, *args: Any, **kwargs: Any) -> Any:
+        io_call_metrics.record_rest(str(getattr(func, "__name__", "kite_call")))
         try:
             return func(*args, **kwargs)
         except Exception as exc:

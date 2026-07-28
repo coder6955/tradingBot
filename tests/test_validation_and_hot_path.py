@@ -36,19 +36,19 @@ class ValidationAndHotPathTests(unittest.TestCase):
         result = service.evaluate(symbol="BANKNIFTY", trend="bullish")
         self.assertEqual(result["details"]["all_buckets"], {})
 
-    def test_fast_candidate_uses_banknifty_only_and_rejects_stale_context(self) -> None:
-        calls = []
+    def test_fast_candidate_uses_cached_validation_and_rejects_stale_context(self) -> None:
+        scanner_calls = []
 
         class Scanner:
             def scan_symbols(self, **kwargs):
-                calls.append(kwargs)
+                scanner_calls.append(kwargs)
                 return []
 
         class Context:
             passed = True
 
-            def validate(self, **kwargs):
-                return {"passed": self.passed, "age_seconds": 1.0}
+            def validate_candidate(self, event):
+                return {"passed": self.passed, "reason": None if self.passed else "fast_scan_context_stale"}
 
         context = Context()
         service = AutoTraderService(
@@ -59,11 +59,17 @@ class ValidationAndHotPathTests(unittest.TestCase):
         service.config = {"side": "BUY", "order_mode": "paper", "limit": 5, "place_orders": False}
         event = {"direction": "bullish", "timestamp": datetime.now().isoformat(), "receive_timestamp": datetime.now().isoformat()}
         service._run_fast_candidate_validation(event)
-        self.assertEqual(calls[0]["symbols"], ["BANKNIFTY"])
-        self.assertEqual(calls[0]["rejection_source"], "fast_rally_candidate_validation")
+        self.assertEqual(scanner_calls, [])
+        self.assertTrue(service.last_fast_candidate_decision["passed"])
+        self.assertEqual(service.last_fast_candidate_decision["io_calls"], {"rest_calls": 0, "database_queries": 0})
         context.passed = False
         service._run_fast_candidate_validation(event)
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(scanner_calls, [])
+        self.assertEqual(service.last_fast_candidate_decision["reason"], "fast_scan_context_stale")
+        self.assertEqual(service.errors, [])
+        self.assertEqual(service.recent_decision_events()[-1]["event_type"], "fast_rally_candidate_validation")
+        self.assertFalse(service.recent_decision_events()[-1]["passed"])
+        self.assertEqual(service.recent_decision_events()[-1]["reason"], "fast_scan_context_stale")
 
     def test_uncalibrated_signal_keeps_probability_null_and_labels_heuristic(self) -> None:
         signal = SignalService().generate_signal(

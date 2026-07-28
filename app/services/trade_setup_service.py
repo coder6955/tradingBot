@@ -53,8 +53,10 @@ class TradeSetupService:
         if not expiries:
             return None
         today = ist_today()
-        valid_expiries = [expiry for expiry in expiries if expiry >= today]
-        return min(valid_expiries or expiries).isoformat()
+        valid_expiries = sorted({expiry for expiry in expiries if expiry >= today})
+        if settings.block_expiry_day_option_buying:
+            valid_expiries = [expiry for expiry in valid_expiries if expiry > today]
+        return valid_expiries[0].isoformat() if valid_expiries else None
 
     def select_contract(
         self,
@@ -134,6 +136,7 @@ class TradeSetupService:
                 abs_delta = abs(float(contract.delta))
                 if settings.min_option_buy_delta <= abs_delta <= settings.max_option_buy_delta:
                     score += 10.0
+                    score += max(0.0, 8.0 - abs(abs_delta - settings.target_option_buy_delta) * 40.0)
                 else:
                     score -= 8.0
             if contract.theta is not None and executable > 0:
@@ -144,6 +147,10 @@ class TradeSetupService:
             dte = (expiry - ist_today()).days if expiry else None
             if dte is not None and dte <= 0 and settings.block_expiry_day_option_buying:
                 score -= 50.0
+            elif dte is not None and settings.preferred_option_buy_min_dte <= dte <= settings.preferred_option_buy_max_dte:
+                score += 8.0
+            elif dte is not None:
+                score -= min(16.0, abs(dte - settings.preferred_option_buy_max_dte) * 2.0)
             rows.append(
                 {
                     "contract": contract,
@@ -236,11 +243,12 @@ class TradeSetupService:
         underlying: str | None = None,
         snapshot: Dict[str, Any] | None = None,
         contract: OptionContract | None = None,
+        premium_structure: Dict[str, float] | None = None,
     ) -> Dict[str, float]:
         if entry_price <= 0:
             raise ValueError("entry price must be positive before calculating stop loss and targets")
         if (underlying or "").upper() == "BANKNIFTY" and side.upper() == "BUY":
-            return self._banknifty_buy_prices(entry_price, snapshot or {}, contract=contract)
+            return self._banknifty_buy_prices(entry_price, snapshot or {}, contract=contract, premium_structure=premium_structure)
         if side.upper() == "SELL":
             stop_loss = entry_price * 1.35
             target_1 = entry_price * 0.75
@@ -264,8 +272,14 @@ class TradeSetupService:
             "risk_reward": round(reward / risk, 2) if risk > 0 else 0.0,
         }
 
-    def _banknifty_buy_prices(self, entry_price: float, snapshot: Dict[str, Any], contract: OptionContract | None = None) -> Dict[str, float]:
-        structure = self._option_premium_structure(contract.tradingsymbol if contract else "")
+    def _banknifty_buy_prices(
+        self,
+        entry_price: float,
+        snapshot: Dict[str, Any],
+        contract: OptionContract | None = None,
+        premium_structure: Dict[str, float] | None = None,
+    ) -> Dict[str, float]:
+        structure = premium_structure or self._option_premium_structure(contract.tradingsymbol if contract else "")
         spread = max((contract.ask - contract.bid) if contract and contract.ask and contract.bid else 0.0, 0.0)
         atr = float(structure.get("atr") or 0.0)
         swing_low = float(structure.get("swing_low") or 0.0)

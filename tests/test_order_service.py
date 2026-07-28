@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
+from app.config import settings
 from app.models import Signal
 from app.services.database import init_db
 from app.services.market_data_coordinator import MarketDataCoordinator
@@ -125,7 +126,7 @@ class OrderServiceTests(unittest.TestCase):
             "side": "BUY",
             "exchange": "NFO",
             "tradingsymbol": "BANKNIFTY26JUL58000CE",
-            "expiry": "2026-07-26",
+            "expiry": "2099-12-31",
             "strike": 58000,
             "entry_price": 100,
             "stop_loss": 80,
@@ -135,7 +136,7 @@ class OrderServiceTests(unittest.TestCase):
             "score": 85,
             "factor_scores": {
                 "strategy_metadata": {"strategy_name": "banknifty_option_buying", "strategy_version": "test"},
-                "contract": {"expiry": "2026-07-26"},
+                "contract": {"expiry": "2099-12-31"},
             },
         }
         payload.update(overrides)
@@ -173,6 +174,30 @@ class OrderServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "strategy metadata"):
             service.place_signal_order(signal, confirm_live=False)
+
+    def test_low_score_requires_current_scanner_primary_gate_provenance(self) -> None:
+        service = OrderService(kite_provider=FailingKiteProvider())  # type: ignore[arg-type]
+        untrusted = self._signal(score=55)
+        with self.assertRaisesRegex(ValueError, "score is below threshold"):
+            service._validate_signal(untrusted)
+
+        trusted = self._signal(
+            score=55,
+            factor_scores={
+                "strategy_metadata": {
+                    "strategy_name": "banknifty_option_buying",
+                    "strategy_version": settings.strategy_version,
+                },
+                "decision_policy": {
+                    "primary_gates_passed": True,
+                    "score_role": "ranking_only",
+                    "indicator_role": "diagnostic_only",
+                },
+                "contract": {"expiry": "2099-12-31"},
+            },
+        )
+
+        service._validate_signal(trusted)
 
     def test_live_order_downsizes_to_available_cash(self) -> None:
         provider = LiveKiteProvider()
