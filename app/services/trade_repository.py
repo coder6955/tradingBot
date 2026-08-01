@@ -10,7 +10,7 @@ from sqlalchemy import func, or_
 
 from app.config import settings
 from app.models import Signal
-from app.services.database import TradeRecord, get_session
+from app.services.database import SetupEpisodeRecord, TradeRecord, get_session
 from app.services.realistic_pnl_service import RealisticPnlService
 from app.services.time_utils import format_ist, ist_now_naive, ist_today
 from app.services.strategy_lineage_service import current_strategy_lineage
@@ -51,6 +51,9 @@ class TradeRepository:
             initial_entry_price = paper_entry_price if mode == "paper" else float(signal.entry_price or 0.0)
             now = ist_now_naive()
             lineage = current_strategy_lineage()
+            factors = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+            risk_decision = factors.get("risk_decision") if isinstance(factors.get("risk_decision"), dict) else {}
+            episode = factors.get("episode") if isinstance(factors.get("episode"), dict) else {}
             record = TradeRecord(
                 opportunity_id=opportunity_id,
                 symbol=signal.symbol,
@@ -86,6 +89,12 @@ class TradeRepository:
                 notes=notes,
                 strategy_version=str(lineage["strategy_version"]),
                 config_hash=str(lineage["config_hash"]),
+                episode_key=str(episode.get("episode_key")) if episode.get("episode_key") else None,
+                risk_policy_version=str(risk_decision.get("risk_policy_version")) if risk_decision.get("risk_policy_version") else None,
+                approved_risk_tier=str(risk_decision.get("approved_tier")) if risk_decision.get("approved_tier") else None,
+                approved_risk_percent=float(risk_decision.get("approved_risk_percent") or 0.0),
+                approved_risk_amount=float(risk_decision.get("approved_risk_amount") or 0.0),
+                estimated_loss_at_stop=float(risk_decision.get("estimated_total_loss_at_stop") or 0.0),
             )
             session.add(record)
             session.commit()
@@ -483,8 +492,22 @@ class TradeRepository:
                 record.spread_cost = pnl.spread_cost
                 record.pnl = pnl.net_pnl
                 record.remaining_quantity = 0
+            if record.episode_key:
+                (
+                    session.query(SetupEpisodeRecord)
+                    .filter(SetupEpisodeRecord.episode_key == record.episode_key, SetupEpisodeRecord.state == "OPEN")
+                    .update(
+                        {
+                            SetupEpisodeRecord.state: "CLOSED",
+                            SetupEpisodeRecord.updated_at: ist_now_naive(),
+                            SetupEpisodeRecord.last_transition_reason: outcome,
+                        },
+                        synchronize_session=False,
+                    )
+                )
             session.commit()
             session.refresh(record)
+            self._record_counterfactual_outcome(record)
             return record
         finally:
             session.close()
@@ -521,8 +544,23 @@ class TradeRepository:
                 record.status = "closed"
                 record.outcome = outcome
                 record.exit_price = exit_price
+                if record.episode_key:
+                    (
+                        session.query(SetupEpisodeRecord)
+                        .filter(SetupEpisodeRecord.episode_key == record.episode_key, SetupEpisodeRecord.state == "OPEN")
+                        .update(
+                            {
+                                SetupEpisodeRecord.state: "CLOSED",
+                                SetupEpisodeRecord.updated_at: ist_now_naive(),
+                                SetupEpisodeRecord.last_transition_reason: outcome,
+                            },
+                            synchronize_session=False,
+                        )
+                    )
             session.commit()
             session.refresh(record)
+            if record.status == "closed":
+                self._record_counterfactual_outcome(record)
             return record
         finally:
             session.close()
@@ -597,6 +635,43 @@ class TradeRepository:
         record.mfe_percent = round((mfe_points / entry) * 100, 4)
         record.mae_percent = round((mae_points / entry) * 100, 4)
         return changed or missing_metrics
+
+    def _record_counterfactual_outcome(self, record: TradeRecord) -> None:
+        if not record.episode_key or record.exit_price is None:
+            return
+        try:
+            from app.services.decision_evidence_repository import DecisionEvidenceRepository
+
+            payload = json.loads(record.order_response_json or "{}")
+            factors = payload.get("signal_factor_scores", {}) if isinstance(payload, dict) else {}
+            shadow = factors.get("shadow_risk_decisions", {}) if isinstance(factors, dict) else {}
+            active = factors.get("risk_decision", {}) if isinstance(factors, dict) else {}
+            account_equity = float(active.get("approved_risk_amount") or 0.0) / max(float(active.get("approved_risk_percent") or 0.0) / 100.0, 0.0001)
+            counterfactual = DecisionEvidenceRepository().counterfactual_tier_outcomes(
+                entry_price=float(record.average_price or record.entry_price or 0.0),
+                exit_price=float(record.exit_price),
+                account_equity=account_equity,
+                shadow_decisions=shadow if isinstance(shadow, dict) else {},
+                charges_per_unit=float(record.charges or 0.0) / max(int(record.filled_quantity or record.placed_quantity or 1), 1),
+            )
+            DecisionEvidenceRepository().record_outcome(
+                episode_key=str(record.episode_key),
+                horizon="trade_lifecycle",
+                outcome_source="executed_trade",
+                outcome={
+                    "outcome": record.outcome,
+                    "entry_price": record.average_price or record.entry_price,
+                    "exit_price": record.exit_price,
+                    "mfe_points": record.mfe_points,
+                    "mae_points": record.mae_points,
+                    "time_to_mfe": record.time_to_mfe,
+                    "time_to_mae": record.time_to_mae,
+                    "after_cost_result": record.net_pnl,
+                    "counterfactual_risk_tiers": counterfactual,
+                },
+            )
+        except Exception:
+            return
 
     def _entry_for_excursion(self, record: TradeRecord) -> float:
         try:

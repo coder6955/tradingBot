@@ -3,7 +3,7 @@ import asyncio
 import json
 import tempfile
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from urllib.parse import urlsplit
 from unittest.mock import patch
 
@@ -129,6 +129,14 @@ class SimpleAsgiClient:
 
 class ApiIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._settings_snapshot = {item.name: getattr(api.settings, item.name) for item in fields(type(api.settings))}
+        self._runtime_config_snapshot = {
+            "mode": api.runtime_trading_config_service.mode,
+            "options": dict(api.runtime_trading_config_service.options),
+            "confirmed_at": api.runtime_trading_config_service.confirmed_at,
+            "confirmed_by": api.runtime_trading_config_service.confirmed_by,
+            "warning_acknowledged": api.runtime_trading_config_service.warning_acknowledged,
+        }
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.temp_db.close()
         init_db(f"sqlite:///{self.temp_db.name}")
@@ -141,8 +149,10 @@ class ApiIntegrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.market_session_patcher.stop()
         api._research_report_cache.clear()
-        object.__setattr__(api.settings, "api_auth_token", self._api_auth_token)
-        object.__setattr__(api.settings, "api_auth_required", self._api_auth_required)
+        for key, value in self._settings_snapshot.items():
+            object.__setattr__(api.settings, key, value)
+        for key, value in self._runtime_config_snapshot.items():
+            setattr(api.runtime_trading_config_service, key, dict(value) if isinstance(value, dict) else value)
         try:
             if os.path.exists(self.temp_db.name):
                 os.remove(self.temp_db.name)
@@ -159,6 +169,10 @@ class ApiIntegrationTests(unittest.TestCase):
         db = self.client.get("/db/health")
         self.assertEqual(db.status_code, 200)
         self.assertEqual(db.json()["status"], "ok")
+        risk_policy = self.client.get("/risk/policy/status")
+        self.assertEqual(risk_policy.status_code, 200)
+        self.assertEqual(risk_policy.json()["absolute_process_ceiling_percent"], 5.0)
+        self.assertFalse(risk_policy.json()["exceptional_live_risk_active"])
 
     def test_protected_endpoint_requires_api_auth_when_configured(self) -> None:
         self._enable_api_auth()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, List
+from typing import Any, Callable, List
 
 from app.models import Signal
 from app.config import settings
@@ -14,11 +14,13 @@ from app.services.banknifty_regime_filter_service import BankNiftyRegimeFilterSe
 from app.services.day_type_service import DayTypeService
 from app.services.data_freshness_service import DataFreshnessService
 from app.services.decision_engine_service import DecisionEngineService
+from app.services.decision_evidence_repository import DecisionEvidenceRepository
 from app.services.entry_timing_service import EntryTimingService
 from app.services.mock_market_feed import MockMarketFeed
 from app.providers.kite_feed import KiteFeed
 from app.providers.token_store import load_access_token
 from app.services.market_regime_service import MarketRegimeService
+from app.services.market_session_service import MarketSessionService
 from app.services.option_chain_service import OptionChainService
 from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
 from app.services.option_quality_service import OptionQualityService
@@ -76,6 +78,8 @@ class ScannerService:
         multi_timeframe_context_service: MultiTimeframeContextService | None = None,
         momentum_phase_service: MomentumPhaseService | None = None,
         candidate_ranking_service: TradeCandidateRankingService | None = None,
+        session_eligibility_provider: Callable[[], bool] | None = None,
+        decision_evidence_repository: DecisionEvidenceRepository | None = None,
     ) -> None:
         self.signal_service = signal_service or SignalService()
         self.scoring_service = scoring_service or IndicatorScoringService()
@@ -103,6 +107,8 @@ class ScannerService:
         self.multi_timeframe_context_service = multi_timeframe_context_service or MultiTimeframeContextService()
         self.momentum_phase_service = momentum_phase_service or MomentumPhaseService()
         self.candidate_ranking_service = candidate_ranking_service or TradeCandidateRankingService()
+        self.session_eligibility_provider = session_eligibility_provider or MarketSessionService().should_run_live_modules
+        self.decision_evidence_repository = decision_evidence_repository
 
         # Market data is independent from live order placement. When Kite data is
         # requested, fail closed instead of silently returning mock opportunities.
@@ -564,6 +570,13 @@ class ScannerService:
                 lot_size=contract.lot_size,
                 side=side,
             )
+            factor_scores["risk_request"] = {
+                "requested_tier": "TIER_1_BASE",
+                "authority": "active_base_policy",
+                "scanner_score_has_risk_authority": False,
+                "provisional_quantity": quantity,
+                "final_authority": "PreOrderRiskService",
+            }
             gate_failures = self._gate_failures(
                 combined_score=combined_score,
                 contract=contract,
@@ -589,6 +602,8 @@ class ScannerService:
             )
             if not freshness_eval.get("passed", False):
                 gate_failures = list(freshness_eval.get("reasons", [])) + gate_failures
+            if quantity <= 0:
+                gate_failures.append("RISK_BUDGET_BELOW_MINIMUM_LOT")
             armed_entry_eval = self._maybe_register_armed_entry(
                 symbol=symbol,
                 side=side,
@@ -1268,10 +1283,18 @@ class ScannerService:
             return {"eligible": False, "reason": "early_arming_only_supports_banknifty_option_buying"}
         if settings.early_armed_entry_paper_only and str(order_mode).lower() != "paper":
             return {"eligible": False, "reason": "early_arming_paper_only"}
+        if not self.session_eligibility_provider():
+            return {"eligible": False, "reason": "early_arming_session_ineligible"}
         if not settings.early_arm_allow_premium_pending:
             return {"eligible": False, "reason": "early_arming_premium_pending_not_allowed"}
         if not contract.instrument_token:
             return {"eligible": False, "reason": "selected_option_token_missing"}
+        if contract.bid <= 0 or contract.ask <= 0 or contract.ask < contract.bid:
+            return {"eligible": False, "reason": "early_arming_contract_untradeable"}
+        if self._contract_spread_pct(contract) > settings.max_bid_ask_spread_pct:
+            return {"eligible": False, "reason": "early_arming_spread_too_wide"}
+        if contract.bid_quantity < contract.lot_size or contract.ask_quantity < contract.lot_size:
+            return {"eligible": False, "reason": "early_arming_quantity_safe_depth_missing"}
         if not settings.enable_kite_websocket:
             return {"eligible": False, "reason": "websocket_disabled_for_event_entry"}
         if self._blocking_gate_failures_for_arming(gate_failures):
@@ -1282,6 +1305,16 @@ class ScannerService:
             return {"eligible": False, "reason": "early_arming_price_plan_missing"}
         if not self._setup_strong_enough_for_early_arm(factor_scores):
             return {"eligible": False, "reason": "early_arming_setup_not_strong_enough"}
+        risk_request = factor_scores.get("risk_request") if isinstance(factor_scores.get("risk_request"), dict) else {}
+        requested_risk_tier = str(risk_request.get("requested_tier") or "TIER_1_BASE")
+        if requested_risk_tier != "TIER_1_BASE":
+            factor_scores["risk_request"] = {
+                **risk_request,
+                "requested_tier": "TIER_1_BASE",
+                "shadow_requested_tier": requested_risk_tier,
+                "downgrade_reason": "EARLY_ARM_HIGHER_RISK_TIER_NOT_VALIDATED",
+                "higher_tier_has_active_order_authority": False,
+            }
 
         return {
             "eligible": True,
@@ -1315,7 +1348,7 @@ class ScannerService:
         return "premium_candle" in text or "premium confirmation" in text
 
     def _setup_strong_enough_for_early_arm(self, factor_scores: dict[str, object]) -> bool:
-        required = ["data_quality", "data_freshness", "multi_timeframe"]
+        required = ["data_quality", "data_freshness", "multi_timeframe", "option_quality"]
         for key in required:
             value = factor_scores.get(key, {})
             if isinstance(value, dict) and not value.get("passed", True):
@@ -1464,6 +1497,27 @@ class ScannerService:
             "score_breakdown": breakdown,
         }
         logger.info("trade_decision %s", payload)
+        if self.decision_evidence_repository is not None:
+            try:
+                episode = factor_scores.get("episode", {}) if factor_scores and isinstance(factor_scores.get("episode"), dict) else {}
+                self.decision_evidence_repository.record_decision(
+                    decision_type="scheduled_scanner",
+                    final_state="PREPARED" if accepted else "OBSERVE",
+                    symbol=symbol,
+                    tradingsymbol=contract.tradingsymbol if contract else None,
+                    episode_key=str(episode.get("episode_key")) if episode.get("episode_key") else None,
+                    context={
+                        "snapshot": snapshot or {},
+                        "contract": self._contract_payload(contract) if contract else {},
+                        "prices": prices or {},
+                        "factor_scores": factor_scores or {},
+                        "score_breakdown": breakdown,
+                    },
+                    gate_results={"accepted": accepted, "reasons": reasons},
+                    transition_timestamps={"scanner_decision_at": self._decision_timestamp()},
+                )
+            except Exception as exc:
+                logger.warning("failed_to_persist_decision_evidence symbol=%s error=%s", symbol, exc)
 
     def _save_rejection(
         self,

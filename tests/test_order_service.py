@@ -6,17 +6,21 @@ from types import SimpleNamespace
 from app.config import settings
 from app.models import Signal
 from app.services.database import init_db
+from app.services.account_funds_service import AccountFundsService
 from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.order_service import OrderService
 from app.services.paper_trading_service import PaperTradingService
 
 
 class FailingKiteProvider:
+    def margins(self):  # type: ignore[no-untyped-def]
+        return {"equity": {"available": {"cash": 100000}}}
+
     def quote(self, instruments):  # type: ignore[no-untyped-def]
         return {
             instruments[0]: {
                 "last_price": 100,
-                "depth": {"buy": [{"price": 99.5}], "sell": [{"price": 100}]},
+                "depth": {"buy": [{"price": 99.5, "quantity": 1000}], "sell": [{"price": 100, "quantity": 1000}]},
             }
         }
 
@@ -30,13 +34,13 @@ class LiveKiteProvider:
         self.orders = []
 
     def margins(self):  # type: ignore[no-untyped-def]
-        return {"equity": {"available": {"cash": 10000}}}
+        return {"equity": {"available": {"cash": 100000}}}
 
     def quote(self, instruments):  # type: ignore[no-untyped-def]
         return {
             instruments[0]: {
                 "last_price": 100,
-                "depth": {"buy": [{"price": 99.5}], "sell": [{"price": 100}]},
+                "depth": {"buy": [{"price": 99.5, "quantity": 1000}], "sell": [{"price": 100, "quantity": 1000}]},
             }
         }
 
@@ -58,6 +62,11 @@ class ProtectiveFailureProvider(LiveKiteProvider):
         if kwargs.get("order_type") == "SL-M":
             raise RuntimeError("protective rejected by broker")
         return super().place_order(**kwargs)
+
+
+class LowCashLiveKiteProvider(LiveKiteProvider):
+    def margins(self):  # type: ignore[no-untyped-def]
+        return {"equity": {"available": {"cash": 10000}}}
 
 
 class PartialFillProvider(LiveKiteProvider):
@@ -87,6 +96,18 @@ class PassingRiskService:
         return {"passed": True, "reasons": []}
 
 
+class BlockingRiskService:
+    def evaluate_signal(self, symbol):  # type: ignore[no-untyped-def]
+        return {
+            "passed": False,
+            "reasons": ["max daily loss reached"],
+            "limits": {"available_cash": 100000.0},
+            "summary": {"trades": 1, "pnl": -2000.0, "stop_losses": 1},
+            "open_exposure": {"open_trades": 0, "by_symbol": {}, "premium_exposure": 0.0},
+            "risk_state": {"realized_daily_pnl": -2000.0},
+        }
+
+
 class CapturingTradeRepository:
     def __init__(self) -> None:
         self.created = None
@@ -105,9 +126,22 @@ class CapturingTradeRepository:
         self.protective = {"trade_id": trade_id, **kwargs}
         return SimpleNamespace(id=trade_id)
 
+    def daily_summary(self):  # type: ignore[no-untyped-def]
+        return {"trades": 0, "pnl": 0.0, "stop_losses": 0}
+
+    def open_exposure_summary(self):  # type: ignore[no-untyped-def]
+        return {"open_trades": 0, "by_symbol": {}, "premium_exposure": 0.0}
+
+    def today_trades(self):  # type: ignore[no-untyped-def]
+        return []
+
+    def open_trades(self):  # type: ignore[no-untyped-def]
+        return []
+
 
 class OrderServiceTests(unittest.TestCase):
     def setUp(self) -> None:
+        AccountFundsService.invalidate_cache()
         self.temp_db = tempfile.NamedTemporaryFile(delete=False)
         self.temp_db.close()
         init_db(f"sqlite:///{self.temp_db.name}")
@@ -153,6 +187,17 @@ class OrderServiceTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "paper")
         self.assertEqual(result["trade"]["symbol"], "BANKNIFTY26JUL58000CE")
+
+    def test_paper_order_cannot_bypass_account_risk_controls(self) -> None:
+        paper = PaperTradingService()
+        service = OrderService(
+            kite_provider=FailingKiteProvider(),  # type: ignore[arg-type]
+            paper_trading_service=paper,
+            risk_management_service=BlockingRiskService(),  # type: ignore[arg-type]
+        )
+        with self.assertRaisesRegex(ValueError, "ACCOUNT_RISK_GATES_FAILED"):
+            service.place_signal_order(self._signal(), order_mode="paper")
+        self.assertEqual(paper.positions, [])
 
     def test_rejects_non_banknifty_signal(self) -> None:
         service = OrderService(kite_provider=FailingKiteProvider())  # type: ignore[arg-type]
@@ -200,13 +245,13 @@ class OrderServiceTests(unittest.TestCase):
         service._validate_signal(trusted)
 
     def test_live_order_downsizes_to_available_cash(self) -> None:
-        provider = LiveKiteProvider()
+        provider = LowCashLiveKiteProvider()
         service = OrderService(
             kite_provider=provider,  # type: ignore[arg-type]
             paper_trading_service=PaperTradingService(),
             risk_management_service=PassingRiskService(),  # type: ignore[arg-type]
         )
-        signal = self._signal(quantity=150, lot_size=15)
+        signal = self._signal(quantity=150, lot_size=15, stop_loss=99.5)
 
         from app.services import order_service
 
@@ -282,7 +327,7 @@ class OrderServiceTests(unittest.TestCase):
             object.__setattr__(order_service.settings, "paper_trading_mode", False)
             object.__setattr__(order_service.settings, "enable_broker_emergency_sl", False)
             object.__setattr__(order_service.settings, "require_broker_protective_stop_for_live_entry", True)
-            with self.assertRaisesRegex(ValueError, "protective stop is required"):
+            with self.assertRaisesRegex(ValueError, "LIVE_PROTECTIVE_STOP_REQUIRED"):
                 service.place_signal_order(self._signal(), confirm_live=True, order_mode="live")
         finally:
             for key, value in originals.items():
@@ -309,7 +354,12 @@ class OrderServiceTests(unittest.TestCase):
             first = service.place_signal_order(self._signal(), confirm_live=True, order_mode="live")
             self.assertFalse(first["broker_emergency_sl"]["submitted"])
             with self.assertRaisesRegex(ValueError, "previous protective stop failure"):
-                service.place_signal_order(self._signal(), confirm_live=True, order_mode="live")
+                service.place_signal_order(
+                    self._signal(),
+                    confirm_live=True,
+                    order_mode="live",
+                    metadata={"trigger_identifier": "new-independent-episode"},
+                )
         finally:
             for key, value in originals.items():
                 object.__setattr__(order_service.settings, key, value)
@@ -352,7 +402,8 @@ class OrderServiceTests(unittest.TestCase):
         signal = self._signal()
 
         service.place_signal_order(signal, confirm_live=False)
-        service.place_signal_order(signal, confirm_live=False)
+        with self.assertRaisesRegex(ValueError, "DUPLICATE_EPISODE"):
+            service.place_signal_order(signal, confirm_live=False)
 
         self.assertEqual(provider.quote_count, 1)
         self.assertGreaterEqual(coordinator.status()["quote_cache_hits"], 1)

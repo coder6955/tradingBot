@@ -27,6 +27,7 @@ from app.services.broker_sync_service import BrokerSyncService
 from app.services.backtest_service import BacktestService
 from app.services.data_ingestion_service import DataIngestionService
 from app.services.day_type_service import DayTypeService
+from app.services.decision_evidence_repository import DecisionEvidenceRepository
 from app.services.database import get_session
 from app.services.greeks_service import GreeksService
 from app.services.notification_service import NotificationService
@@ -59,6 +60,8 @@ from app.services.outcome_learning_service import OutcomeLearningService
 from app.services.professional_readiness_service import ProfessionalReadinessService
 from app.services.professional_insights_service import ProfessionalInsightsService
 from app.services.risk_management_service import RiskManagementService
+from app.services.risk_policy_service import RiskPolicyService
+from app.services.risk_policy_service import RiskPolicyService
 from app.services.runtime_trading_config_service import RuntimeTradingConfigService
 from app.services.runtime_job_repository import RuntimeJobRepository
 from app.services.strategy_edge_service import StrategyEdgeService
@@ -210,6 +213,7 @@ paper_trading_service = PaperTradingService()
 opportunity_repository = OpportunityRepository()
 rejected_opportunity_repository = RejectedOpportunityRepository()
 trade_repository = TradeRepository()
+decision_evidence_repository = DecisionEvidenceRepository()
 risk_management_service = RiskManagementService(trade_repository)
 runtime_trading_config_service = RuntimeTradingConfigService()
 notification_service = NotificationService()
@@ -338,6 +342,8 @@ def get_scanner_service() -> ScannerService:
         volatility_edge_service=volatility_edge_service,
         outcome_learning_service=outcome_learning_service,
         fast_scan_context_service=fast_scan_context_service,
+        session_eligibility_provider=market_session_service.should_run_live_modules,
+        decision_evidence_repository=decision_evidence_repository,
     )
 
 
@@ -394,6 +400,7 @@ auto_trader_service = AutoTraderService(
     latency_metrics=latency_metrics_service,
     fast_scan_context_service=fast_scan_context_service,
     fast_candidate_promoter=armed_entry_tracker_service,
+    decision_evidence_repository=decision_evidence_repository,
 )
 banknifty_fast_rally_service = BankNiftyFastRallyService(auto_trader_service.request_fast_rescan, latency_metrics=latency_metrics_service)
 
@@ -555,6 +562,62 @@ def banknifty_constituent_status() -> dict[str, object]:
 @app.get("/runtime/latency", tags=["01 System"], summary="Read end-to-end trading-path latency percentiles")
 def runtime_latency() -> dict[str, object]:
     return {**latency_metrics_service.report(), "io_call_budgets": io_call_metrics.report()}
+
+
+@app.get("/risk/policy/status", tags=["01 System"], summary="Inspect active and shadow risk-tier policy safety")
+def risk_policy_status() -> dict[str, object]:
+    policy = RiskPolicyService()
+    conflicts = policy.configuration_conflicts()
+    return {
+        "risk_policy_version": settings.risk_policy_version,
+        "active_entry_policy": settings.active_entry_policy,
+        "shadow_entry_policy": settings.shadow_entry_policy,
+        "active_risk_policy": settings.active_risk_policy,
+        "shadow_risk_policy": settings.shadow_risk_policy,
+        "tiers_percent": {
+            "TIER_1_BASE": settings.risk_tier_1_base_pct,
+            "TIER_2_STRONG": settings.risk_tier_2_strong_pct,
+            "TIER_3_HIGH": settings.risk_tier_3_high_pct,
+            "TIER_4_EXCEPTIONAL": settings.risk_tier_4_exceptional_pct,
+        },
+        "absolute_process_ceiling_percent": policy.HARD_ABSOLUTE_MAX_PERCENT,
+        "configured_absolute_ceiling_percent": settings.absolute_max_risk_per_trade_percent,
+        "active_paper_max_tier": settings.active_paper_max_risk_tier,
+        "active_live_max_tier": settings.active_live_max_risk_tier,
+        "shadow_max_tier": settings.shadow_max_risk_tier,
+        "validated_higher_risk_active": settings.enable_validated_higher_risk_active,
+        "exceptional_live_risk_active": settings.enable_exceptional_live_risk,
+        "configuration_conflicts": conflicts,
+        "configuration_valid": not any(not item.startswith("POLICY_CONFLICT_") for item in conflicts),
+    }
+
+
+@app.get("/risk/policy/status", tags=["01 System"], summary="Inspect active and shadow risk-tier policy safety")
+def risk_policy_status() -> dict[str, object]:
+    policy = RiskPolicyService()
+    conflicts = policy.configuration_conflicts()
+    return {
+        "risk_policy_version": settings.risk_policy_version,
+        "active_entry_policy": settings.active_entry_policy,
+        "shadow_entry_policy": settings.shadow_entry_policy,
+        "active_risk_policy": settings.active_risk_policy,
+        "shadow_risk_policy": settings.shadow_risk_policy,
+        "tiers_percent": {
+            "TIER_1_BASE": settings.risk_tier_1_base_pct,
+            "TIER_2_STRONG": settings.risk_tier_2_strong_pct,
+            "TIER_3_HIGH": settings.risk_tier_3_high_pct,
+            "TIER_4_EXCEPTIONAL": settings.risk_tier_4_exceptional_pct,
+        },
+        "absolute_process_ceiling_percent": policy.HARD_ABSOLUTE_MAX_PERCENT,
+        "configured_absolute_ceiling_percent": settings.absolute_max_risk_per_trade_percent,
+        "active_paper_max_tier": settings.active_paper_max_risk_tier,
+        "active_live_max_tier": settings.active_live_max_risk_tier,
+        "shadow_max_tier": settings.shadow_max_risk_tier,
+        "validated_higher_risk_active": settings.enable_validated_higher_risk_active,
+        "exceptional_live_risk_active": settings.enable_exceptional_live_risk,
+        "configuration_conflicts": conflicts,
+        "configuration_valid": not any(not item.startswith("POLICY_CONFLICT_") for item in conflicts),
+    }
 
 
 @app.get("/db/health", tags=["01 System"], summary="Check database connectivity")

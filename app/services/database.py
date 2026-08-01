@@ -10,7 +10,7 @@ VENV_SITE_PACKAGES = PROJECT_ROOT / ".venv" / "Lib" / "site-packages"
 if VENV_SITE_PACKAGES.exists() and str(VENV_SITE_PACKAGES) not in sys.path:
     sys.path.append(str(VENV_SITE_PACKAGES))
 
-from sqlalchemy import BigInteger, Column, DateTime, Float, Integer, String, Text, UniqueConstraint, create_engine, event, inspect, text
+from sqlalchemy import BigInteger, Column, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, create_engine, event, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.config import settings
@@ -235,6 +235,12 @@ class TradeRecord(Base):
     notes = Column(Text, nullable=True)
     strategy_version = Column(String(100), nullable=True, index=True)
     config_hash = Column(String(64), nullable=True, index=True)
+    episode_key = Column(String(64), nullable=True, index=True)
+    risk_policy_version = Column(String(100), nullable=True, index=True)
+    approved_risk_tier = Column(String(40), nullable=True, index=True)
+    approved_risk_percent = Column(Float, nullable=True)
+    approved_risk_amount = Column(Float, nullable=True)
+    estimated_loss_at_stop = Column(Float, nullable=True)
 
 
 class StrategyValidationRecord(Base):
@@ -280,6 +286,56 @@ class SetupEpisodeRecord(Base):
     independent_outcome = Column(String(80), nullable=True, index=True)
     outcome_source = Column(String(50), nullable=True, index=True)
     outcome_confidence = Column(String(30), nullable=True, index=True)
+    state = Column(String(30), nullable=False, default="AVAILABLE", index=True)
+    reservation_token = Column(String(64), nullable=True, unique=True, index=True)
+    reserved_at = Column(DateTime, nullable=True, index=True)
+    reservation_expires_at = Column(DateTime, nullable=True, index=True)
+    trigger_identifier = Column(String(120), nullable=True, index=True)
+    setup_family = Column(String(100), nullable=True, index=True)
+    risk_policy_version = Column(String(100), nullable=True, index=True)
+    active_trade_id = Column(Integer, nullable=True, index=True)
+    last_transition_reason = Column(String(150), nullable=True)
+
+
+class DecisionRiskEvidenceRecord(Base):
+    __tablename__ = "decision_risk_evidence"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    decision_id = Column(String(64), nullable=False, unique=True, index=True)
+    episode_key = Column(String(64), nullable=True, index=True)
+    decision_type = Column(String(40), nullable=False, index=True)
+    final_state = Column(String(40), nullable=False, index=True)
+    symbol = Column(String(50), nullable=False, index=True)
+    tradingsymbol = Column(String(100), nullable=True, index=True)
+    strategy_version = Column(String(100), nullable=False, index=True)
+    config_hash = Column(String(64), nullable=False, index=True)
+    risk_policy_version = Column(String(100), nullable=False, index=True)
+    trading_date = Column(String(20), nullable=False, index=True)
+    session_phase = Column(String(40), nullable=True, index=True)
+    decision_context_json = Column(Text, nullable=False)
+    gate_results_json = Column(Text, nullable=False)
+    active_risk_decision_json = Column(Text, nullable=True)
+    shadow_risk_decisions_json = Column(Text, nullable=True)
+    transition_timestamps_json = Column(Text, nullable=True)
+
+
+class DecisionOutcomeRecord(Base):
+    __tablename__ = "decision_outcomes"
+    __table_args__ = (
+        UniqueConstraint("episode_key", "horizon", "outcome_source", name="uq_episode_horizon_outcome_source"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    decision_id = Column(String(64), nullable=True, index=True)
+    episode_key = Column(String(64), nullable=False, index=True)
+    horizon = Column(String(30), nullable=False, index=True)
+    outcome_source = Column(String(50), nullable=False, index=True)
+    outcome_json = Column(Text, nullable=False)
+    strategy_version = Column(String(100), nullable=False, index=True)
+    config_hash = Column(String(64), nullable=False, index=True)
+    risk_policy_version = Column(String(100), nullable=False, index=True)
 
 
 class RawTickRecord(Base):
@@ -367,7 +423,7 @@ class ArmedEntryRecord(Base):
 def init_db(database_url: Optional[str] = None) -> None:
     global engine, SessionLocal
     url = database_url or settings.database_url
-    connect_args = {"connect_timeout": 5} if url.startswith("mysql") else {}
+    connect_args = {"connect_timeout": 5} if url.startswith("mysql") else {"check_same_thread": False} if url.startswith("sqlite") else {}
     engine = create_engine(url, future=True, connect_args=connect_args)
     event.listen(engine, "before_cursor_execute", _record_database_query)
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -380,6 +436,8 @@ def init_db(database_url: Optional[str] = None) -> None:
     _ensure_strategy_version_columns()
     _ensure_runtime_job_run_columns()
     _ensure_raw_tick_columns()
+    _ensure_setup_episode_columns()
+    _ensure_decision_outcome_unique_index()
     _mark_legacy_rejected_outcomes_low_confidence()
 
 
@@ -490,6 +548,12 @@ def _ensure_trade_columns() -> None:
         "mae_recorded_at": "DATETIME",
         "strategy_version": "VARCHAR(100)",
         "config_hash": "VARCHAR(64)",
+        "episode_key": "VARCHAR(64)",
+        "risk_policy_version": "VARCHAR(100)",
+        "approved_risk_tier": "VARCHAR(40)",
+        "approved_risk_percent": "FLOAT",
+        "approved_risk_amount": "FLOAT",
+        "estimated_loss_at_stop": "FLOAT",
     }
     with engine.begin() as connection:
         for column, column_type in required.items():
@@ -620,6 +684,60 @@ def _ensure_raw_tick_columns() -> None:
                 connection.execute(text(f"ALTER TABLE raw_ticks ADD COLUMN {column} {column_type}"))
 
 
+def _ensure_setup_episode_columns() -> None:
+    if engine is None:
+        return
+    inspector = inspect(engine)
+    if "setup_episodes" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("setup_episodes")}
+    required = {
+        "state": "VARCHAR(30) DEFAULT 'AVAILABLE'",
+        "reservation_token": "VARCHAR(64)",
+        "reserved_at": "DATETIME",
+        "reservation_expires_at": "DATETIME",
+        "trigger_identifier": "VARCHAR(120)",
+        "setup_family": "VARCHAR(100)",
+        "risk_policy_version": "VARCHAR(100)",
+        "active_trade_id": "INTEGER",
+        "last_transition_reason": "VARCHAR(150)",
+    }
+    with engine.begin() as connection:
+        for column, column_type in required.items():
+            if column not in existing:
+                connection.execute(text(f"ALTER TABLE setup_episodes ADD COLUMN {column} {column_type}"))
+
+
+def _ensure_decision_outcome_unique_index() -> None:
+    """Upgrade existing schemas without deleting legacy duplicate evidence."""
+    if engine is None:
+        return
+    inspector = inspect(engine)
+    if "decision_outcomes" not in inspector.get_table_names():
+        return
+    constraint_name = "uq_episode_horizon_outcome_source"
+    unique_names = {str(item.get("name")) for item in inspector.get_unique_constraints("decision_outcomes")}
+    index_names = {str(item.get("name")) for item in inspector.get_indexes("decision_outcomes")}
+    if constraint_name in unique_names or constraint_name in index_names:
+        return
+    with engine.connect() as connection:
+        duplicate = connection.execute(
+            text(
+                "SELECT episode_key, horizon, outcome_source FROM decision_outcomes "
+                "GROUP BY episode_key, horizon, outcome_source HAVING COUNT(*) > 1 LIMIT 1"
+            )
+        ).first()
+    if duplicate is not None:
+        return
+    Index(
+        constraint_name,
+        DecisionOutcomeRecord.episode_key,
+        DecisionOutcomeRecord.horizon,
+        DecisionOutcomeRecord.outcome_source,
+        unique=True,
+    ).create(bind=engine, checkfirst=True)
+
+
 def _mark_legacy_rejected_outcomes_low_confidence() -> None:
     if engine is None:
         return
@@ -655,4 +773,6 @@ def get_session():
         _ensure_strategy_version_columns()
         _ensure_runtime_job_run_columns()
         _ensure_raw_tick_columns()
+        _ensure_setup_episode_columns()
+        _ensure_decision_outcome_unique_index()
     return SessionLocal()

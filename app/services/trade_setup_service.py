@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from app.config import settings
 from app.services.account_funds_service import AccountFundsService
 from app.services.database import Candle, get_session
+from app.services.risk_policy_service import RiskDecisionContext, RiskPolicyService, TIER_1_BASE
 from app.services.time_utils import ist_now_naive, ist_today
 
 
@@ -39,8 +40,9 @@ class OptionContract:
 class TradeSetupService:
     """Select liquid option contracts and convert ranked setups into executable plans."""
 
-    def __init__(self, account_funds_service: AccountFundsService | None = None) -> None:
+    def __init__(self, account_funds_service: AccountFundsService | None = None, risk_policy_service: RiskPolicyService | None = None) -> None:
         self.account_funds_service = account_funds_service or AccountFundsService()
+        self.risk_policy_service = risk_policy_service or RiskPolicyService()
         self._sticky_contracts: dict[str, tuple[int, datetime]] = {}
 
     def nearest_expiry(self, instruments: Iterable[Dict[str, Any]], underlying: str) -> Optional[str]:
@@ -386,15 +388,25 @@ class TradeSetupService:
         return max(minimum_target, entry_price + risk * multiplier)
 
     def position_size(self, entry_price: float, stop_loss: float, lot_size: int, side: str, account_equity: float | None = None) -> int:
-        if lot_size <= 0:
-            return 0
-        per_unit_risk = abs(entry_price - stop_loss)
-        if per_unit_risk <= 0:
+        if lot_size <= 0 or side.upper() != "BUY":
             return 0
         equity = account_equity if account_equity is not None else self._available_cash()
-        max_risk = equity * (settings.max_risk_per_trade_pct / 100)
-        lots = floor(max_risk / (per_unit_risk * lot_size))
-        return max(lot_size, lots * lot_size) if lots > 0 else lot_size
+        if equity <= 0 and account_equity is None:
+            # Scanner sizing is provisional. The shared pre-order authority
+            # requires real live equity and reruns every invariant.
+            equity = settings.account_equity
+        decision = self.risk_policy_service.evaluate(
+            RiskDecisionContext(
+                account_equity=float(equity or 0.0),
+                expected_entry=float(entry_price),
+                stop_price=float(stop_loss),
+                lot_size=int(lot_size),
+                requested_tier=TIER_1_BASE,
+                order_mode="paper",
+                policy_mode="active",
+            )
+        )
+        return int(decision.maximum_quantity) if decision.passed else 0
 
     def affordable_quantity(self, entry_price: float, lot_size: int, available_funds: float, side: str) -> int:
         if lot_size <= 0 or entry_price <= 0 or available_funds <= 0:

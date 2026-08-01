@@ -34,6 +34,7 @@ class AutoTraderService:
         latency_metrics: Any | None = None,
         fast_scan_context_service: Any | None = None,
         fast_candidate_promoter: Any | None = None,
+        decision_evidence_repository: Any | None = None,
     ) -> None:
         self.scanner_factory = scanner_factory
         self.order_service_factory = order_service_factory
@@ -43,6 +44,7 @@ class AutoTraderService:
         self.latency_metrics = latency_metrics
         self.fast_scan_context_service = fast_scan_context_service
         self.fast_candidate_promoter = fast_candidate_promoter
+        self.decision_evidence_repository = decision_evidence_repository
         self.task: asyncio.Task[None] | None = None
         self.running = False
         self.config: dict[str, Any] = {}
@@ -396,6 +398,22 @@ class AutoTraderService:
                     "instrument_token": event.get("instrument_token"),
                 }
             )
+            if self.decision_evidence_repository is not None:
+                plan = decision.get("plan") if isinstance(decision.get("plan"), dict) else {}
+                promotion = decision.get("promotion") if isinstance(decision.get("promotion"), dict) else {}
+                self.decision_evidence_repository.record_decision(
+                    decision_type="fast_rally",
+                    final_state="ARMED" if promotion.get("registered") else "OBSERVE",
+                    symbol="BANKNIFTY",
+                    tradingsymbol=str(plan.get("tradingsymbol")) if plan.get("tradingsymbol") else None,
+                    context={"rally_event": event, "cached_decision": decision},
+                    gate_results={"passed": bool(decision.get("passed")), "reason": decision.get("reason")},
+                    transition_timestamps={
+                        "rally_at": event.get("timestamp"),
+                        "validation_started_at": scan_started.isoformat(sep=" "),
+                        "validation_completed_at": scan_completed.isoformat(sep=" "),
+                    },
+                )
             self.fast_validation_completed_count += 1
             if bool(decision.get("passed")):
                 self.fast_validation_passed_count += 1
@@ -492,12 +510,6 @@ class AutoTraderService:
 
     def _place_once(self, signal: Signal, opportunity_id: int | None = None) -> dict[str, Any] | None:
         order_key = self._order_key(signal)
-        order_mode = str(self.config.get("order_mode") or "paper").lower()
-        if order_mode == "live" and order_key in self.seen_order_keys:
-            return None
-
-        if order_mode == "live":
-            self.seen_order_keys.add(order_key)
         service = self.order_service_factory()
         result = service.place_signal_order(
             signal,

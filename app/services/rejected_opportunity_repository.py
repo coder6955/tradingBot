@@ -280,6 +280,27 @@ class RejectedOpportunityRepository:
             record.later_evaluated_at = ist_now_naive()
             session.commit()
             session.refresh(record)
+            if record.episode_key:
+                try:
+                    from app.services.decision_evidence_repository import DecisionEvidenceRepository
+
+                    DecisionEvidenceRepository().record_outcome(
+                        episode_key=str(record.episode_key),
+                        horizon=str(outcome_timeframe or "session_cutoff"),
+                        outcome_source=str(outcome_source or "rejected_opportunity_outcome"),
+                        outcome={
+                            "outcome": outcome,
+                            "exit_price": exit_price,
+                            "outcome_at": outcome_at,
+                            "outcome_minutes": outcome_minutes,
+                            "ambiguous": ambiguous,
+                            "confidence": confidence,
+                            "rejected": True,
+                            "counterfactual_order_placed": False,
+                        },
+                    )
+                except Exception:
+                    pass
             return record
         finally:
             session.close()

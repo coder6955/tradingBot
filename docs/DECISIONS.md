@@ -269,3 +269,31 @@ This file records decisions that should survive individual conversations and cod
 **Decision:** Expiry-day buying policy is applied during selection, so a blocked same-day expiry moves selection to the next broker-listed expiry. Ranking prefers executable liquidity, configured DTE and delta without requiring unavailable Greeks. Exit profiles book one exchange-valid whole-lot partial at a configured R multiple only when at least two lots exist, then trail the runner from premium high-watermark using option ATR and original risk. Trend/expansion setups receive a longer conditional time stop.  
 **Why:** Selecting a contract that later fails the expiry gate wastes the setup; fixed full-target exits truncate trend days; fractional-lot partials are not executable; and one universal 15-minute stop ignores setup behavior.  
 **Consequence:** One-lot trades remain indivisible, normal/reversal time stops remain tighter, live partials stay disabled until broker-fill confirmation is built, and chronological after-cost evidence is still required before any live promotion.
+
+## D039 — Separate eligibility, evidence classification, risk, exposure, and execution
+
+**Status:** Accepted  
+**Decision:** `RiskPolicyService` is the only tier and stop-risk sizing authority. Scanner score, indicator agreement, and heuristic confidence cannot select a tier. Active paper/live default to base risk; higher tiers require explicit policy enablement and versioned chronological after-cost evidence.  
+**Why:** A qualified setup can still be risk-infeasible, and a high uncalibrated score is not evidence that loss size should increase.  
+**Consequence:** The supported 1/2/3/5% spectrum is infrastructure, not an aggressive active policy. Invalid configured ceilings fail closed, 5% is a hard process limit, and one-lot infeasibility returns quantity zero.
+
+## D040 — Put every paper and live entry behind one final pre-order authority
+
+**Status:** Accepted  
+**Decision:** Every `OrderService` route invokes `PreOrderRiskService` immediately before episode reservation and submission. It validates account state, active tier, modeled stop loss, daily/open risk, quantity, liquidity, session, duplicates, and conditional live protections.  
+**Why:** Paper bypasses and route-specific risk implementations corrupt research and can diverge from live behavior.  
+**Consequence:** Paper and live share strategy/account eligibility and differ only in execution mechanics and broker protections. Scanner quantity is provisional and cannot authorize an order.
+
+## D041 — Reserve setup episodes transactionally
+
+**Status:** Accepted  
+**Decision:** Strategy/risk-policy/contract/setup/trigger/date/window identity owns an atomic `AVAILABLE -> RESERVED -> ORDER_PENDING -> OPEN -> CLOSED` persistence lifecycle. `AVAILABLE` maps to canonical `PREPARED`, `RESERVED` maps to `TRIGGERED`, and the full canonical transition vocabulary also includes `UNAVAILABLE`, `OBSERVE`, `ARMED`, `EXITING`, `INVALIDATED`, and `EXPIRED`.  
+**Why:** In-memory or live-only duplicate sets cannot prevent concurrent scanner, fast, WebSocket, paper, manual, and live routes from entering the same opportunity.  
+**Consequence:** A failed pre-submission attempt releases its reservation; an accepted order holds the episode until closure. Terminal episode identity cannot be reused; a new pullback/breakout requires a new trigger identity or episode window.
+
+## D042 — Keep risk research immutable and shadow-only
+
+**Status:** Accepted  
+**Decision:** Scanner, fast and pre-order decisions append versioned context/gate/risk records. Outcomes append separately. Shadow policies calculate 1/2/3/5% counterfactual quantities and outcomes but expose `counterfactual_can_reach_order_router=false`.  
+**Why:** Reconstructing risk decisions from combined confidence or mutable rows cannot establish independent expectancy or safe tier promotion.  
+**Consequence:** Fast validation retains zero database and REST I/O; persistence occurs after its measured critical section. Risk-of-ruin remains null unless independent sample size and distribution assumptions are disclosed.

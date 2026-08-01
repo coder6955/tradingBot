@@ -8,6 +8,8 @@ from app.config import settings
 from app.models import Signal
 from app.providers.kite_provider import KiteProvider
 from app.services.active_price_feed import ActiveTradePriceFeed
+from app.services.account_funds_service import AccountFundsService
+from app.services.pre_order_risk_service import PreOrderRiskService
 from app.services.paper_trading_service import PaperTradingService
 from app.services.risk_management_service import RiskManagementService
 from app.services.time_utils import ist_today
@@ -30,16 +32,24 @@ class OrderService:
         live_safety_checker: Callable[[], dict[str, Any]] | None = None,
         market_data_coordinator: MarketDataCoordinator | None = None,
         latency_metrics: Any | None = None,
+        pre_order_risk_service: PreOrderRiskService | None = None,
     ) -> None:
         self.kite_provider = kite_provider or KiteProvider()
         self.paper_trading_service = paper_trading_service or PaperTradingService()
         self.trade_setup_service = trade_setup_service or TradeSetupService()
         self.trade_repository = trade_repository or TradeRepository()
-        self.risk_management_service = risk_management_service or RiskManagementService(self.trade_repository)
+        self.risk_management_service = risk_management_service or RiskManagementService(
+            self.trade_repository,
+            AccountFundsService(self.kite_provider),
+        )
+        self.latency_metrics = latency_metrics
+        self.pre_order_risk_service = pre_order_risk_service or PreOrderRiskService(
+            risk_management_service=self.risk_management_service,
+            latency_metrics=self.latency_metrics,
+        )
         self.active_price_feed = active_price_feed
         self.live_safety_checker = live_safety_checker
         self.market_data_coordinator = market_data_coordinator
-        self.latency_metrics = latency_metrics
         self._banknifty_underlying_token: int | None = None
         self._protective_failure_blocked = False
         self._protective_failure_reason: str | None = None
@@ -59,58 +69,100 @@ class OrderService:
         mode = (order_mode or settings.default_order_mode or "paper").lower()
         live_requested = mode == "live" and confirm_live
         quality = execution_quality_override if execution_quality_override and not live_requested else self._execution_quality(signal)
-        if settings.enforce_execution_quality and not quality["passed"]:
-            raise ValueError("execution quality blocked order: " + "; ".join(str(reason) for reason in quality["reasons"]))
+        effective_mode = "live" if live_requested else "paper"
+        safety = self.live_safety_checker() if live_requested and self.live_safety_checker is not None else {"blocked": False}
+        account_equity = None
+        if live_requested and settings.live_trading_mode and not settings.paper_trading_mode:
+            try:
+                account_equity = self._available_cash(self.kite_provider.margins())
+            except Exception:
+                account_equity = 0.0
+        pre_order = self.pre_order_risk_service.evaluate_and_reserve(
+            signal,
+            order_mode=effective_mode,
+            live_requested=live_requested,
+            execution_quality=quality,
+            metadata=metadata,
+            account_equity_override=account_equity,
+            live_safety=safety,
+        )
+        if not pre_order["passed"]:
+            raise ValueError("pre-order risk blocked order: " + "; ".join(str(reason) for reason in pre_order["rejection_reasons"]))
+        requested_quantity = int(signal.quantity)
+        signal.quantity = int(pre_order["approved_quantity"])
+        factors = dict(signal.factor_scores) if isinstance(signal.factor_scores, dict) else {}
+        actual_risk_decision = dict(pre_order["risk_decision"])
+        actual_risk_decision["approved_order_quantity"] = int(pre_order["approved_quantity"])
+        actual_risk_decision["estimated_total_loss_at_stop"] = round(
+            int(pre_order["approved_quantity"]) * float(actual_risk_decision.get("risk_per_unit") or 0.0), 2
+        )
+        factors["risk_decision"] = actual_risk_decision
+        factors["shadow_risk_decisions"] = dict(pre_order["shadow_risk_decisions"])
+        factors["episode"] = dict(pre_order["episode"])
+        signal.factor_scores = factors
+        episode = pre_order["episode"]
+        episode_key = str(episode["episode_key"])
+        reservation_token = str(episode["reservation_token"])
+        if not self.pre_order_risk_service.episode_reservation_service.mark_order_pending(episode_key, reservation_token):
+            self.pre_order_risk_service.episode_reservation_service.release(episode_key, reservation_token, reason="episode_transition_failed")
+            raise ValueError("pre-order risk blocked order: EPISODE_ORDER_PENDING_TRANSITION_FAILED")
         if not live_requested:
-            trade = self.paper_trading_service.execute_trade(
-                symbol=signal.tradingsymbol or signal.symbol,
-                entry_price=float(signal.entry_price or 0.0),
-                quantity=signal.quantity,
-                stop_loss=float(signal.stop_loss or 0.0),
-                action=signal.action,
-                metadata=metadata,
-            )
-            record = self.trade_repository.create_trade(
-                signal,
-                mode="paper",
-                status="filled",
-                requested_quantity=signal.quantity,
-                placed_quantity=signal.quantity,
-                order_response=trade,
-                opportunity_id=opportunity_id,
-                notes=self._metadata_note(metadata),
-            )
+            try:
+                trade = self.paper_trading_service.execute_trade(
+                    symbol=signal.tradingsymbol or signal.symbol,
+                    entry_price=float(signal.entry_price or 0.0),
+                    quantity=signal.quantity,
+                    stop_loss=float(signal.stop_loss or 0.0),
+                    action=signal.action,
+                    metadata=metadata,
+                )
+                record = self.trade_repository.create_trade(
+                    signal,
+                    mode="paper",
+                    status="filled",
+                    requested_quantity=requested_quantity,
+                    placed_quantity=signal.quantity,
+                    order_response=trade,
+                    opportunity_id=opportunity_id,
+                    notes=self._metadata_note(metadata),
+                )
+                self.pre_order_risk_service.episode_reservation_service.mark_open(episode_key, reservation_token, trade_id=record.id)
+            except Exception:
+                self.pre_order_risk_service.episode_reservation_service.release(episode_key, reservation_token, reason="paper_order_failed")
+                raise
             self._subscribe_active_trade_tokens(signal)
             self._record_latency("order_service_start_to_ack", order_started, signal=signal, mode="paper")
-            return {"status": "paper", "trade": trade, "trade_id": record.id, "execution_quality": quality}
+            return {
+                "status": "paper",
+                "trade": trade,
+                "trade_id": record.id,
+                "requested_quantity": requested_quantity,
+                "placed_quantity": signal.quantity,
+                "execution_quality": quality,
+                "pre_order_risk": pre_order,
+            }
 
-        if not settings.live_trading_mode or settings.paper_trading_mode:
-            raise ValueError("live order blocked: set LIVE_TRADING_MODE=true and PAPER_TRADING_MODE=false")
-        if settings.require_broker_protective_stop_for_live_entry and not settings.enable_broker_emergency_sl:
-            raise ValueError("live order blocked: broker-side protective stop is required but ENABLE_BROKER_EMERGENCY_SL is false")
         if self._protective_failure_blocked:
+            self.pre_order_risk_service.episode_reservation_service.release(episode_key, reservation_token, reason="prior_protective_stop_failure")
             raise ValueError(f"live order blocked: previous protective stop failure: {self._protective_failure_reason or 'unknown'}")
-        safety = self.live_safety_checker() if self.live_safety_checker is not None else {"blocked": False}
-        if safety.get("blocked"):
-            raise ValueError(f"live order blocked by safety check: {safety.get('reason') or 'unknown'}")
-
-        risk = self.risk_management_service.evaluate_signal(signal.symbol)
-        if not risk["passed"]:
-            raise ValueError("risk guard blocked order: " + "; ".join(str(reason) for reason in risk["reasons"]))
-
-        quantity = self._live_affordable_quantity(signal)
+        quantity = self._live_affordable_quantity(signal, available_funds=account_equity)
         if quantity <= 0:
+            self.pre_order_risk_service.episode_reservation_service.release(episode_key, reservation_token, reason="live_funds_below_one_lot")
             raise ValueError("available Zerodha funds are insufficient for one option lot")
 
         submission_started = time.perf_counter()
-        result = self.kite_provider.place_order(
-            tradingsymbol=str(signal.tradingsymbol),
-            exchange=signal.exchange,
-            transaction_type=transaction_type,
-            quantity=quantity,
-            order_type="MARKET",
-            product=settings.default_product,
-        )
+        try:
+            result = self.kite_provider.place_order(
+                tradingsymbol=str(signal.tradingsymbol),
+                exchange=signal.exchange,
+                transaction_type=transaction_type,
+                quantity=quantity,
+                order_type="MARKET",
+                product=settings.default_product,
+            )
+        except Exception:
+            self.pre_order_risk_service.episode_reservation_service.release(episode_key, reservation_token, reason="live_order_submission_failed")
+            raise
         self._record_latency("live_submission_to_broker_ack", submission_started, signal=signal, mode="live")
         self._record_latency("order_submission_to_broker_acknowledgement", submission_started, signal=signal, mode="live")
         order_id = result.get("order_id") if isinstance(result, dict) else None
@@ -118,13 +170,14 @@ class OrderService:
             signal,
             mode="live",
             status=str(result.get("status", "submitted")) if isinstance(result, dict) else "submitted",
-            requested_quantity=signal.quantity,
+            requested_quantity=requested_quantity,
             placed_quantity=quantity,
             order_response=result,
             broker_order_id=str(order_id) if order_id else None,
             opportunity_id=opportunity_id,
         )
         broker_emergency_sl = self._broker_emergency_protection(signal, record=record, quantity=quantity, entry_order_id=str(order_id) if order_id else None)
+        self.pre_order_risk_service.episode_reservation_service.mark_open(episode_key, reservation_token, trade_id=record.id)
         if settings.require_broker_protective_stop_for_live_entry and broker_emergency_sl.get("enabled") and broker_emergency_sl.get("reason") not in {None, "entry order is not confirmed filled yet"} and not broker_emergency_sl.get("submitted"):
             self._protective_failure_blocked = True
             self._protective_failure_reason = str(broker_emergency_sl.get("reason") or "protective stop submission failed")
@@ -133,11 +186,12 @@ class OrderService:
         return {
             "status": "live",
             "order": result,
-            "requested_quantity": signal.quantity,
+            "requested_quantity": requested_quantity,
             "placed_quantity": quantity,
             "trade_id": record.id,
             "execution_quality": quality,
             "broker_emergency_sl": broker_emergency_sl,
+            "pre_order_risk": pre_order,
         }
 
     def _record_latency(self, name: str, started: float, *, signal: Signal, mode: str) -> None:
@@ -206,12 +260,13 @@ class OrderService:
         except ValueError:
             return None
 
-    def _live_affordable_quantity(self, signal: Signal) -> int:
+    def _live_affordable_quantity(self, signal: Signal, *, available_funds: float | None = None) -> int:
         if signal.side.upper() == "SELL":
             return signal.quantity
 
-        margins = self.kite_provider.margins()
-        available_funds = self._available_cash(margins)
+        if available_funds is None:
+            margins = self.kite_provider.margins()
+            available_funds = self._available_cash(margins)
         affordable_quantity = self.trade_setup_service.affordable_quantity(
             entry_price=float(signal.entry_price or 0.0),
             lot_size=signal.lot_size or signal.quantity,
@@ -254,6 +309,8 @@ class OrderService:
         sell_depth = depth.get("sell", []) if isinstance(depth, dict) else []
         bid = self._float(buy_depth[0].get("price")) if buy_depth else 0.0
         ask = self._float(sell_depth[0].get("price")) if sell_depth else 0.0
+        bid_depth_quantity = sum(int(float(level.get("quantity") or 0)) for level in buy_depth if isinstance(level, dict))
+        ask_depth_quantity = sum(int(float(level.get("quantity") or 0)) for level in sell_depth if isinstance(level, dict))
         reference = ask if signal.side.upper() == "BUY" and ask > 0 else last_price
         reasons: list[str] = []
         if last_price < settings.min_execution_quote_price:
@@ -275,6 +332,8 @@ class OrderService:
                 "last_price": last_price,
                 "bid": bid,
                 "ask": ask,
+                "bid_depth_quantity": bid_depth_quantity,
+                "ask_depth_quantity": ask_depth_quantity,
                 "spread_pct": round(spread_pct, 2),
                 "entry_price": entry_price,
                 "deviation_pct": round(deviation_pct, 2),

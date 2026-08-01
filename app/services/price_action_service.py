@@ -17,10 +17,11 @@ class PriceActionService:
         if price <= 0:
             return {"score": 0, "passed": False, "reasons": ["underlying price is unavailable"], "details": {}}
 
-        if bool(snapshot.get("ema_alignment")) == bullish:
+        ema_alignment = snapshot.get("ema_alignment")
+        if ema_alignment is not None and bool(ema_alignment) == bullish:
             score += 18
         else:
-            reasons.append("EMA trend alignment is weak")
+            reasons.append("EMA trend alignment is unavailable" if ema_alignment is None else "EMA trend alignment is weak")
 
         vwap = float(snapshot.get("vwap") or 0.0)
         if vwap > 0 and ((bullish and price >= vwap) or ((not bullish) and price <= vwap)):
@@ -28,10 +29,11 @@ class PriceActionService:
         else:
             reasons.append("price is not favorably placed against VWAP")
 
-        if bool(snapshot.get("macd_positive")) == bullish:
+        macd_positive = snapshot.get("macd_positive")
+        if macd_positive is not None and bool(macd_positive) == bullish:
             score += 12
         else:
-            reasons.append("MACD is not aligned with trade direction")
+            reasons.append("MACD direction is unavailable" if macd_positive is None else "MACD is not aligned with trade direction")
 
         if bool(snapshot.get("volume_confirmed")):
             score += 10
@@ -97,6 +99,10 @@ class PriceActionService:
                 "chop_filter": chop or "",
                 "hard_block": bool(hard_block_reasons),
                 "hard_block_reasons": list(dict.fromkeys(hard_block_reasons)),
+                "indicator_availability": {
+                    "ema_alignment": "unknown" if ema_alignment is None else "available",
+                    "macd_positive": "unknown" if macd_positive is None else "available",
+                },
             },
         }
 

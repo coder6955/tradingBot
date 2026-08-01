@@ -568,6 +568,7 @@ class KiteFeed:
                 .filter(
                     Candle.symbol == symbol.upper(),
                     Candle.timeframe == "5minute",
+                    Candle.is_generated == 0,
                     Candle.timestamp >= session_start,
                     Candle.timestamp < current_bucket,
                 )

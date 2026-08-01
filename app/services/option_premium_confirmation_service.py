@@ -197,6 +197,22 @@ class OptionPremiumConfirmationService:
                 "volume_expansion": volume_expansion,
                 "participation_confirmed": participation_confirmed,
                 "spread_pct": round(spread_pct, 2),
+                "candle_completion_policy": (
+                    "building_websocket_candle_allowed_for_intrabar_premium_confirmation"
+                    if source == "websocket_builder"
+                    else "stored_candles_are_expected_completed"
+                ),
+                "last_candle_state": "building" if source == "websocket_builder" else "completed",
+                "building_candle_used": source == "websocket_builder",
+                "candle_provenance": [
+                    {
+                        "timestamp": str(getattr(candle, "timestamp", "")),
+                        "source": str(getattr(candle, "source", source)),
+                        "generated": str(getattr(candle, "source", "")) == "websocket_gap_fill",
+                        "state": "building" if source == "websocket_builder" and index == len(candles) - 1 else "completed",
+                    }
+                    for index, candle in enumerate(candles)
+                ],
             },
         }
 

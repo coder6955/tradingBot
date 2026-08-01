@@ -55,6 +55,18 @@ flowchart LR
     Sync --> Trades
 ```
 
+## Authoritative risk and episode boundary
+
+`RiskPolicyService` is the pure position-risk authority. It receives an immutable `RiskDecisionContext`, approves or downgrades the requested tier, models entry/exit slippage and allocated costs, and returns the approved percentage/amount, risk per unit/lot, maximum quantity, and structured reasons. Scanner score, indicator count, and heuristic confidence are not inputs. The process hard ceiling is 5%; an invalid configured ceiling fails closed.
+
+The configured tier spectrum is 1%, 2%, 3%, and 5%, but active paper and live policy default to `TIER_1_BASE`. `ENABLE_VALIDATED_HIGHER_RISK_ACTIVE=false` provides a second fail-closed control, and exceptional live risk additionally requires `ENABLE_EXCEPTIONAL_LIVE_RISK=true`. Shadow evaluation computes counterfactual quantities for all tiers and persists them with `counterfactual_can_reach_order_router=false`; it never changes the active quantity.
+
+`PreOrderRiskService` is the final authority shared by all `OrderService` callers. Scheduled automation, manual paper/live requests, armed WebSocket entries, and promoted fast plans therefore pass the same account, tier, stop-loss, quantity, session, execution, duplicate, and conditional live-safety checks. Paper/live differ only after approval in fill mechanics and broker protection. Scanner sizing is provisional; final order quantity is recomputed from current executable evidence.
+
+`EpisodeReservationService` derives a strategy/risk-policy/contract/setup/trigger/time-window identity and atomically moves it through `AVAILABLE -> RESERVED -> ORDER_PENDING -> OPEN -> CLOSED`. These persistence labels map to the canonical lifecycle as `AVAILABLE=PREPARED` and `RESERVED=TRIGGERED`; the shared transition vocabulary is `UNAVAILABLE -> OBSERVE -> PREPARED -> ARMED -> TRIGGERED -> ORDER_PENDING -> OPEN -> EXITING -> CLOSED`, with terminal `INVALIDATED` and `EXPIRED` states. Concurrent or repeated routes cannot acquire the same episode. Pre-submission failures release their reservation; an accepted order retains an `OPEN` lock until the trade closes.
+
+`DecisionEvidenceRepository` appends immutable scanner, fast-rally, and pre-order records to `decision_risk_evidence`. It stores the full context, individual gates, active risk decision, isolated shadow decisions, lineage, and transition timestamps. Later outcomes are appended separately to `decision_outcomes`, so historical decision evidence is never rewritten. Persistence occurs outside cached fast validation; the zero-REST/zero-database validation budget is unchanged.
+
 ## Runtime composition
 
 `app/api.py` creates shared runtime objects rather than letting each request build an independent trading system. Important shared objects include:
@@ -72,7 +84,7 @@ flowchart LR
 | `ExecutablePriceService` | Converts long-option bid depth into a conservative quantity-aware sell price and classifies whether the quote is safe for paper targets or live software exits. |
 | `BankNiftyOptionPrewarmService` | Keeps the nearest-expiry ATM ± configured strike depth CE/PE band warm. The current default depth is 3. |
 | `BankNiftyFastRallyService` | Detects short-window Bank Nifty acceleration and requests an immediate scan. |
-| `AutoTraderService` | Runs scheduled scans, serialized cache-only fast validations, explicit call-budget accounting, optional order routing, and duplicate live-order protection. |
+| `AutoTraderService` | Runs scheduled scans, serialized cache-only fast validations, explicit call-budget accounting, and optional routing through the shared transactional episode/risk authority. |
 | `ScannerService` | Builds and evaluates Bank Nifty opportunities, records accepted/rejected outcomes, and registers early armed setups. |
 | `MultiTimeframeContextService` | Loads only completed 1-minute and 5-minute Bank Nifty candles in one bounded query. The 5-minute frame owns setup/regime/day structure; 1-minute owns entry timing. |
 | `MarketRegimeService` | Classifies structure, volatility, participation, location, and execution into a confidence/uncertainty-aware option-buying regime with invalidation. |
@@ -80,8 +92,11 @@ flowchart LR
 | `TradeCandidateRankingService` | Orders candidates using reward/risk, spread, costs, liquidity, uncertainty and policy quality without mislabeling utility as probability. |
 | `TradeSetupService` | Resolves expiry, ranks executable contracts using ask/bid, spread, depth, OI, volume, Greeks/DTE when available, applies stickiness, and builds premium-based SL/targets/quantity. |
 | `ArmedEntryTrackerService` | Persists and recovers selected option setups, reports subscription health truthfully, tracks ticks, and executes confirmed paper entries. |
-| `OrderService` | Validates scanner-originated Bank Nifty option-buying signals and routes them to paper or explicitly authorized live execution. |
-| `RiskManagementService` | Enforces account-level daily loss, trade count, stop count, cooldown, open-trade, and exposure limits. |
+| `OrderService` | Validates scanner-originated Bank Nifty option-buying signals, invokes the shared pre-order authority, and routes only reserved/approved episodes to paper or explicitly authorized live execution. |
+| `RiskManagementService` | Reports account-level daily loss, trade/stop/loss-streak, cooldown, open-trade, premium, planned-risk, and open-risk state. |
+| `RiskPolicyService` / `PreOrderRiskService` | Separates setup eligibility from evidence-gated risk tiers, enforces the hard 5% ceiling and cost-aware stop-risk sizing, and provides one final paper/live gate. |
+| `EpisodeReservationService` | Owns deterministic episode keys and atomic reservation/order/open/closed transitions across every entry route. |
+| `DecisionEvidenceRepository` | Appends immutable decision/risk contexts and separate counterfactual/realized outcome records. |
 | `ActiveTradePriceFeed` | Uses fresh WebSocket ticks first and controlled broker polling fallback for active trades. |
 | `TradeExitService` | Evaluates deterministic stop/time/trailing/invalidation/target priority against executable bid/depth, records simultaneous triggers, and performs paper/live square-off. |
 | `BrokerSyncService` | Reconciles local live trades, broker positions, entry/exit orders, and protective disaster stops; protection failures persistently block new live entries. |
@@ -177,7 +192,7 @@ Time-stop duration, trailing activation, partial R and target style come from th
 
 ## Latency measurement
 
-The in-memory latency report always exposes the required path metrics even with zero samples: exchange-to-receive, receive-to-rally detection, detection-to-scan, scheduled and fast scan durations, scan-to-arm, arm-to-confirmation, confirmation-to-submission, submission-to-acknowledgement, acknowledgement-to-fill, and exit trigger-to-submission/acknowledgement/fill. Every metric reports p50/p95/p99, sample count and missing count; queue drop totals are separate. Broker/database consumers are queued off the WebSocket event callback, while latency recording is bounded in-memory work.
+The in-memory latency report always exposes the required path metrics even with zero samples: exchange-to-receive, receive-to-rally detection, detection-to-scan, scheduled and fast scan durations, armed-tick processing, risk-tier evaluation, final pre-order validation, scan-to-arm, arm-to-confirmation, confirmation-to-submission, submission-to-acknowledgement, acknowledgement-to-fill, and exit trigger-to-submission/acknowledgement/fill. Every metric reports p50/p95/p99, sample count and missing count; queue drop totals are separate. Broker/database consumers are queued off the WebSocket event callback, while latency recording is bounded in-memory work.
 
 ## Gap semantics
 
@@ -253,6 +268,7 @@ Use these endpoints to understand the running system:
 |---|---|
 | `GET /runtime/status` | High-level runtime status. |
 | `GET /runtime/latency` | p50/p95/p99/max/sample and last-event latency detail with queue drops. |
+| `GET /risk/policy/status` | Active/shadow tier configuration, unbreakable process ceiling, activation switches, and explicit policy conflicts. |
 | `GET /market-data/pipeline-status` | Canonical candle coverage, raw-tick capture, fast context, WebSocket queues, and latency. |
 | `GET /automation/status` | Automation lifecycle and worker status. |
 | `GET /kite/websocket/status` | Connection, owners, subscriptions, queue, gaps, candles, and fast-rally status. |

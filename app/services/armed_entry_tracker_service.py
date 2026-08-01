@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta
@@ -276,21 +277,30 @@ class ArmedEntryTrackerService:
         )
 
     def on_tick(self, tick: WebSocketTick) -> list[dict[str, Any]]:
+        started = time.perf_counter()
         token = self._int(tick.instrument_token)
-        if token is None:
-            return []
-        triggered: list[dict[str, Any]] = []
-        with self._lock:
-            setup_ids = [
-                setup.setup_id
-                for setup in self._setups.values()
-                if setup.instrument_token == token and setup.latest_state in self.ACTIVE_STATES
-            ]
-        for setup_id in setup_ids:
-            result = self.evaluate_tick(setup_id, tick)
-            if result:
-                triggered.append(result)
-        return triggered
+        try:
+            if token is None:
+                return []
+            triggered: list[dict[str, Any]] = []
+            with self._lock:
+                setup_ids = [
+                    setup.setup_id
+                    for setup in self._setups.values()
+                    if setup.instrument_token == token and setup.latest_state in self.ACTIVE_STATES
+                ]
+            for setup_id in setup_ids:
+                result = self.evaluate_tick(setup_id, tick)
+                if result:
+                    triggered.append(result)
+            return triggered
+        finally:
+            if self.latency_metrics is not None:
+                self.latency_metrics.record(
+                    "armed_tick_processing_duration",
+                    (time.perf_counter() - started) * 1000.0,
+                    detail={"instrument_token": token},
+                )
 
     def evaluate_tick(self, setup_id: str, tick: WebSocketTick) -> dict[str, Any] | None:
         with self._lock:

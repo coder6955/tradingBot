@@ -114,6 +114,22 @@ Weighted scoring ranks candidates only after primary gates pass. It does not app
 
 Every accepted and rejected candidate should be logged with its reasons and score components.
 
+### Risk is a separate authority
+
+Eligibility and scanner ranking do not select position risk. The scanner attaches a base-tier request and provisional quantity only. Immediately before every paper or live order, `PreOrderRiskService` builds one immutable context and asks `RiskPolicyService` for:
+
+1. Requested and approved tier.
+2. Approved risk percentage and rupee amount.
+3. Entry/stop values after modeled slippage and allocated costs.
+4. Risk per unit and exchange lot.
+5. Maximum quantity supported by risk budget and entry/stop-exit depth.
+6. Downgrade or rejection reasons.
+7. Active and isolated shadow-policy results.
+
+The active policy defaults to `TIER_1_BASE` for both paper and live. Higher tiers require independent chronological after-cost evidence plus explicit policy enablement. `ABSOLUTE_MAX_RISK_PER_TRADE_PERCENT` cannot safely exceed 5%; invalid configuration rejects. When one lot does not fit, quantity is zero and the entry is rejected—risk percentage is never silently increased.
+
+Daily planned risk, realized loss, total open risk, Bank Nifty open risk, drawdown, loss streak, trade/stop counts, cooldown, premium exposure and open positions can downgrade or reject a tier. A per-trade tier larger than the remaining daily/open policy is rejected and reported as a configuration/policy conflict; neither limit is silently overridden.
+
 Before final timing, one bulk read supplies completed 1m/5m state. Five-minute data defines setup direction, regime, day/opening structure and candle confirmation; one-minute data defines entry timing. Tick data confirms execution. No daily, 15-minute or 30-minute candle participates in live or historical decisions.
 
 The setup family supplies allowed regimes, momentum phases and an exit profile. Its score adjustment is capped. Candidate ranking applies spread and conservative costs, reward/risk, liquidity and uncertainty. Until calibrated evidence exists, ranking utility is neither expected profit nor probability.
@@ -126,11 +142,15 @@ An early setup may be armed when:
 - Required data-quality, freshness, option-quality, market-regime, and price-action factors pass.
 - The contract, trigger, premium, SL, targets, and quantity are valid.
 - The account-level risk preflight passes.
+- At least one base-risk lot is feasible after the cost-aware stop-risk model.
+- Current session, bid/ask, emergency spread, quantity-safe entry/exit depth, expiry/token, and non-pathological option quality pass.
 - `ArmedEntryTrackerService.register_from_scan()` actually returns `registered=true`.
 
 The scanner reports `ARMED_FOR_ENTRY` only after successful registration. `subscription_state` distinguishes fresh-tick verification, broker subscription awaiting its first fresh tick, and a disconnected queued subscription. A subscription failure cancels registration. Valid setups are persisted and recovered with their owner subscription after restart.
 
 The default armed lifetime is 90 seconds. Repeated scans for the same mode, action, token, expiry, and strike update the logical setup rather than creating uncontrolled duplicates.
+
+`EARLY_ARM_MIN_SCORE` remains diagnostic; it has no eligibility or risk authority. Any unvalidated higher-tier request on an early setup is downgraded to active base risk while the requested tier remains available only as shadow evidence.
 
 ## 6. Armed-entry state machine
 
@@ -194,7 +214,9 @@ The resulting signal is passed through `OrderService` with event metadata and pe
 - Has valid quantity, entry, stop, target, expiry, and scanner strategy metadata. A below-legacy-threshold score additionally requires current-version proof that scanner primary gates passed and score was ranking-only.
 - Passes execution-quality checks.
 
-Without explicit live confirmation, the order is routed to paper even if `order_mode=live` was requested. Live execution additionally requires:
+Without explicit live confirmation, the order is routed to paper even if `order_mode=live` was requested. Before either route, one deterministic episode identity is atomically reserved. A repeat scanner, fast, WebSocket, manual, or automation attempt for an episode already `RESERVED`, `ORDER_PENDING`, `OPEN`, or `CLOSED` cannot create another order. Pre-submission failure releases the reservation; successful submission converts it into an open position lock.
+
+Both paper and live then pass the same final account/risk authority. Live execution additionally requires:
 
 - `LIVE_TRADING_MODE=true`.
 - `PAPER_TRADING_MODE=false`.
