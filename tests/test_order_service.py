@@ -139,6 +139,11 @@ class CapturingTradeRepository:
         return []
 
 
+class FailingCreateTradeRepository(CapturingTradeRepository):
+    def create_trade(self, signal, **kwargs):  # type: ignore[no-untyped-def]
+        raise RuntimeError("durable trade persistence failed")
+
+
 class OrderServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         AccountFundsService.invalidate_cache()
@@ -198,6 +203,31 @@ class OrderServiceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "ACCOUNT_RISK_GATES_FAILED"):
             service.place_signal_order(self._signal(), order_mode="paper")
         self.assertEqual(paper.positions, [])
+
+    def test_paper_persistence_failure_rolls_back_position_and_releases_episode(self) -> None:
+        from app.services.database import SetupEpisodeRecord, get_session
+
+        paper = PaperTradingService()
+        service = OrderService(
+            kite_provider=FailingKiteProvider(),  # type: ignore[arg-type]
+            paper_trading_service=paper,
+            trade_repository=FailingCreateTradeRepository(),  # type: ignore[arg-type]
+            risk_management_service=PassingRiskService(),  # type: ignore[arg-type]
+        )
+        with self.assertRaisesRegex(RuntimeError, "durable trade persistence failed"):
+            service.place_signal_order(
+                self._signal(),
+                order_mode="paper",
+                metadata={"trigger_identifier": "paper-persistence-failure"},
+            )
+        self.assertEqual(paper.positions, [])
+        session = get_session()
+        try:
+            episode = session.query(SetupEpisodeRecord).one()
+            self.assertEqual(episode.state, "AVAILABLE")
+            self.assertEqual(episode.last_transition_reason, "paper_order_failed")
+        finally:
+            session.close()
 
     def test_rejects_non_banknifty_signal(self) -> None:
         service = OrderService(kite_provider=FailingKiteProvider())  # type: ignore[arg-type]

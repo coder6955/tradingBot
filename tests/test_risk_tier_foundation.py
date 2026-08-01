@@ -245,6 +245,32 @@ class RiskTierFoundationTests(unittest.TestCase):
             thread.join()
         self.assertEqual(sum(1 for row in results if row.get("acquired")), 1)
 
+    def test_concurrent_expired_reservation_reclaim_has_one_winner(self) -> None:
+        service = EpisodeReservationService()
+        signal = self._signal()
+        first = service.reserve(signal, metadata={"trigger_identifier": "expired-concurrent"})
+        session = get_session()
+        try:
+            record = session.query(SetupEpisodeRecord).filter(SetupEpisodeRecord.episode_key == first["episode_key"]).one()
+            record.reservation_expires_at = ist_now_naive() - timedelta(seconds=1)
+            session.commit()
+        finally:
+            session.close()
+
+        barrier = threading.Barrier(6)
+        results: list[dict[str, object]] = []
+
+        def reclaim() -> None:
+            barrier.wait()
+            results.append(service.reserve(signal, metadata={"trigger_identifier": "expired-concurrent"}))
+
+        threads = [threading.Thread(target=reclaim) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(sum(1 for row in results if row.get("acquired")), 1)
+
     def test_pre_order_persists_active_and_shadow_without_shadow_quantity_authority(self) -> None:
         service = PreOrderRiskService(risk_management_service=PassingAccountRisk())
         result = service.evaluate_and_reserve(

@@ -101,6 +101,14 @@ class PaperTradingService:
         })
         return self.closed_trades[-1]
 
+    def rollback_unpersisted_trade(self, trade: Dict[str, object]) -> bool:
+        """Remove the exact paper position when durable trade creation fails."""
+        for index, position in enumerate(self.positions):
+            if position is trade:
+                self.positions.pop(index)
+                return True
+        return False
+
     def get_summary(self) -> Dict[str, object]:
         return {
             "open_positions": len(self.positions),

@@ -214,7 +214,7 @@ The resulting signal is passed through `OrderService` with event metadata and pe
 - Has valid quantity, entry, stop, target, expiry, and scanner strategy metadata. A below-legacy-threshold score additionally requires current-version proof that scanner primary gates passed and score was ranking-only.
 - Passes execution-quality checks.
 
-Without explicit live confirmation, the order is routed to paper even if `order_mode=live` was requested. Before either route, one deterministic episode identity is atomically reserved. A repeat scanner, fast, WebSocket, manual, or automation attempt for an episode already `RESERVED`, `ORDER_PENDING`, `OPEN`, or `CLOSED` cannot create another order. Pre-submission failure releases the reservation; successful submission converts it into an open position lock.
+Without explicit live confirmation, the order is routed to paper even if `order_mode=live` was requested. Before either route, one deterministic episode identity is atomically reserved. A repeat scanner, fast, WebSocket, manual, or automation attempt for an episode already `RESERVED`, `ORDER_PENDING`, `OPEN`, or `CLOSED` cannot create another order. Expired reservation recovery compares the prior token and expiry atomically so only one contender can reclaim it. Pre-submission failure releases the reservation; successful submission converts it into an open position lock. If paper execution cannot be durably persisted, its exact in-memory position is removed before release. Once a durable trade exists, a failed final transition remains locked for reconciliation instead of reopening the episode.
 
 Both paper and live then pass the same final account/risk authority. Live execution additionally requires:
 

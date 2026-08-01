@@ -107,6 +107,8 @@ class OrderService:
             self.pre_order_risk_service.episode_reservation_service.release(episode_key, reservation_token, reason="episode_transition_failed")
             raise ValueError("pre-order risk blocked order: EPISODE_ORDER_PENDING_TRANSITION_FAILED")
         if not live_requested:
+            trade: dict[str, object] | None = None
+            record: Any | None = None
             try:
                 trade = self.paper_trading_service.execute_trade(
                     symbol=signal.tradingsymbol or signal.symbol,
@@ -126,10 +128,20 @@ class OrderService:
                     opportunity_id=opportunity_id,
                     notes=self._metadata_note(metadata),
                 )
-                self.pre_order_risk_service.episode_reservation_service.mark_open(episode_key, reservation_token, trade_id=record.id)
             except Exception:
+                if trade is not None and record is None:
+                    self.paper_trading_service.rollback_unpersisted_trade(trade)
                 self.pre_order_risk_service.episode_reservation_service.release(episode_key, reservation_token, reason="paper_order_failed")
                 raise
+            if not self.pre_order_risk_service.episode_reservation_service.mark_open(
+                episode_key,
+                reservation_token,
+                trade_id=record.id,
+            ):
+                # The paper position and trade row now exist. Keep ORDER_PENDING
+                # locked so a retry cannot create a duplicate; reconciliation can
+                # repair the episode-to-trade link.
+                raise RuntimeError("paper order persisted but episode could not transition to OPEN")
             self._subscribe_active_trade_tokens(signal)
             self._record_latency("order_service_start_to_ack", order_started, signal=signal, mode="paper")
             return {

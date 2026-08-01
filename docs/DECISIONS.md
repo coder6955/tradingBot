@@ -297,3 +297,10 @@ This file records decisions that should survive individual conversations and cod
 **Decision:** Scanner, fast and pre-order decisions append versioned context/gate/risk records. Outcomes append separately. Shadow policies calculate 1/2/3/5% counterfactual quantities and outcomes but expose `counterfactual_can_reach_order_router=false`.  
 **Why:** Reconstructing risk decisions from combined confidence or mutable rows cannot establish independent expectancy or safe tier promotion.  
 **Consequence:** Fast validation retains zero database and REST I/O; persistence occurs after its measured critical section. Risk-of-ruin remains null unless independent sample size and distribution assumptions are disclosed.
+
+## D043 — Make reservation recovery and paper persistence fail safely
+
+**Status:** Accepted as a foundation audit correction  
+**Decision:** Reclaiming an expired reservation uses the prior state, reservation token, and expiry timestamp as one compare-and-swap predicate. If paper execution succeeds but durable trade creation fails, the exact in-memory paper position is rolled back before the episode is released. If a durable paper trade exists but the episode cannot move to `OPEN`, the episode remains locked in `ORDER_PENDING` for reconciliation.  
+**Why:** Checking only `state=RESERVED` allowed two contenders to overwrite the same expired reservation, and releasing an episode after a persistence failure could permit a duplicate while an untracked paper position remained open.  
+**Consequence:** Exactly one concurrent worker can reclaim an expired episode. A failed, non-durable paper entry leaves neither a position nor a locked episode; a durable entry never releases its duplicate lock merely because the final state transition needs repair.

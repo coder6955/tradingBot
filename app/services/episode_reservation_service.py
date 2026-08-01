@@ -158,9 +158,17 @@ class EpisodeReservationService:
             reservable = record.state == self.AVAILABLE or expired_reservation
             if reservable:
                 previous_state = record.state
+                reservation_query = session.query(SetupEpisodeRecord).filter(
+                    SetupEpisodeRecord.id == record.id,
+                    SetupEpisodeRecord.state == previous_state,
+                )
+                if expired_reservation:
+                    reservation_query = reservation_query.filter(
+                        SetupEpisodeRecord.reservation_token == record.reservation_token,
+                        SetupEpisodeRecord.reservation_expires_at == record.reservation_expires_at,
+                    )
                 updated = (
-                    session.query(SetupEpisodeRecord)
-                    .filter(SetupEpisodeRecord.id == record.id, SetupEpisodeRecord.state == previous_state)
+                    reservation_query
                     .update(
                         {
                             SetupEpisodeRecord.state: self.RESERVED,
