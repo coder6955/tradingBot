@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -112,45 +113,56 @@ class EpisodeReservationService:
             "trigger_identifier": trigger_identifier,
         }
 
-    def reserve(self, signal: Signal, *, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
-        identity = self.identity(signal, metadata=metadata)
+    def reserve(
+        self,
+        signal: Signal,
+        *,
+        metadata: dict[str, Any] | None = None,
+        order_intent: dict[str, Any] | None = None,
+        identity_override: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        identity = identity_override or self.identity(signal, metadata=metadata)
         now = ist_now_naive()
         expires = now + timedelta(seconds=max(1, int(settings.setup_episode_reservation_seconds)))
         reservation_token = uuid.uuid4().hex
+        target_state = self.ORDER_PENDING if order_intent is not None else self.RESERVED
+        intent_values = self._intent_values(order_intent, now=now)
         session = get_session()
         try:
-            record = session.query(SetupEpisodeRecord).filter(SetupEpisodeRecord.episode_key == identity["episode_key"]).first()
-            if record is None:
-                record = SetupEpisodeRecord(
-                    created_at=now,
-                    updated_at=now,
-                    episode_key=identity["episode_key"],
-                    symbol=signal.symbol.upper(),
-                    action=signal.action.upper(),
-                    side=signal.side.upper(),
-                    tradingsymbol=signal.tradingsymbol,
-                    expiry=signal.expiry,
-                    strike=signal.strike,
-                    trigger_price=self._float((metadata or {}).get("trigger_price") or signal.entry_price),
-                    strategy_version=identity["strategy_version"],
-                    config_hash=identity["config_hash"],
-                    setup_family=identity["setup_family"],
-                    trigger_identifier=identity["trigger_identifier"],
-                    risk_policy_version=str(settings.risk_policy_version),
-                    state=self.RESERVED,
-                    reservation_token=reservation_token,
-                    reserved_at=now,
-                    reservation_expires_at=expires,
-                    last_transition_reason="pre_order_reservation",
-                )
-                session.add(record)
-                try:
-                    session.commit()
-                    session.refresh(record)
-                    return self._result(record, acquired=True)
-                except IntegrityError:
-                    session.rollback()
-                    record = session.query(SetupEpisodeRecord).filter(SetupEpisodeRecord.episode_key == identity["episode_key"]).first()
+            # New episodes are the latency-critical common case. Let the unique
+            # episode key arbitrate directly, then query only after a collision.
+            # This preserves database-level concurrency safety while avoiding a
+            # redundant pre-insert SELECT.
+            record = SetupEpisodeRecord(
+                created_at=now,
+                updated_at=now,
+                episode_key=identity["episode_key"],
+                symbol=signal.symbol.upper(),
+                action=signal.action.upper(),
+                side=signal.side.upper(),
+                tradingsymbol=signal.tradingsymbol,
+                expiry=signal.expiry,
+                strike=signal.strike,
+                trigger_price=self._float((metadata or {}).get("trigger_price") or signal.entry_price),
+                strategy_version=identity["strategy_version"],
+                config_hash=identity["config_hash"],
+                setup_family=identity["setup_family"],
+                trigger_identifier=identity["trigger_identifier"],
+                risk_policy_version=str(settings.risk_policy_version),
+                state=target_state,
+                reservation_token=reservation_token,
+                reserved_at=now,
+                reservation_expires_at=expires,
+                last_transition_reason="pre_order_reservation",
+                **intent_values,
+            )
+            session.add(record)
+            try:
+                session.commit()
+                return self._result(record, acquired=True)
+            except IntegrityError:
+                session.rollback()
+                record = session.query(SetupEpisodeRecord).filter(SetupEpisodeRecord.episode_key == identity["episode_key"]).first()
 
             if record is None:
                 return {**identity, "acquired": False, "reason": "EPISODE_RESERVATION_FAILED"}
@@ -171,12 +183,13 @@ class EpisodeReservationService:
                     reservation_query
                     .update(
                         {
-                            SetupEpisodeRecord.state: self.RESERVED,
+                            SetupEpisodeRecord.state: target_state,
                             SetupEpisodeRecord.reservation_token: reservation_token,
                             SetupEpisodeRecord.reserved_at: now,
                             SetupEpisodeRecord.reservation_expires_at: expires,
                             SetupEpisodeRecord.updated_at: now,
                             SetupEpisodeRecord.last_transition_reason: "expired_reservation_reclaimed" if expired_reservation else "pre_order_reservation",
+                            **intent_values,
                         },
                         synchronize_session=False,
                     )
@@ -200,8 +213,107 @@ class EpisodeReservationService:
     def mark_order_pending(self, episode_key: str, reservation_token: str) -> bool:
         return self._transition(episode_key, self.RESERVED, self.ORDER_PENDING, reservation_token, "order_submission_started")
 
+    def reserve_order_intent(
+        self,
+        signal: Signal,
+        *,
+        authorized_quantity: int,
+        order_mode: str,
+        risk_decision: dict[str, Any],
+        evidence_event_id: str,
+        metadata: dict[str, Any] | None = None,
+        identity_override: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically reserve the episode and persist the minimum crash-recovery intent."""
+        intent = {
+            "order_mode": str(order_mode),
+            "authorized_quantity": int(authorized_quantity),
+            "tradingsymbol": signal.tradingsymbol,
+            "instrument_token": signal.instrument_token,
+            "entry_price": signal.entry_price,
+            "stop_loss": signal.stop_loss,
+            "risk_policy_version": risk_decision.get("risk_policy_version"),
+            "approved_risk_tier": risk_decision.get("approved_tier"),
+            "approved_risk_amount": risk_decision.get("approved_risk_amount"),
+            "estimated_total_loss_at_stop": risk_decision.get("estimated_total_loss_at_stop"),
+            "evidence_event_id": evidence_event_id,
+            "metadata": metadata or {},
+        }
+        return self.reserve(signal, metadata=metadata, order_intent=intent, identity_override=identity_override)
+
+    def mark_submitted(
+        self,
+        episode_key: str,
+        reservation_token: str,
+        *,
+        broker_order_id: str | None,
+        status: str = "SUBMITTED",
+    ) -> bool:
+        session = get_session()
+        try:
+            updated = (
+                session.query(SetupEpisodeRecord)
+                .filter(
+                    SetupEpisodeRecord.episode_key == episode_key,
+                    SetupEpisodeRecord.reservation_token == reservation_token,
+                    SetupEpisodeRecord.state == self.ORDER_PENDING,
+                )
+                .update(
+                    {
+                        SetupEpisodeRecord.submission_status: str(status),
+                        SetupEpisodeRecord.broker_order_id: broker_order_id,
+                        SetupEpisodeRecord.submitted_at: ist_now_naive(),
+                        SetupEpisodeRecord.updated_at: ist_now_naive(),
+                        SetupEpisodeRecord.last_transition_reason: "order_submission_acknowledged",
+                    },
+                    synchronize_session=False,
+                )
+            )
+            session.commit()
+            return updated == 1
+        finally:
+            session.close()
+
+    def mark_evidence_status(self, episode_key: str, evidence_event_id: str, status: str) -> bool:
+        session = get_session()
+        try:
+            updated = (
+                session.query(SetupEpisodeRecord)
+                .filter(
+                    SetupEpisodeRecord.episode_key == episode_key,
+                    SetupEpisodeRecord.evidence_event_id == evidence_event_id,
+                )
+                .update(
+                    {
+                        SetupEpisodeRecord.evidence_status: str(status),
+                        SetupEpisodeRecord.updated_at: ist_now_naive(),
+                    },
+                    synchronize_session=False,
+                )
+            )
+            session.commit()
+            return updated == 1
+        finally:
+            session.close()
+
+    def recoverable_order_intents(self) -> list[dict[str, Any]]:
+        session = get_session()
+        try:
+            rows = session.query(SetupEpisodeRecord).filter(SetupEpisodeRecord.state == self.ORDER_PENDING).all()
+            return [self._result(row, acquired=False) for row in rows]
+        finally:
+            session.close()
+
     def mark_open(self, episode_key: str, reservation_token: str, *, trade_id: int | None = None) -> bool:
-        return self._transition(episode_key, self.ORDER_PENDING, self.OPEN, reservation_token, "order_accepted", active_trade_id=trade_id)
+        return self._transition(
+            episode_key,
+            self.ORDER_PENDING,
+            self.OPEN,
+            reservation_token,
+            "order_accepted",
+            active_trade_id=trade_id,
+            extra_values={SetupEpisodeRecord.submission_status: "OPEN"},
+        )
 
     def release(self, episode_key: str, reservation_token: str, *, reason: str) -> bool:
         session = get_session()
@@ -221,6 +333,8 @@ class EpisodeReservationService:
                         SetupEpisodeRecord.reservation_expires_at: None,
                         SetupEpisodeRecord.updated_at: ist_now_naive(),
                         SetupEpisodeRecord.last_transition_reason: reason,
+                        SetupEpisodeRecord.submission_status: "FAILED_BEFORE_ACCEPTANCE",
+                        SetupEpisodeRecord.submission_error: reason,
                     },
                     synchronize_session=False,
                 )
@@ -252,6 +366,7 @@ class EpisodeReservationService:
         reason: str,
         *,
         active_trade_id: int | None = None,
+        extra_values: dict[Any, Any] | None = None,
     ) -> bool:
         if not self.validate_transition(current, target):
             return False
@@ -267,6 +382,7 @@ class EpisodeReservationService:
             }
             if active_trade_id is not None:
                 values[SetupEpisodeRecord.active_trade_id] = active_trade_id
+            values.update(extra_values or {})
             updated = query.update(values, synchronize_session=False)
             session.commit()
             return updated == 1
@@ -282,7 +398,39 @@ class EpisodeReservationService:
             "reservation_token": getattr(record, "reservation_token", None) if acquired else None,
             "acquired": acquired,
             "reason": reason,
+            "order_mode": getattr(record, "order_mode", None),
+            "authorized_quantity": getattr(record, "authorized_quantity", None),
+            "submission_status": getattr(record, "submission_status", None),
+            "broker_order_id": getattr(record, "broker_order_id", None),
+            "evidence_status": getattr(record, "evidence_status", None),
+            "evidence_event_id": getattr(record, "evidence_event_id", None),
+            "order_intent": self._json(getattr(record, "order_intent_json", None)),
         }
+
+    def _intent_values(self, order_intent: dict[str, Any] | None, *, now: datetime) -> dict[Any, Any]:
+        if order_intent is None:
+            return {}
+        return {
+            "order_mode": str(order_intent.get("order_mode") or "paper"),
+            "authorized_quantity": int(order_intent.get("authorized_quantity") or 0),
+            "order_intent_created_at": now,
+            "order_intent_json": json.dumps(order_intent, default=str, sort_keys=True),
+            "submission_status": "INTENT_PERSISTED",
+            "broker_order_id": None,
+            "submitted_at": None,
+            "submission_error": None,
+            "evidence_status": "QUEUED",
+            "evidence_event_id": str(order_intent.get("evidence_event_id") or ""),
+        }
+
+    def _json(self, value: Any) -> dict[str, Any]:
+        if not value:
+            return {}
+        try:
+            payload = json.loads(str(value))
+            return payload if isinstance(payload, dict) else {}
+        except (TypeError, ValueError):
+            return {}
 
     def _datetime(self, value: Any) -> datetime | None:
         if isinstance(value, datetime):

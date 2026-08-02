@@ -130,6 +130,8 @@ The active policy defaults to `TIER_1_BASE` for both paper and live. Higher tier
 
 Daily planned risk, realized loss, total open risk, Bank Nifty open risk, drawdown, loss streak, trade/stop counts, cooldown, premium exposure and open positions can downgrade or reject a tier. A per-trade tier larger than the remaining daily/open policy is rejected and reported as a configuration/policy conflict; neither limit is silently overridden.
 
+The final synchronous sequence is risk evaluation, quantity authorization, one atomic `ORDER_PENDING` reservation plus minimum order intent, and order submission. Large decision JSON is enqueued only after the durable intent exists. A full queue fails closed before submission. Evidence failure cannot create an order, and a broker acknowledgement is persisted on the episode before local trade creation so startup reconciliation can identify the interruption window. Append-only audited equity snapshots and outcome writes are not part of this synchronous path.
+
 Before final timing, one bulk read supplies completed 1m/5m state. Five-minute data defines setup direction, regime, day/opening structure and candle confirmation; one-minute data defines entry timing. Tick data confirms execution. No daily, 15-minute or 30-minute candle participates in live or historical decisions.
 
 The setup family supplies allowed regimes, momentum phases and an exit profile. Its score adjustment is capped. Candidate ranking applies spread and conservative costs, reward/risk, liquidity and uncertainty. Until calibrated evidence exists, ranking utility is neither expected profit nor probability.
@@ -279,3 +281,16 @@ Heavy readiness is queued on the dedicated after-market lane. The readiness GET 
 Readiness additionally requires positive after-cost expectancy, minimum profit factor, bounded drawdown, and sufficient evidence across traded trend, range, volatile, event-day and expiry-day regimes. Expiry-day evidence is explicitly excluded when the entry policy blocks expiry-day buying; missing event/regime samples fail rather than being assumed stable. Until a chronological out-of-sample calibration model has sufficient independent samples, API `probability` is `null`. The numeric score-derived value is exposed only as `heuristic_score_confidence` with an explicit source.
 
 Latency telemetry spans exchange tick to receive, receive to rally detection, detection to scan, scan-to-arm, arm-to-confirmation, order submission/acknowledgement/fill and exit trigger/submission/fill. Scheduled and fast-rally scans are reported separately with p50/p95/p99, counts, missing samples and dropped events.
+## Shadow entry validation and episode outcomes
+
+Every unique `OBSERVE`, `PREPARED`, `ARMED`, `TRIGGERED`, `REJECTED`, `TOO_LATE`, `ORDER_PENDING`, `OPEN`, `INVALIDATED`, or `EXPIRED` episode may register one outcome path. Repeated scans update timestamps on that path; policies reference it rather than creating independent samples. Hypothetical long entries use ask plus modeled entry slippage/costs. Exits, MFE, MAE, targets, and stops use bid less modeled exit slippage/costs. LTP remains diagnostic and never proves profit.
+
+The collector completes configured 30-second, 1-, 3-, 5-, and 15-minute horizons, session cutoff, and original stop-or-target resolution. It records quote coverage, gaps, reconnects, dropped queue events, target/stop order, and LTP-without-bid conditions. Insufficient executable coverage is neither a win nor a loss.
+
+Three policies consume the same immutable context and ordered events:
+
+1. `current_active_baseline_v1` reproduces completed directional 5-minute structure, exact 1m/5m agreement, premium/preparation/fast promotion, armed second confirmation, chase, target room, remaining RR, session, and account gates.
+2. `transition_preparation_shadow_v1` may only reach `PREPARED` when 5-minute structure is directional or non-opposed transition evidence and every data/contract/plan/base-risk prerequisite passes. It never becomes enterable.
+3. `continuous_option_transmission_shadow_v1` carries the same tick evidence across `PREPARED -> ARMED -> TRIGGERED`, records transmission features separately, and never resets a second confirmation timer after promotion.
+
+All three decisions declare `shadow_only=true` and `can_invoke_order_service=false`. The comparison service accepts no `OrderService`, signal mutation, reservation, paper execution, or live execution dependency. No shadow result changes the active quantity or gates.

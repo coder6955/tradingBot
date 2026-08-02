@@ -198,8 +198,10 @@ class RiskTierFoundationTests(unittest.TestCase):
     def test_drawdown_and_loss_streak_disable_higher_tiers(self) -> None:
         drawdown = RiskPolicyService().evaluate(self._context(TIER_3_HIGH, current_drawdown_pct=6.0))
         loss = RiskPolicyService().evaluate(self._context(TIER_3_HIGH, consecutive_losses=1))
+        unrealized = RiskPolicyService().evaluate(self._context(TIER_4_EXCEPTIONAL, unrealized_daily_pnl=-6000.0))
         self.assertEqual(drawdown.approved_tier, TIER_1_BASE)
         self.assertEqual(loss.approved_tier, TIER_1_BASE)
+        self.assertEqual(unrealized.approved_tier, TIER_1_BASE)
 
     def test_daily_and_open_risk_caps_reject(self) -> None:
         object.__setattr__(settings, "max_daily_planned_risk_percent", 2.0)
@@ -380,7 +382,24 @@ class RiskTierFoundationTests(unittest.TestCase):
             try:
                 columns = {item["name"] for item in inspect(session.get_bind()).get_columns("setup_episodes")}
                 self.assertTrue(
-                    {"state", "reservation_token", "reservation_expires_at", "risk_policy_version"}.issubset(columns)
+                    {
+                        "state",
+                        "reservation_token",
+                        "reservation_expires_at",
+                        "risk_policy_version",
+                        "order_intent_json",
+                        "submission_status",
+                        "broker_order_id",
+                        "evidence_status",
+                    }.issubset(columns)
+                )
+                self.assertTrue(
+                    {
+                        "episode_observations",
+                        "shadow_policy_decisions",
+                        "replay_runs",
+                        "account_equity_snapshots",
+                    }.issubset(set(inspect(session.get_bind()).get_table_names()))
                 )
                 unique_names = {
                     str(item.get("name"))

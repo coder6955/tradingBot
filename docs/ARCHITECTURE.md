@@ -65,7 +65,11 @@ The configured tier spectrum is 1%, 2%, 3%, and 5%, but active paper and live po
 
 `EpisodeReservationService` derives a strategy/risk-policy/contract/setup/trigger/time-window identity and atomically moves it through `AVAILABLE -> RESERVED -> ORDER_PENDING -> OPEN -> CLOSED`. These persistence labels map to the canonical lifecycle as `AVAILABLE=PREPARED` and `RESERVED=TRIGGERED`; the shared transition vocabulary is `UNAVAILABLE -> OBSERVE -> PREPARED -> ARMED -> TRIGGERED -> ORDER_PENDING -> OPEN -> EXITING -> CLOSED`, with terminal `INVALIDATED` and `EXPIRED` states. Concurrent or repeated routes cannot acquire the same episode. Expired recovery compares the old token and expiry as well as state, preventing two reclaimers from both succeeding. Pre-submission failures release their reservation; an accepted or durably persisted order retains a lock until reconciliation or closure.
 
-`DecisionEvidenceRepository` appends immutable scanner, fast-rally, and pre-order records to `decision_risk_evidence`. It stores the full context, individual gates, active risk decision, isolated shadow decisions, lineage, and transition timestamps. Later outcomes are appended separately to `decision_outcomes`, so historical decision evidence is never rewritten. Persistence occurs outside cached fast validation; the zero-REST/zero-database validation budget is unchanged.
+`DecisionEvidenceRepository` appends immutable scanner, fast-rally, and pre-order records to `decision_risk_evidence`. Final pre-order authorization first commits a minimal crash-safe order intent in the same transaction as the atomic episode reservation. `EvidencePersistenceQueue` then writes the large append-only context and counterfactual JSON on a bounded worker. Queue saturation is explicit and fails an authorized attempt closed before submission; retries, metrics, durable intent recovery, and dead-letter status are exposed. A broker-acknowledged order whose local trade write is interrupted remains `ORDER_PENDING` with its broker ID and blocks live automation during startup reconciliation. Schema creation and legacy-column inspection run only during `init_db()`, never on ordinary `get_session()` calls.
+
+`EpisodeOutcomeCollector` registers one primary path per episode and accepts WebSocket events through a non-blocking bounded queue. It follows underlying and selected-option exchange/receive time, executable ask entry, executable bid exit, depth, spread, gaps, reconnects, fixed horizons, session cutoff, and original stop/target resolution. Missing executable quotes remain missing; coverage, dropped events, LTP-only target/stop appearances, and undeterminable outcomes are explicit. `EventTimeReplayService` reuses the shadow-policy and outcome interfaces with exchange-time ordering, receive-time tie-breaking, candle lifecycle/provenance, instrument-master lineage, deterministic hashes, and no order-routing dependency.
+
+`AccountEquityStateService` is the authoritative risk-state calculation. It separates broker cash, executable-bid open value, realized and unrealized P&L, planned and open-stop risk, premium exposure, loss streak, start/peak/current equity, and drawdown. The final risk path calculates this state without an append-only snapshot write; `/risk/equity/snapshot` persists an audited snapshot explicitly. A missing executable bid values an open option at zero and blocks a new entry rather than substituting LTP.
 
 ## Runtime composition
 
@@ -97,6 +101,13 @@ The configured tier spectrum is 1%, 2%, 3%, and 5%, but active paper and live po
 | `RiskPolicyService` / `PreOrderRiskService` | Separates setup eligibility from evidence-gated risk tiers, enforces the hard 5% ceiling and cost-aware stop-risk sizing, and provides one final paper/live gate. |
 | `EpisodeReservationService` | Owns deterministic episode keys and atomic reservation/order/open/closed transitions across every entry route. |
 | `DecisionEvidenceRepository` | Appends immutable decision/risk contexts and separate counterfactual/realized outcome records. |
+| `EvidencePersistenceQueue` | Bounded asynchronous large-evidence writer with retry, queue-full, dead-letter, and durable order-intent recovery. |
+| `EpisodeOutcomeCollector` | Tracks one executable bid/ask market path per episode across fixed and stop/target horizons without blocking the WebSocket callback. |
+| `EventTimeReplayService` | Deterministic exchange-time replay with candle lifecycle, provenance, instrument lineage, and bar-only/tick-capable separation. |
+| `ShadowEntryPolicyComparisonService` | Runs the unchanged baseline, transition-preparation, and continuous-transmission policies against the same immutable context with no order dependency. |
+| `AccountEquityStateService` | Produces reproducible equity/drawdown/risk snapshots using executable option bids. |
+| `StopExitLiquidityResearchService` | Reports current-book, historical adverse-move, and stress exit estimates without promising fills or changing the active proxy. |
+| `PolicyEvaluationService` | Evaluates unique episode-policy pairs with after-cost metrics, chronological purge/embargo folds, segmentation, and risk-tier counterfactuals. |
 | `ActiveTradePriceFeed` | Uses fresh WebSocket ticks first and controlled broker polling fallback for active trades. |
 | `TradeExitService` | Evaluates deterministic stop/time/trailing/invalidation/target priority against executable bid/depth, records simultaneous triggers, and performs paper/live square-off. |
 | `BrokerSyncService` | Reconciles local live trades, broker positions, entry/exit orders, and protective disaster stops; protection failures persistently block new live entries. |
@@ -110,7 +121,7 @@ The shared `TradeSetupService` is deliberate: its in-memory Bank Nifty contract 
 At application startup:
 
 1. Strategy-version registration, valid armed-entry recovery, old WebSocket candle cleanup, and raw-tick retention cleanup run in background maintenance.
-2. Broker order/trade synchronization and startup position reconciliation run separately.
+2. Pending evidence is reconstructed from durable order intents; broker order/trade synchronization and startup position reconciliation run separately. Unresolved live order intents block automation.
 3. If WebSocket support is enabled, the market-data runtime starts.
 4. The `NIFTY BANK` instrument token is resolved from the broker's current NSE instrument list.
 5. That underlying token is assigned to the fast-rally detector and canonical candle builder, mapped to `BANKNIFTY`, and subscribed under the `core_market` owner.
@@ -119,7 +130,7 @@ At application startup:
 
 The supervisor is process-restart aware. Each start writes a durable runtime-job record containing a process boot ID and PID. If the next process finds an unfinished run for the same trading date, it closes that run as interrupted before starting a new one. A boot-managed supervisor remains alive after the after-market pipeline so it can restart intraday workers on the next market day. Every cycle verifies that the collector, auto trader, and outcome monitor have both a running flag and a live task; stale `running=true` state is repaired and the worker is restarted.
 
-Shutdown stops the market-data runtime, canonical candle and raw-tick writers, automation supervisor, snapshot collector, auto trader, and outcome monitor.
+Shutdown stops the market-data runtime, canonical candle and raw-tick writers, automation supervisor, snapshot collector, auto trader, and outcome monitor, then flushes and stops the evidence and episode-outcome workers.
 
 ## WebSocket subscription model
 
@@ -173,6 +184,8 @@ The premium candle builder:
 The underlying candle path is separate from option-premium candles. It accepts only broker exchange/last-trade timestamps inside the configured NSE session, persists completed `1minute` candles, aggregates only completed minutes into `5minute`, marks generated in-session continuity rows, and recovers persisted state without replaying it as live ticks. `KiteFeed` combines a fresh exchange-timestamped LTP with these completed candles; broad context quotes use a separate cache and cannot masquerade as indicator evidence.
 
 Raw ticks for `core_market`, `banknifty_prewarm`, `armed:*`, and `active_trade` owners enter a bounded asynchronous writer. Persisted records include depth, both timestamps, sequence, owners, and strategy/config lineage. Warm ticks may be evicted under pressure, but an armed/active tick loss raises critical capture status. Retention is configurable and replay uses persisted capture sequence while exposing sequence gaps.
+
+The episode collector receives the same normalized tick before strategy dispatch but performs only `put_nowait()` in the callback. Executable path calculations and persistence happen on its worker. Queue-full events increment per-episode dropped evidence and force the outcome to `UNDETERMINABLE_DATA`; persistence retries are bounded and terminal failures appear in collector dead-letter status.
 
 Historical bootstrap is explicit and broker-backed: `POST /data/ingest/banknifty-canonical-bootstrap` requests canonical `BANKNIFTY` `1minute` and `5minute` history, stores only completed regular-session candles with exchange timestamps, and skips duplicates. It never fabricates gaps or treats option/`WS_TOKEN:*` candles as underlying history.
 

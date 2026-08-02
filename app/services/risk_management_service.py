@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.services.account_funds_service import AccountFundsService
+from app.services.account_equity_state_service import AccountEquityStateService
 from app.services.trade_repository import TradeRepository
 from app.services.time_utils import ist_now
 
@@ -13,26 +14,39 @@ from app.services.time_utils import ist_now
 class RiskManagementService:
     """Account-level kill-switch checks before automated entries."""
 
-    def __init__(self, trade_repository: TradeRepository | None = None, account_funds_service: AccountFundsService | None = None) -> None:
+    def __init__(
+        self,
+        trade_repository: TradeRepository | None = None,
+        account_funds_service: AccountFundsService | None = None,
+        account_equity_state_service: AccountEquityStateService | None = None,
+    ) -> None:
         self.trade_repository = trade_repository or TradeRepository()
         self.account_funds_service = account_funds_service or AccountFundsService()
+        self.account_equity_state_service = account_equity_state_service or AccountEquityStateService(
+            trade_repository=self.trade_repository,
+            account_funds_service=self.account_funds_service,
+        )
 
     def evaluate_entry(self) -> dict[str, Any]:
         summary = self.trade_repository.daily_summary()
         reasons: list[str] = []
+        # Risk decisions use the same authoritative calculation, but avoid a
+        # non-safety append-only snapshot write on the synchronous order path.
+        equity_snapshot = self.account_equity_state_service.snapshot(persist=False)
 
         if int(summary["trades"]) >= settings.max_trades_per_day:
             reasons.append("max trades per day reached")
 
         available_cash = self._available_cash()
-        max_daily_loss = available_cash * (settings.max_realized_daily_loss_percent / 100)
+        risk_equity = max(float(equity_snapshot.current_audited_equity), 0.01)
+        max_daily_loss = float(equity_snapshot.start_of_day_equity) * (settings.max_realized_daily_loss_percent / 100)
         if float(summary["pnl"]) <= -abs(max_daily_loss):
             reasons.append("max daily loss reached")
 
         if int(summary["stop_losses"]) >= settings.max_stop_losses_per_day:
             reasons.append("max stop losses per day reached")
 
-        consecutive_losses = self._consecutive_losses()
+        consecutive_losses = equity_snapshot.consecutive_losses
         if consecutive_losses >= settings.max_consecutive_losses:
             reasons.append("max consecutive losses reached")
 
@@ -46,8 +60,16 @@ class RiskManagementService:
         max_open_premium = available_cash * (settings.max_open_premium_exposure_pct / 100)
         if float(exposure["premium_exposure"]) >= max_open_premium:
             reasons.append("max open premium exposure reached")
+        if equity_snapshot.missing_bid_trade_ids:
+            reasons.append("open executable bid coverage is incomplete")
 
-        risk_exposure = self._risk_exposure(available_cash)
+        risk_exposure = {
+            "planned_risk_today": equity_snapshot.daily_planned_risk,
+            "total_open_risk": equity_snapshot.open_stop_risk,
+            "banknifty_open_risk": equity_snapshot.open_stop_risk,
+            "planned_risk_today_pct": round(equity_snapshot.daily_planned_risk / risk_equity * 100.0, 4),
+            "total_open_risk_pct": round(equity_snapshot.open_stop_risk / risk_equity * 100.0, 4),
+        }
 
         return {
             "passed": not reasons,
@@ -57,6 +79,8 @@ class RiskManagementService:
             "limits": {
                 "max_daily_loss": round(max_daily_loss, 2),
                 "available_cash": round(available_cash, 2),
+                "current_audited_equity": equity_snapshot.current_audited_equity,
+                "start_of_day_equity": equity_snapshot.start_of_day_equity,
                 "available_cash_source": "kite_margins",
                 "max_daily_loss_pct": settings.max_daily_loss_pct,
                 "max_realized_daily_loss_percent": settings.max_realized_daily_loss_percent,
@@ -73,10 +97,16 @@ class RiskManagementService:
                 "cooldown_after_stop_minutes": settings.cooldown_after_stop_minutes,
             },
             "risk_state": {
-                "realized_daily_pnl": float(summary["pnl"]),
-                "unrealized_daily_pnl": 0.0,
-                "current_drawdown_pct": round(max(0.0, -float(summary["pnl"])) / max(available_cash, 0.01) * 100.0, 4),
-                "consecutive_losses": consecutive_losses,
+                "realized_daily_pnl": equity_snapshot.realized_pnl,
+                "unrealized_daily_pnl": equity_snapshot.unrealized_pnl_executable_bid,
+                "current_drawdown_pct": equity_snapshot.peak_to_current_drawdown_percent,
+                "current_audited_equity": equity_snapshot.current_audited_equity,
+                "start_of_day_equity": equity_snapshot.start_of_day_equity,
+                "peak_equity": equity_snapshot.peak_equity,
+                "daily_total_equity_change": equity_snapshot.daily_total_equity_change,
+                "premium_exposure": equity_snapshot.premium_exposure,
+                "executable_bid_coverage_percent": equity_snapshot.executable_bid_coverage_percent,
+                "consecutive_losses": equity_snapshot.consecutive_losses,
                 **risk_exposure,
             },
         }

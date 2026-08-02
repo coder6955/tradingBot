@@ -6,6 +6,7 @@ from typing import Any, Callable
 from app.config import settings
 from app.providers.kite_provider import KiteProvider
 from app.services.notification_service import NotificationService
+from app.services.episode_reservation_service import EpisodeReservationService
 from app.services.trade_repository import TradeRepository
 
 
@@ -24,12 +25,14 @@ class BrokerSyncService:
         notification_service: NotificationService | None = None,
         exit_confirmation_callback: ExitConfirmationCallback | None = None,
         latency_metrics: Any | None = None,
+        episode_reservation_service: EpisodeReservationService | None = None,
     ) -> None:
         self.trade_repository = trade_repository
         self.kite_provider_factory = kite_provider_factory
         self.notification_service = notification_service or NotificationService()
         self.exit_confirmation_callback = exit_confirmation_callback
         self.latency_metrics = latency_metrics
+        self.episode_reservation_service = episode_reservation_service or EpisodeReservationService()
         self.live_trading_blocked = False
         self.live_block_reason: str | None = None
         self._persistent_live_block_reasons: set[str] = set()
@@ -117,6 +120,24 @@ class BrokerSyncService:
         local_by_symbol = {str(trade.tradingsymbol).upper(): trade for trade in local_trades}
         broker_by_symbol = {str(row.get("tradingsymbol") or "").upper(): row for row in broker_positions}
         mismatches: list[dict[str, Any]] = []
+        pending_order_intents = self.episode_reservation_service.recoverable_order_intents()
+
+        for intent in pending_order_intents:
+            if str(intent.get("order_mode") or "").lower() != "live":
+                continue
+            mismatches.append(
+                {
+                    "type": (
+                        "submitted_live_order_without_local_trade"
+                        if intent.get("broker_order_id")
+                        else "unresolved_live_order_intent"
+                    ),
+                    "episode_key": intent.get("episode_key"),
+                    "broker_order_id": intent.get("broker_order_id"),
+                    "submission_status": intent.get("submission_status"),
+                    "order_intent": intent.get("order_intent"),
+                }
+            )
 
         for symbol, row in broker_by_symbol.items():
             if symbol and symbol not in local_by_symbol:
@@ -160,6 +181,7 @@ class BrokerSyncService:
             "mismatches": mismatches,
             "local_open_live_trades": len(local_trades),
             "broker_open_positions": len(broker_positions),
+            "recoverable_order_intents": len(pending_order_intents),
         }
         if self.live_trading_blocked:
             self._alert(f"CRITICAL: live trading blocked by startup reconciliation mismatch count={len(mismatches)}")

@@ -58,9 +58,16 @@ class DecisionEvidenceRepository:
         session = get_session()
         try:
             session.add(record)
-            session.commit()
-            session.refresh(record)
-            return {"id": record.id, "decision_id": record.decision_id, "episode_key": record.episode_key}
+            try:
+                session.commit()
+                session.refresh(record)
+                return {"id": record.id, "decision_id": record.decision_id, "episode_key": record.episode_key, "deduplicated": False}
+            except IntegrityError:
+                session.rollback()
+                existing = session.query(DecisionRiskEvidenceRecord).filter(DecisionRiskEvidenceRecord.decision_id == record.decision_id).first()
+                if existing is None:
+                    raise
+                return {"id": existing.id, "decision_id": existing.decision_id, "episode_key": existing.episode_key, "deduplicated": True}
         finally:
             session.close()
 

@@ -304,3 +304,38 @@ This file records decisions that should survive individual conversations and cod
 **Decision:** Reclaiming an expired reservation uses the prior state, reservation token, and expiry timestamp as one compare-and-swap predicate. If paper execution succeeds but durable trade creation fails, the exact in-memory paper position is rolled back before the episode is released. If a durable paper trade exists but the episode cannot move to `OPEN`, the episode remains locked in `ORDER_PENDING` for reconciliation.  
 **Why:** Checking only `state=RESERVED` allowed two contenders to overwrite the same expired reservation, and releasing an episode after a persistence failure could permit a duplicate while an untracked paper position remained open.  
 **Consequence:** Exactly one concurrent worker can reclaim an expired episode. A failed, non-durable paper entry leaves neither a position nor a locked episode; a durable entry never releases its duplicate lock merely because the final state transition needs repair.
+
+## D044 â€” Commit safety intent synchronously and write large evidence asynchronously
+
+**Status:** Accepted  
+**Decision:** Final authorization atomically creates `ORDER_PENDING` plus a minimum order intent. Large immutable evidence uses a bounded retrying worker and is reconstructable from that intent. Schema inspection runs only during initialization.  
+**Why:** Per-session legacy-schema inspection and synchronous JSON insertion dominated the reported 111 ms p95 without contributing to order safety.  
+**Consequence:** Queue saturation fails closed before submission; broker-accepted/local-write interruptions remain locked and visible to reconciliation. The same SQLite benchmark now meets the 25 ms p95 engineering target without removing a risk or duplicate gate.
+
+## D045 â€” Judge research outcomes only from executable episode paths
+
+**Status:** Accepted  
+**Decision:** One collector follows each unique episode using ask for hypothetical long entry and bid for exit/MFE/MAE/target/stop, after modeled costs. Missing quotes, gaps, dropped events, and insufficient coverage remain undetermined.  
+**Why:** Repeated scans and LTP-only moves overstate sample size and tradable expectancy.  
+**Consequence:** Policies share one market path; no profitable classification exists without sufficient executable coverage.
+
+## D046 â€” Replay event time deterministically and isolate shadow policies structurally
+
+**Status:** Accepted  
+**Decision:** Replay orders exchange time, receive time, then sequence; preserves building/completed candle state, provenance, gaps, and instrument lineage; and disables tick conclusions for bar-only sessions. Shadow comparison has no order-routing dependency.  
+**Why:** Future bar values, fabricated OHLC tick order, or a reachable order service invalidate research and create operational risk.  
+**Consequence:** Identical data/config/strategy produces identical hashes and decisions. Shadow policies cannot reserve, mutate active quantity, or submit paper/live orders.
+
+## D047 â€” Use one audited executable-bid account state
+
+**Status:** Accepted  
+**Decision:** Risk reads start/current/peak equity, realized P&L, executable-bid unrealized P&L, planned/open-stop risk, exposure, drawdown, and losses from one calculation. Missing bids are valued at zero and block entry.  
+**Why:** Daily realized P&L divided by current cash is not reproducible drawdown and ignores open option losses.  
+**Consequence:** Higher requests remain defensive and evidence-gated; audited snapshots are durable outside the critical order path.
+
+## D048 â€” Keep entry and risk promotion manual and chronological
+
+**Status:** Accepted  
+**Decision:** Compare unique episode-policy pairs using chronological training, validation, and untouched out-of-sample folds with purge/embargo at least as long as the maximum horizon. Simulate 1/2/3/5% only as counterfactuals and require staged promotion.  
+**Why:** Aggregate return, random folds, repeated scanner rows, or one strong day cannot justify an entry-policy or risk increase.  
+**Consequence:** This phase cannot activate a shadow policy or higher risk. Insufficient executable data returns `INSUFFICIENT DATA`, not a promotion.

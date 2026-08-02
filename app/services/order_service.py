@@ -103,9 +103,13 @@ class OrderService:
         episode = pre_order["episode"]
         episode_key = str(episode["episode_key"])
         reservation_token = str(episode["reservation_token"])
-        if not self.pre_order_risk_service.episode_reservation_service.mark_order_pending(episode_key, reservation_token):
-            self.pre_order_risk_service.episode_reservation_service.release(episode_key, reservation_token, reason="episode_transition_failed")
-            raise ValueError("pre-order risk blocked order: EPISODE_ORDER_PENDING_TRANSITION_FAILED")
+        if str(episode.get("state") or "") == "RESERVED":
+            if not self.pre_order_risk_service.episode_reservation_service.mark_order_pending(episode_key, reservation_token):
+                self.pre_order_risk_service.episode_reservation_service.release(episode_key, reservation_token, reason="episode_transition_failed")
+                raise ValueError("pre-order risk blocked order: EPISODE_ORDER_PENDING_TRANSITION_FAILED")
+        elif str(episode.get("state") or "") != "ORDER_PENDING":
+            self.pre_order_risk_service.episode_reservation_service.release(episode_key, reservation_token, reason="episode_intent_state_invalid")
+            raise ValueError("pre-order risk blocked order: EPISODE_ORDER_INTENT_STATE_INVALID")
         if not live_requested:
             trade: dict[str, object] | None = None
             record: Any | None = None
@@ -133,6 +137,12 @@ class OrderService:
                     self.paper_trading_service.rollback_unpersisted_trade(trade)
                 self.pre_order_risk_service.episode_reservation_service.release(episode_key, reservation_token, reason="paper_order_failed")
                 raise
+            self.pre_order_risk_service.episode_reservation_service.mark_submitted(
+                episode_key,
+                reservation_token,
+                broker_order_id=f"paper:{record.id}",
+                status="PAPER_PERSISTED",
+            )
             if not self.pre_order_risk_service.episode_reservation_service.mark_open(
                 episode_key,
                 reservation_token,
@@ -178,6 +188,12 @@ class OrderService:
         self._record_latency("live_submission_to_broker_ack", submission_started, signal=signal, mode="live")
         self._record_latency("order_submission_to_broker_acknowledgement", submission_started, signal=signal, mode="live")
         order_id = result.get("order_id") if isinstance(result, dict) else None
+        self.pre_order_risk_service.episode_reservation_service.mark_submitted(
+            episode_key,
+            reservation_token,
+            broker_order_id=str(order_id) if order_id else None,
+            status=str(result.get("status") or "SUBMITTED").upper() if isinstance(result, dict) else "SUBMITTED",
+        )
         record = self.trade_repository.create_trade(
             signal,
             mode="live",

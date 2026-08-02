@@ -267,6 +267,9 @@ class RiskPolicyService:
             return TIER_1_BASE
         if context.current_drawdown_pct >= float(settings.risk_reduction_after_drawdown_percent):
             return TIER_1_BASE
+        unrealized_loss_percent = max(0.0, -float(context.unrealized_daily_pnl)) / max(float(context.account_equity), 0.01) * 100.0
+        if unrealized_loss_percent >= float(settings.risk_reduction_after_drawdown_percent):
+            return TIER_1_BASE
         return TIER_4_EXCEPTIONAL
 
     def _evidence_allows(self, tier: str, evidence: dict[str, Any], context: RiskDecisionContext) -> bool:

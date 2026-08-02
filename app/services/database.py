@@ -295,6 +295,16 @@ class SetupEpisodeRecord(Base):
     risk_policy_version = Column(String(100), nullable=True, index=True)
     active_trade_id = Column(Integer, nullable=True, index=True)
     last_transition_reason = Column(String(150), nullable=True)
+    order_mode = Column(String(20), nullable=True, index=True)
+    authorized_quantity = Column(Integer, nullable=True)
+    order_intent_created_at = Column(DateTime, nullable=True, index=True)
+    order_intent_json = Column(Text, nullable=True)
+    submission_status = Column(String(40), nullable=True, index=True)
+    broker_order_id = Column(String(120), nullable=True, index=True)
+    submitted_at = Column(DateTime, nullable=True, index=True)
+    submission_error = Column(Text, nullable=True)
+    evidence_status = Column(String(40), nullable=True, index=True)
+    evidence_event_id = Column(String(64), nullable=True, index=True)
 
 
 class DecisionRiskEvidenceRecord(Base):
@@ -336,6 +346,84 @@ class DecisionOutcomeRecord(Base):
     strategy_version = Column(String(100), nullable=False, index=True)
     config_hash = Column(String(64), nullable=False, index=True)
     risk_policy_version = Column(String(100), nullable=False, index=True)
+
+
+class EpisodeObservationRecord(Base):
+    __tablename__ = "episode_observations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    episode_key = Column(String(64), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    updated_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    state = Column(String(40), nullable=False, index=True)
+    underlying_token = Column(BigInteger, nullable=True, index=True)
+    option_token = Column(BigInteger, nullable=True, index=True)
+    first_observed_at = Column(DateTime, nullable=False, index=True)
+    first_prepared_at = Column(DateTime, nullable=True, index=True)
+    first_armed_at = Column(DateTime, nullable=True, index=True)
+    first_triggered_at = Column(DateTime, nullable=True, index=True)
+    first_policy_eligible_at = Column(DateTime, nullable=True, index=True)
+    first_executable_at = Column(DateTime, nullable=True, index=True)
+    actual_order_at = Column(DateTime, nullable=True, index=True)
+    invalidated_at = Column(DateTime, nullable=True, index=True)
+    terminal_at = Column(DateTime, nullable=True, index=True)
+    context_json = Column(Text, nullable=False)
+    path_summary_json = Column(Text, nullable=False)
+    coverage_json = Column(Text, nullable=False)
+
+
+class ShadowPolicyDecisionRecord(Base):
+    __tablename__ = "shadow_policy_decisions"
+    __table_args__ = (UniqueConstraint("episode_key", "policy_version", name="uq_episode_shadow_policy"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    updated_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    episode_key = Column(String(64), nullable=False, index=True)
+    policy_version = Column(String(100), nullable=False, index=True)
+    policy_kind = Column(String(60), nullable=False, index=True)
+    final_state = Column(String(40), nullable=False, index=True)
+    decision_json = Column(Text, nullable=False)
+    timing_waterfall_json = Column(Text, nullable=False)
+    outcome_json = Column(Text, nullable=True)
+    strategy_version = Column(String(100), nullable=False, index=True)
+    config_hash = Column(String(64), nullable=False, index=True)
+
+
+class ReplayRunRecord(Base):
+    __tablename__ = "replay_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    run_id = Column(String(64), nullable=False, unique=True, index=True)
+    data_version = Column(String(100), nullable=False, index=True)
+    config_hash = Column(String(64), nullable=False, index=True)
+    strategy_version = Column(String(100), nullable=False, index=True)
+    policy_versions_json = Column(Text, nullable=False)
+    input_hash = Column(String(64), nullable=False, index=True)
+    output_hash = Column(String(64), nullable=False, index=True)
+    tick_capable = Column(Integer, nullable=False, default=0, index=True)
+    event_count = Column(Integer, nullable=False, default=0)
+    result_json = Column(Text, nullable=False)
+
+
+class AccountEquitySnapshotRecord(Base):
+    __tablename__ = "account_equity_snapshots"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    snapshot_id = Column(String(64), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
+    trading_date = Column(String(20), nullable=False, index=True)
+    start_of_day_equity = Column(Float, nullable=False)
+    current_equity = Column(Float, nullable=False)
+    peak_equity = Column(Float, nullable=False)
+    drawdown_percent = Column(Float, nullable=False)
+    realized_pnl = Column(Float, nullable=False)
+    unrealized_pnl = Column(Float, nullable=False)
+    planned_risk = Column(Float, nullable=False)
+    open_stop_risk = Column(Float, nullable=False)
+    premium_exposure = Column(Float, nullable=False)
+    snapshot_json = Column(Text, nullable=False)
 
 
 class RawTickRecord(Base):
@@ -426,7 +514,7 @@ def init_db(database_url: Optional[str] = None) -> None:
     connect_args = {"connect_timeout": 5} if url.startswith("mysql") else {"check_same_thread": False} if url.startswith("sqlite") else {}
     engine = create_engine(url, future=True, connect_args=connect_args)
     event.listen(engine, "before_cursor_execute", _record_database_query)
-    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
     Base.metadata.create_all(bind=engine)
     _ensure_candle_columns()
     _ensure_opportunity_columns()
@@ -701,6 +789,16 @@ def _ensure_setup_episode_columns() -> None:
         "risk_policy_version": "VARCHAR(100)",
         "active_trade_id": "INTEGER",
         "last_transition_reason": "VARCHAR(150)",
+        "order_mode": "VARCHAR(20)",
+        "authorized_quantity": "INTEGER",
+        "order_intent_created_at": "DATETIME",
+        "order_intent_json": "TEXT",
+        "submission_status": "VARCHAR(40)",
+        "broker_order_id": "VARCHAR(120)",
+        "submitted_at": "DATETIME",
+        "submission_error": "TEXT",
+        "evidence_status": "VARCHAR(40)",
+        "evidence_event_id": "VARCHAR(64)",
     }
     with engine.begin() as connection:
         for column, column_type in required.items():
@@ -764,15 +862,4 @@ def _mark_legacy_rejected_outcomes_low_confidence() -> None:
 def get_session():
     if SessionLocal is None:
         init_db()
-    else:
-        _ensure_candle_columns()
-        _ensure_opportunity_columns()
-        _ensure_trade_columns()
-        _ensure_rejected_opportunity_columns()
-        _ensure_strategy_validation_columns()
-        _ensure_strategy_version_columns()
-        _ensure_runtime_job_run_columns()
-        _ensure_raw_tick_columns()
-        _ensure_setup_episode_columns()
-        _ensure_decision_outcome_unique_index()
     return SessionLocal()

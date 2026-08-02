@@ -25,6 +25,12 @@ class LatencyMetricsService:
         "armed_tick_processing_duration",
         "risk_tier_evaluation_duration",
         "final_pre_order_validation_duration",
+        "pre_order_account_state_loading_duration",
+        "pre_order_quantity_authorization_duration",
+        "pre_order_episode_identity_duration",
+        "atomic_episode_reservation_duration",
+        "pre_order_evidence_enqueue_duration",
+        "outcome_collector_processing_duration",
         "scan_start_to_armed_state",
         "armed_state_to_confirmation",
         "confirmation_to_order_submission",
@@ -108,6 +114,7 @@ class LatencyMetricsService:
             "acceptance_targets_ms": {
                 "websocket_callback_p95": 5.0,
                 "cached_candidate_decision_p95": 100.0,
+                "final_pre_order_validation_p95": 25.0,
             },
             **current_strategy_lineage(),
         }

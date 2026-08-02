@@ -28,6 +28,9 @@ from app.services.backtest_service import BacktestService
 from app.services.data_ingestion_service import DataIngestionService
 from app.services.day_type_service import DayTypeService
 from app.services.decision_evidence_repository import DecisionEvidenceRepository
+from app.services.evidence_persistence_queue import EvidencePersistenceQueue
+from app.services.episode_outcome_collector import EpisodeOutcomeCollector
+from app.services.entry_policy_shadow_service import ShadowEntryPolicyComparisonService
 from app.services.database import get_session
 from app.services.greeks_service import GreeksService
 from app.services.notification_service import NotificationService
@@ -60,8 +63,9 @@ from app.services.outcome_learning_service import OutcomeLearningService
 from app.services.professional_readiness_service import ProfessionalReadinessService
 from app.services.professional_insights_service import ProfessionalInsightsService
 from app.services.risk_management_service import RiskManagementService
+from app.services.pre_order_risk_service import PreOrderRiskService
 from app.services.risk_policy_service import RiskPolicyService
-from app.services.risk_policy_service import RiskPolicyService
+from app.services.research_reporting_service import ResearchDatasetAuditService, ShadowPolicyResearchReportService
 from app.services.runtime_trading_config_service import RuntimeTradingConfigService
 from app.services.runtime_job_repository import RuntimeJobRepository
 from app.services.strategy_edge_service import StrategyEdgeService
@@ -214,6 +218,17 @@ opportunity_repository = OpportunityRepository()
 rejected_opportunity_repository = RejectedOpportunityRepository()
 trade_repository = TradeRepository()
 decision_evidence_repository = DecisionEvidenceRepository()
+episode_outcome_collector = EpisodeOutcomeCollector(
+    repository=decision_evidence_repository,
+    start_worker=False,
+)
+episode_outcome_collector.shadow_policy_service = ShadowEntryPolicyComparisonService()
+evidence_persistence_queue = EvidencePersistenceQueue(
+    repository=decision_evidence_repository,
+    start_worker=False,
+)
+research_dataset_audit_service = ResearchDatasetAuditService()
+shadow_policy_research_report_service = ShadowPolicyResearchReportService()
 risk_management_service = RiskManagementService(trade_repository)
 runtime_trading_config_service = RuntimeTradingConfigService()
 notification_service = NotificationService()
@@ -224,6 +239,7 @@ option_history_repository = OptionHistoryRepository()
 shared_kite_feed = KiteFeed() if settings.use_kite_market_data else None
 market_session_service = MarketSessionService()
 latency_metrics_service = LatencyMetricsService()
+episode_outcome_collector.latency_metrics = latency_metrics_service
 raw_tick_capture_service = RawTickCaptureService()
 underlying_candle_service = UnderlyingCandleService(market_session_service=market_session_service)
 kite_websocket_price_feed = KiteWebSocketPriceFeed(
@@ -237,6 +253,21 @@ kite_websocket_price_feed = KiteWebSocketPriceFeed(
     ),
 )
 active_trade_price_feed = ActiveTradePriceFeed(kite_websocket_price_feed)
+
+
+def _cached_executable_bid_for_equity(trade: Any) -> float | None:
+    token = getattr(trade, "instrument_token", None)
+    if not token:
+        return None
+    tick = kite_websocket_price_feed.get_latest_tick(int(token))
+    if tick is None or tick.bid is None or tick.bid <= 0:
+        return None
+    observed_at = tick.receive_timestamp or tick.timestamp
+    age = (ist_now_naive() - observed_at.replace(tzinfo=None)).total_seconds()
+    return float(tick.bid) if age <= float(settings.websocket_price_stale_seconds) else None
+
+
+risk_management_service.account_equity_state_service.executable_bid_provider = _cached_executable_bid_for_equity
 banknifty_option_prewarm_service = BankNiftyOptionPrewarmService(kite_websocket_price_feed)
 shared_trade_setup_service = TradeSetupService()
 market_data_runtime_service = MarketDataRuntimeService(
@@ -344,10 +375,18 @@ def get_scanner_service() -> ScannerService:
         fast_scan_context_service=fast_scan_context_service,
         session_eligibility_provider=market_session_service.should_run_live_modules,
         decision_evidence_repository=decision_evidence_repository,
+        outcome_collector=episode_outcome_collector,
     )
 
 
 def get_order_service() -> OrderService:
+    pre_order_risk_service = PreOrderRiskService(
+        risk_management_service=risk_management_service,
+        evidence_repository=decision_evidence_repository,
+        evidence_queue=evidence_persistence_queue,
+        outcome_collector=episode_outcome_collector,
+        latency_metrics=latency_metrics_service,
+    )
     return OrderService(
         kite_provider=get_kite_provider(),
         paper_trading_service=paper_trading_service,
@@ -357,6 +396,7 @@ def get_order_service() -> OrderService:
         live_safety_checker=_combined_live_safety_status,
         market_data_coordinator=market_data_coordinator,
         latency_metrics=latency_metrics_service,
+        pre_order_risk_service=pre_order_risk_service,
     )
 
 
@@ -406,6 +446,7 @@ banknifty_fast_rally_service = BankNiftyFastRallyService(auto_trader_service.req
 
 
 def _dispatch_strategy_tick(tick: object) -> None:
+    episode_outcome_collector.on_tick(tick)
     if armed_entry_tracker_service is not None:
         armed_entry_tracker_service.on_tick(tick)
     banknifty_fast_rally_service.on_tick(tick)
@@ -451,6 +492,9 @@ automation_supervisor_service = AutomationSupervisorService(
 
 @app.on_event("startup")
 async def startup_automation() -> None:
+    evidence_persistence_queue.start()
+    evidence_persistence_queue.recover_pending_order_evidence()
+    episode_outcome_collector.start()
     raw_tick_capture_service.start()
     underlying_candle_service.start()
     threading.Thread(target=_run_startup_maintenance, name="startup-maintenance", daemon=True).start()
@@ -531,6 +575,10 @@ async def shutdown_background_services() -> None:
     await option_snapshot_collector_service.stop()
     await auto_trader_service.stop()
     await opportunity_outcome_service.stop()
+    evidence_persistence_queue.flush(timeout=5.0)
+    evidence_persistence_queue.stop(timeout=2.0)
+    episode_outcome_collector.flush(timeout=5.0)
+    episode_outcome_collector.stop(timeout=3.0)
 
 
 @app.get("/health", tags=["01 System"], summary="Check API health")
@@ -592,32 +640,9 @@ def risk_policy_status() -> dict[str, object]:
     }
 
 
-@app.get("/risk/policy/status", tags=["01 System"], summary="Inspect active and shadow risk-tier policy safety")
-def risk_policy_status() -> dict[str, object]:
-    policy = RiskPolicyService()
-    conflicts = policy.configuration_conflicts()
-    return {
-        "risk_policy_version": settings.risk_policy_version,
-        "active_entry_policy": settings.active_entry_policy,
-        "shadow_entry_policy": settings.shadow_entry_policy,
-        "active_risk_policy": settings.active_risk_policy,
-        "shadow_risk_policy": settings.shadow_risk_policy,
-        "tiers_percent": {
-            "TIER_1_BASE": settings.risk_tier_1_base_pct,
-            "TIER_2_STRONG": settings.risk_tier_2_strong_pct,
-            "TIER_3_HIGH": settings.risk_tier_3_high_pct,
-            "TIER_4_EXCEPTIONAL": settings.risk_tier_4_exceptional_pct,
-        },
-        "absolute_process_ceiling_percent": policy.HARD_ABSOLUTE_MAX_PERCENT,
-        "configured_absolute_ceiling_percent": settings.absolute_max_risk_per_trade_percent,
-        "active_paper_max_tier": settings.active_paper_max_risk_tier,
-        "active_live_max_tier": settings.active_live_max_risk_tier,
-        "shadow_max_tier": settings.shadow_max_risk_tier,
-        "validated_higher_risk_active": settings.enable_validated_higher_risk_active,
-        "exceptional_live_risk_active": settings.enable_exceptional_live_risk,
-        "configuration_conflicts": conflicts,
-        "configuration_valid": not any(not item.startswith("POLICY_CONFLICT_") for item in conflicts),
-    }
+@app.get("/risk/equity/snapshot", tags=["01 System"], summary="Create an audited executable-bid account-equity snapshot")
+def audited_account_equity_snapshot() -> dict[str, object]:
+    return risk_management_service.account_equity_state_service.snapshot(persist=True).to_dict()
 
 
 @app.get("/db/health", tags=["01 System"], summary="Check database connectivity")
@@ -737,6 +762,27 @@ def get_evidence_matrix(group_by: str | None = None, limit: int = 5000) -> dict[
 @app.get("/research/strategy-promotion", tags=["10 Research"], summary="Evaluate guarded strategy promotion readiness")
 def get_strategy_promotion(timeframe: str = "5minute") -> dict[str, object]:
     return strategy_promotion_service.evaluate(timeframe=timeframe)
+
+
+@app.get("/research/shadow-validation/status", tags=["10 Research"], summary="Inspect asynchronous research collection health")
+def shadow_validation_status() -> dict[str, object]:
+    return {
+        "active_policy_changed": False,
+        "shadow_order_routing_available": False,
+        "evidence_queue": evidence_persistence_queue.status(),
+        "outcome_collector": episode_outcome_collector.status(),
+    }
+
+
+@app.get("/research/dataset-audit", tags=["10 Research"], summary="Audit replay and executable-quote dataset completeness")
+def research_dataset_audit() -> dict[str, object]:
+    return research_dataset_audit_service.audit()
+
+
+@app.get("/research/shadow-policy-report", tags=["10 Research"], summary="Compare shadow policies by chronological unique episodes")
+def shadow_policy_report(maximum_horizon_seconds: int = 900) -> dict[str, object]:
+    horizon = max(30, min(int(maximum_horizon_seconds), 86400))
+    return shadow_policy_research_report_service.report(maximum_horizon_seconds=horizon)
 
 
 @app.post("/strategy/versions/register", tags=["10 Research"], summary="Register or refresh the current strategy version with human notes")

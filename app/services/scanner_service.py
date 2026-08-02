@@ -15,6 +15,7 @@ from app.services.day_type_service import DayTypeService
 from app.services.data_freshness_service import DataFreshnessService
 from app.services.decision_engine_service import DecisionEngineService
 from app.services.decision_evidence_repository import DecisionEvidenceRepository
+from app.services.episode_reservation_service import EpisodeReservationService
 from app.services.entry_timing_service import EntryTimingService
 from app.services.mock_market_feed import MockMarketFeed
 from app.providers.kite_feed import KiteFeed
@@ -80,6 +81,7 @@ class ScannerService:
         candidate_ranking_service: TradeCandidateRankingService | None = None,
         session_eligibility_provider: Callable[[], bool] | None = None,
         decision_evidence_repository: DecisionEvidenceRepository | None = None,
+        outcome_collector: Any | None = None,
     ) -> None:
         self.signal_service = signal_service or SignalService()
         self.scoring_service = scoring_service or IndicatorScoringService()
@@ -109,6 +111,8 @@ class ScannerService:
         self.candidate_ranking_service = candidate_ranking_service or TradeCandidateRankingService()
         self.session_eligibility_provider = session_eligibility_provider or MarketSessionService().should_run_live_modules
         self.decision_evidence_repository = decision_evidence_repository
+        self.outcome_collector = outcome_collector
+        self.episode_reservation_service = EpisodeReservationService()
 
         # Market data is independent from live order placement. When Kite data is
         # requested, fail closed instead of silently returning mock opportunities.
@@ -1497,6 +1501,70 @@ class ScannerService:
             "score_breakdown": breakdown,
         }
         logger.info("trade_decision %s", payload)
+        if self.outcome_collector is not None and contract is not None and prices:
+            try:
+                research_signal = Signal(
+                    symbol=symbol,
+                    action=action or self._action(side, trend),
+                    side=side,
+                    tradingsymbol=contract.tradingsymbol,
+                    exchange=contract.exchange,
+                    instrument_token=contract.instrument_token,
+                    strike=contract.strike,
+                    expiry=contract.expiry,
+                    entry_price=prices.get("entry_price"),
+                    stop_loss=prices.get("stop_loss"),
+                    target_1=prices.get("target_1"),
+                    target_2=prices.get("target_2"),
+                    target_3=prices.get("target_3"),
+                    quantity=contract.lot_size,
+                    lot_size=contract.lot_size,
+                    score=score,
+                    factor_scores=factor_scores or {},
+                )
+                episode_identity = self.episode_reservation_service.identity(
+                    research_signal,
+                    metadata={
+                        "trigger_identifier": f"scheduled:{contract.instrument_token}:{round(float(prices.get('entry_price') or 0.0), 2)}",
+                        "setup_generated_at": payload["timestamp"],
+                    },
+                )
+                self.outcome_collector.register_episode(
+                    episode_identity["episode_key"],
+                    state="PREPARED" if accepted else "REJECTED",
+                    observed_at=datetime.fromisoformat(str(payload["timestamp"]).replace("Z", "+00:00")).replace(tzinfo=None),
+                    context={
+                        "underlying_token": (snapshot or {}).get("instrument_token"),
+                        "option_token": contract.instrument_token,
+                        "tradingsymbol": contract.tradingsymbol,
+                        "strike": contract.strike,
+                        "expiry": contract.expiry,
+                        "lot_size": contract.lot_size,
+                        "quantity": contract.lot_size,
+                        "entry_price": prices.get("entry_price"),
+                        "stop_loss": prices.get("stop_loss"),
+                        "target_1": prices.get("target_1"),
+                        "target_2": prices.get("target_2"),
+                        "target_3": prices.get("target_3"),
+                        "decision_reasons": reasons,
+                        "score_diagnostic_only": score,
+                        "direction": action,
+                        "setup_family": self._shadow_setup_family(factor_scores),
+                        "market_regime": self._shadow_market_regime(factor_scores),
+                        "shadow_policy_context": self._shadow_policy_context(
+                            episode_key=episode_identity["episode_key"],
+                            observed_at=str(payload["timestamp"]),
+                            action=action,
+                            accepted=accepted,
+                            contract=contract,
+                            prices=prices,
+                            factor_scores=factor_scores or {},
+                            snapshot=snapshot or {},
+                        ),
+                    },
+                )
+            except Exception as exc:
+                logger.warning("failed_to_register_episode_outcome symbol=%s error=%s", symbol, exc)
         if self.decision_evidence_repository is not None:
             try:
                 episode = factor_scores.get("episode", {}) if factor_scores and isinstance(factor_scores.get("episode"), dict) else {}
@@ -1518,6 +1586,87 @@ class ScannerService:
                 )
             except Exception as exc:
                 logger.warning("failed_to_persist_decision_evidence symbol=%s error=%s", symbol, exc)
+
+    def _shadow_policy_context(
+        self,
+        *,
+        episode_key: str,
+        observed_at: str,
+        action: str,
+        accepted: bool,
+        contract: OptionContract,
+        prices: dict[str, float],
+        factor_scores: dict[str, object],
+        snapshot: dict[str, object],
+    ) -> dict[str, object]:
+        multi = factor_scores.get("multi_timeframe") if isinstance(factor_scores.get("multi_timeframe"), dict) else {}
+        frames = {
+            str(item.get("timeframe")): item
+            for item in multi.get("frames", [])
+            if isinstance(item, dict)
+        }
+        premium = factor_scores.get("option_premium_confirmation") if isinstance(factor_scores.get("option_premium_confirmation"), dict) else {}
+        freshness = factor_scores.get("data_freshness") if isinstance(factor_scores.get("data_freshness"), dict) else {}
+        quality = factor_scores.get("data_quality") if isinstance(factor_scores.get("data_quality"), dict) else {}
+        timing = factor_scores.get("entry_timing") if isinstance(factor_scores.get("entry_timing"), dict) else {}
+        constituents = factor_scores.get("banknifty_intelligence") if isinstance(factor_scores.get("banknifty_intelligence"), dict) else {}
+        timing_state = str(timing.get("state") or "").upper()
+        route = "scheduled_direct" if timing_state == "ENTER_NOW" else "armed" if timing_state == "ARMED_FOR_ENTRY" else "scheduled"
+        direction = "bullish" if str(action).upper() == "BUY_CE" else "bearish"
+        expected_frame_direction = "bullish" if direction == "bullish" else "bearish"
+        five_direction = str((frames.get("5minute") or {}).get("direction") or "neutral")
+        one_direction = str((frames.get("1minute") or {}).get("direction") or "neutral")
+        entry = float(prices.get("entry_price") or 0.0)
+        stop = float(prices.get("stop_loss") or 0.0)
+        target = float(prices.get("target_1") or 0.0)
+        trigger = float(snapshot.get("price") or 0.0)
+        option_token = int(contract.instrument_token)
+        return {
+            "episode_key": episode_key,
+            "direction": direction,
+            "setup_family": self._shadow_setup_family(factor_scores),
+            "observed_at": observed_at,
+            "underlying_trigger": trigger,
+            "stop_loss": stop,
+            "target_1": target,
+            "lot_size": int(contract.lot_size),
+            "minimum_depth": int(contract.lot_size),
+            "maximum_spread_pct": float(settings.max_bid_ask_spread_pct),
+            "five_minute_structure": five_direction,
+            "one_minute_structure": one_direction,
+            "five_minute_strongly_opposed": five_direction not in {"neutral", "transition", "transitioning", expected_frame_direction},
+            "constituent_evidence_available": bool(constituents),
+            "constituent_strongly_contradictory": bool(constituents.get("passed") is False),
+            "contract_tradeable": bool(contract.bid > 0 and contract.ask > 0 and contract.instrument_token),
+            "price_plan_valid": bool(entry > stop > 0 and target > entry),
+            "base_risk_feasible": bool(contract.lot_size > 0 and entry > stop > 0),
+            "provenance_valid": bool(quality.get("passed", False)),
+            "data_fresh": bool(freshness.get("passed", False)),
+            "premium_confirmation_passed": bool(premium.get("passed", False)),
+            "preparation_passed": bool(accepted or timing_state in {"ARMED_FOR_ENTRY", "ENTER_NOW"}),
+            "fast_candidate_requirements_passed": bool(factor_scores.get("prepared_candidate")),
+            "promotion_registered": bool(timing_state in {"ARMED_FOR_ENTRY", "ENTER_NOW"}),
+            "armed_confirmation_passed": bool(timing_state == "ENTER_NOW"),
+            "chase_valid": not bool(timing.get("entry_should_reject_as_late")),
+            "target_room_valid": float(timing.get("target1_room_pct") or 0.0) >= float(settings.min_target1_room_pct),
+            "remaining_rr_valid": float(timing.get("remaining_risk_reward") or 0.0) >= float(settings.min_remaining_risk_reward),
+            "session_eligible": True,
+            "account_eligible": bool(accepted),
+            "metadata": {
+                "entry_route": route,
+                "underlying_token": snapshot.get("instrument_token"),
+                "option_token": option_token,
+                "instrument_token": option_token,
+            },
+        }
+
+    def _shadow_setup_family(self, factor_scores: dict[str, object] | None) -> str:
+        payload = factor_scores.get("setup_family") if factor_scores and isinstance(factor_scores.get("setup_family"), dict) else {}
+        return str(payload.get("setup_family") or payload.get("family") or "unknown")
+
+    def _shadow_market_regime(self, factor_scores: dict[str, object] | None) -> str:
+        payload = factor_scores.get("market_regime") if factor_scores and isinstance(factor_scores.get("market_regime"), dict) else {}
+        return str(payload.get("regime") or payload.get("label") or "unknown")
 
     def _save_rejection(
         self,

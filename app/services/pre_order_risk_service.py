@@ -4,6 +4,7 @@ from dataclasses import asdict
 from datetime import datetime
 import time
 from typing import Any
+import uuid
 from zoneinfo import ZoneInfo
 
 from app.config import settings
@@ -24,12 +25,16 @@ class PreOrderRiskService:
         risk_policy_service: RiskPolicyService | None = None,
         episode_reservation_service: EpisodeReservationService | None = None,
         evidence_repository: DecisionEvidenceRepository | None = None,
+        evidence_queue: Any | None = None,
+        outcome_collector: Any | None = None,
         latency_metrics: Any | None = None,
     ) -> None:
         self.risk_management_service = risk_management_service
         self.risk_policy_service = risk_policy_service or RiskPolicyService()
         self.episode_reservation_service = episode_reservation_service or EpisodeReservationService()
         self.evidence_repository = evidence_repository or DecisionEvidenceRepository()
+        self.evidence_queue = evidence_queue
+        self.outcome_collector = outcome_collector
         self.latency_metrics = latency_metrics
 
     def evaluate_and_reserve(
@@ -45,10 +50,21 @@ class PreOrderRiskService:
     ) -> dict[str, Any]:
         validation_started = time.perf_counter()
         mode = str(order_mode or "paper").lower()
+        identity_started = time.perf_counter()
+        identity = self.episode_reservation_service.identity(signal, metadata=metadata)
+        self._record_latency("pre_order_episode_identity_duration", identity_started, {"mode": mode})
+        account_started = time.perf_counter()
         risk_guard = self.risk_management_service.evaluate_signal(signal.symbol)
+        self._record_latency("pre_order_account_state_loading_duration", account_started, {"mode": mode})
         limits = risk_guard.get("limits", {}) if isinstance(risk_guard, dict) else {}
         risk_state = risk_guard.get("risk_state", {}) if isinstance(risk_guard, dict) else {}
-        equity = float(account_equity_override or limits.get("available_cash") or (settings.account_equity if mode == "paper" else 0.0))
+        equity = float(
+            account_equity_override
+            or risk_state.get("current_audited_equity")
+            or limits.get("current_audited_equity")
+            or limits.get("available_cash")
+            or (settings.account_equity if mode == "paper" else 0.0)
+        )
         factors = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
         risk_request = factors.get("risk_request") if isinstance(factors.get("risk_request"), dict) else {}
         requested_tier = str((metadata or {}).get("requested_risk_tier") or risk_request.get("requested_tier") or TIER_1_BASE)
@@ -105,6 +121,7 @@ class PreOrderRiskService:
             if settings.require_broker_protective_stop_for_live_entry and not settings.enable_broker_emergency_sl:
                 rejection_reasons.append("LIVE_PROTECTIVE_STOP_REQUIRED")
 
+        quantity_started = time.perf_counter()
         maximum_quantity = int(active_decision.maximum_quantity)
         requested_quantity = int(signal.quantity or 0)
         approved_quantity = min(requested_quantity, maximum_quantity)
@@ -115,11 +132,9 @@ class PreOrderRiskService:
         estimated_loss = approved_quantity * float(active_decision.risk_per_unit)
         if estimated_loss > float(active_decision.approved_risk_amount) + 0.01:
             rejection_reasons.append("ESTIMATED_STOP_LOSS_EXCEEDS_APPROVED_RISK")
+        self._record_latency("pre_order_quantity_authorization_duration", quantity_started, {"mode": mode})
 
-        identity = self.episode_reservation_service.identity(signal, metadata=metadata)
-        existing_episode = self.episode_reservation_service.status(identity["episode_key"])
-        if existing_episode and existing_episode.get("state") in {"RESERVED", "ORDER_PENDING", "OPEN", "CLOSED"}:
-            rejection_reasons.append(f"DUPLICATE_EPISODE_{existing_episode.get('state')}")
+        evidence_event_id = uuid.uuid4().hex
         evidence_context = {
             "trading_date": ist_now_naive().date().isoformat(),
             "session_phase": context.session_phase,
@@ -133,19 +148,37 @@ class PreOrderRiskService:
             "estimated_total_loss_at_stop_for_approved_quantity": round(estimated_loss, 2),
             "metadata": metadata or {},
         }
-        evidence = self.evidence_repository.record_decision(
-            decision_type="pre_order_risk",
-            final_state="REJECTED" if rejection_reasons else "PREPARED",
-            symbol=signal.symbol,
-            tradingsymbol=signal.tradingsymbol,
-            episode_key=identity["episode_key"],
-            context=evidence_context,
-            gate_results={"rejection_reasons": list(dict.fromkeys(rejection_reasons))},
-            active_risk_decision=active_decision.to_dict(),
-            shadow_risk_decisions=shadow_decisions,
-            transition_timestamps={"pre_order_evaluated_at": ist_now_naive().isoformat(sep=" ")},
-        )
+        evidence_payload = {
+            "decision_type": "pre_order_risk",
+            "final_state": "REJECTED" if rejection_reasons else "PREPARED",
+            "symbol": signal.symbol,
+            "tradingsymbol": signal.tradingsymbol,
+            "episode_key": identity["episode_key"],
+            "context": evidence_context,
+            "gate_results": {"rejection_reasons": list(dict.fromkeys(rejection_reasons))},
+            "active_risk_decision": active_decision.to_dict(),
+            "shadow_risk_decisions": shadow_decisions,
+            "transition_timestamps": {"pre_order_evaluated_at": ist_now_naive().isoformat(sep=" ")},
+        }
         if rejection_reasons:
+            # A duplicate may also make account gates fail (for example the
+            # first order already consumed the open-position limit). Resolve
+            # the more actionable duplicate reason only on this rejected path;
+            # the authorized path relies on the atomic reservation itself.
+            existing_episode = self.episode_reservation_service.status(identity["episode_key"])
+            if existing_episode and existing_episode.get("state") in {"RESERVED", "ORDER_PENDING", "OPEN", "CLOSED"}:
+                rejection_reasons.insert(0, f"DUPLICATE_EPISODE_{existing_episode.get('state')}")
+                evidence_payload["gate_results"] = {"rejection_reasons": list(dict.fromkeys(rejection_reasons))}
+            self._register_outcome_episode(
+                identity["episode_key"], signal, context, state="REJECTED", approved_quantity=0, metadata=metadata
+            )
+            evidence_started = time.perf_counter()
+            evidence = self._persist_evidence(
+                evidence_payload,
+                event_id=evidence_event_id,
+                episode_key=None,
+            )
+            self._record_latency("pre_order_evidence_enqueue_duration", evidence_started, {"mode": mode, "authorized": False})
             self._record_latency("final_pre_order_validation_duration", validation_started, {"mode": mode, "passed": False})
             return {
                 "passed": False,
@@ -157,20 +190,33 @@ class PreOrderRiskService:
                 "evidence": evidence,
             }
 
-        reservation = self.episode_reservation_service.reserve(signal, metadata=metadata)
+        reservation_started = time.perf_counter()
+        reservation = self.episode_reservation_service.reserve_order_intent(
+            signal,
+            authorized_quantity=approved_quantity,
+            order_mode=mode,
+            risk_decision=active_decision.to_dict(),
+            evidence_event_id=evidence_event_id,
+            metadata=metadata,
+            identity_override=identity,
+        )
+        self._record_latency("atomic_episode_reservation_duration", reservation_started, {"mode": mode})
         if not reservation.get("acquired"):
             duplicate_reason = str(reservation.get("reason") or "DUPLICATE_EPISODE")
-            duplicate_evidence = self.evidence_repository.record_decision(
-                decision_type="pre_order_reservation",
-                final_state="REJECTED",
-                symbol=signal.symbol,
-                tradingsymbol=signal.tradingsymbol,
-                episode_key=identity["episode_key"],
-                context=evidence_context,
-                gate_results={"rejection_reasons": [duplicate_reason]},
-                active_risk_decision=active_decision.to_dict(),
-                shadow_risk_decisions=shadow_decisions,
-                transition_timestamps={"reservation_rejected_at": ist_now_naive().isoformat(sep=" ")},
+            duplicate_payload = {
+                **evidence_payload,
+                "decision_type": "pre_order_reservation",
+                "final_state": "REJECTED",
+                "gate_results": {"rejection_reasons": [duplicate_reason]},
+                "transition_timestamps": {"reservation_rejected_at": ist_now_naive().isoformat(sep=" ")},
+            }
+            duplicate_evidence = self._persist_evidence(
+                duplicate_payload,
+                event_id=uuid.uuid4().hex,
+                episode_key=None,
+            )
+            self._register_outcome_episode(
+                identity["episode_key"], signal, context, state="REJECTED", approved_quantity=0, metadata=metadata
             )
             self._record_latency("final_pre_order_validation_duration", validation_started, {"mode": mode, "passed": False})
             return {
@@ -182,6 +228,32 @@ class PreOrderRiskService:
                 "episode": reservation,
                 "evidence": duplicate_evidence,
             }
+        evidence_started = time.perf_counter()
+        self._register_outcome_episode(
+            identity["episode_key"], signal, context, state="ORDER_PENDING", approved_quantity=approved_quantity, metadata=metadata
+        )
+        evidence = self._persist_evidence(
+            evidence_payload,
+            event_id=evidence_event_id,
+            episode_key=identity["episode_key"],
+        )
+        self._record_latency("pre_order_evidence_enqueue_duration", evidence_started, {"mode": mode, "authorized": True})
+        if not evidence.get("accepted", True):
+            self.episode_reservation_service.release(
+                identity["episode_key"],
+                str(reservation.get("reservation_token") or ""),
+                reason=str(evidence.get("reason") or "EVIDENCE_QUEUE_UNAVAILABLE"),
+            )
+            self._record_latency("final_pre_order_validation_duration", validation_started, {"mode": mode, "passed": False})
+            return {
+                "passed": False,
+                "rejection_reasons": [str(evidence.get("reason") or "EVIDENCE_QUEUE_UNAVAILABLE")],
+                "risk_decision": active_decision.to_dict(),
+                "shadow_risk_decisions": shadow_decisions,
+                "approved_quantity": 0,
+                "episode": {**reservation, "acquired": False},
+                "evidence": evidence,
+            }
         self._record_latency("final_pre_order_validation_duration", validation_started, {"mode": mode, "passed": True})
         return {
             "passed": True,
@@ -192,6 +264,72 @@ class PreOrderRiskService:
             "episode": reservation,
             "evidence": evidence,
         }
+
+    def _persist_evidence(
+        self,
+        payload: dict[str, Any],
+        *,
+        event_id: str,
+        episode_key: str | None,
+    ) -> dict[str, Any]:
+        if self.evidence_queue is not None:
+            return self.evidence_queue.enqueue_decision(payload, episode_key=episode_key, event_id=event_id)
+        result = self.evidence_repository.record_decision(**payload, decision_id=event_id)
+        return {**result, "accepted": True, "event_id": event_id, "reason": None}
+
+    def _register_outcome_episode(
+        self,
+        episode_key: str,
+        signal: Signal,
+        context: RiskDecisionContext,
+        *,
+        state: str,
+        approved_quantity: int,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        if self.outcome_collector is None:
+            return
+        factors = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+        contract = factors.get("contract") if isinstance(factors.get("contract"), dict) else {}
+        try:
+            self.outcome_collector.register_episode(
+                episode_key,
+                state=state,
+                observed_at=self._metadata_time(metadata, "setup_generated_at") or self._metadata_time(metadata, "armed_at"),
+                context={
+                    "underlying_token": (metadata or {}).get("underlying_token") or factors.get("underlying_token"),
+                    "option_token": signal.instrument_token or contract.get("instrument_token"),
+                    "instrument_token": signal.instrument_token or contract.get("instrument_token"),
+                    "tradingsymbol": signal.tradingsymbol,
+                    "strike": signal.strike,
+                    "expiry": signal.expiry,
+                    "lot_size": signal.lot_size,
+                    "quantity": approved_quantity,
+                    "entry_price": context.expected_entry,
+                    "stop_loss": signal.stop_loss,
+                    "target_1": signal.target_1,
+                    "target_2": signal.target_2,
+                    "target_3": signal.target_3,
+                    "account_equity": context.account_equity,
+                    "setup_family": context.setup_family,
+                    "market_regime": context.market_regime,
+                    "session_phase": context.session_phase,
+                },
+            )
+        except Exception:
+            # Research tracking must never weaken the final safety decision.
+            return
+
+    def _metadata_time(self, metadata: dict[str, Any] | None, key: str) -> datetime | None:
+        value = (metadata or {}).get(key)
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None)
+        if value:
+            try:
+                return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+            except ValueError:
+                return None
+        return None
 
     def _session_eligible(self) -> bool:
         now = datetime.now(ZoneInfo("Asia/Kolkata"))
