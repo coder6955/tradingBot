@@ -73,7 +73,11 @@ class AccountEquityStateService:
                 or getattr(trade, "requested_quantity", None)
                 or 0
             )
-            entry = float(getattr(trade, "average_price", None) or getattr(trade, "entry_price", None) or 0.0)
+            entry = float(
+                getattr(trade, "average_price", None)
+                or getattr(trade, "entry_price", None)
+                or 0.0
+            )
             bid = self._bid(trade)
             if bid is None:
                 # A missing executable exit is valued at zero for risk, never at LTP.
@@ -87,7 +91,11 @@ class AccountEquityStateService:
             unrealized += (executable_exit - entry) * quantity
             stored_risk = float(getattr(trade, "estimated_loss_at_stop", 0.0) or 0.0)
             stop_loss = float(getattr(trade, "stop_loss", 0.0) or 0.0)
-            open_stop_risk += stored_risk if stored_risk > 0 else max(0.0, entry - stop_loss) * quantity
+            open_stop_risk += (
+                stored_risk
+                if stored_risk > 0
+                else max(0.0, entry - stop_loss) * quantity
+            )
         realized = float(summary.get("pnl") or 0.0)
         current_equity = max(0.0, available_cash + open_market_value)
         prior = self._latest_for_date(trading_date)
@@ -101,8 +109,13 @@ class AccountEquityStateService:
             current_equity,
             float(prior.peak_equity) if prior is not None else 0.0,
         )
-        drawdown = max(0.0, (peak_equity - current_equity) / max(peak_equity, 0.01) * 100.0)
-        planned = sum(float(getattr(trade, "approved_risk_amount", 0.0) or 0.0) for trade in today_trades)
+        drawdown = max(
+            0.0, (peak_equity - current_equity) / max(peak_equity, 0.01) * 100.0
+        )
+        planned = sum(
+            float(getattr(trade, "approved_risk_amount", 0.0) or 0.0)
+            for trade in today_trades
+        )
         consecutive_losses = self._consecutive_losses(today_trades)
         snapshot = AccountEquitySnapshot(
             snapshot_id=uuid.uuid4().hex,
@@ -121,8 +134,14 @@ class AccountEquityStateService:
             daily_total_equity_change=round(current_equity - start_equity, 2),
             premium_exposure=round(float(exposure.get("premium_exposure") or 0.0), 2),
             consecutive_losses=consecutive_losses,
-            recovery_after_losses=bool(consecutive_losses == 0 and current_equity >= peak_equity),
-            executable_bid_coverage_percent=round(covered / max(len(open_trades), 1) * 100.0, 2) if open_trades else 100.0,
+            recovery_after_losses=bool(
+                consecutive_losses == 0 and current_equity >= peak_equity
+            ),
+            executable_bid_coverage_percent=round(
+                covered / max(len(open_trades), 1) * 100.0, 2
+            )
+            if open_trades
+            else 100.0,
             missing_bid_trade_ids=tuple(missing),
             source="broker_cash_plus_executable_option_bid",
         )
@@ -147,7 +166,9 @@ class AccountEquityStateService:
                     planned_risk=snapshot.daily_planned_risk,
                     open_stop_risk=snapshot.open_stop_risk,
                     premium_exposure=snapshot.premium_exposure,
-                    snapshot_json=json.dumps(snapshot.to_dict(), default=str, sort_keys=True),
+                    snapshot_json=json.dumps(
+                        snapshot.to_dict(), default=str, sort_keys=True
+                    ),
                 )
             )
             session.commit()
@@ -160,7 +181,10 @@ class AccountEquityStateService:
             return (
                 session.query(AccountEquitySnapshotRecord)
                 .filter(AccountEquitySnapshotRecord.trading_date == trading_date)
-                .order_by(AccountEquitySnapshotRecord.created_at.desc(), AccountEquitySnapshotRecord.id.desc())
+                .order_by(
+                    AccountEquitySnapshotRecord.created_at.desc(),
+                    AccountEquitySnapshotRecord.id.desc(),
+                )
                 .first()
             )
         finally:
@@ -183,15 +207,25 @@ class AccountEquityStateService:
             return None
 
     def _consecutive_losses(self, trades: list[Any]) -> int:
-        closed = [trade for trade in trades if str(getattr(trade, "status", "")).lower() == "closed"]
+        closed = [
+            trade
+            for trade in trades
+            if str(getattr(trade, "status", "")).lower() == "closed"
+        ]
         closed.sort(
-            key=lambda trade: getattr(trade, "updated_at", None) or getattr(trade, "created_at", None) or datetime.min,
+            key=lambda trade: (
+                getattr(trade, "updated_at", None)
+                or getattr(trade, "created_at", None)
+                or datetime.min
+            ),
             reverse=True,
         )
         count = 0
         for trade in closed:
             net_pnl = getattr(trade, "net_pnl", None)
-            pnl = float(net_pnl if net_pnl is not None else getattr(trade, "pnl", 0.0) or 0.0)
+            pnl = float(
+                net_pnl if net_pnl is not None else getattr(trade, "pnl", 0.0) or 0.0
+            )
             if pnl >= 0:
                 break
             count += 1

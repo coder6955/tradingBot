@@ -20,7 +20,10 @@ class FailingKiteProvider:
         return {
             instruments[0]: {
                 "last_price": 100,
-                "depth": {"buy": [{"price": 99.5, "quantity": 1000}], "sell": [{"price": 100, "quantity": 1000}]},
+                "depth": {
+                    "buy": [{"price": 99.5, "quantity": 1000}],
+                    "sell": [{"price": 100, "quantity": 1000}],
+                },
             }
         }
 
@@ -40,7 +43,10 @@ class LiveKiteProvider:
         return {
             instruments[0]: {
                 "last_price": 100,
-                "depth": {"buy": [{"price": 99.5, "quantity": 1000}], "sell": [{"price": 100, "quantity": 1000}]},
+                "depth": {
+                    "buy": [{"price": 99.5, "quantity": 1000}],
+                    "sell": [{"price": 100, "quantity": 1000}],
+                },
             }
         }
 
@@ -51,7 +57,15 @@ class LiveKiteProvider:
 
     def order_history(self, order_id):  # type: ignore[no-untyped-def]
         quantity = int(self.orders[0]["quantity"]) if self.orders else 0
-        return [{"order_id": order_id, "status": "COMPLETE", "filled_quantity": quantity, "quantity": quantity, "average_price": 100}]
+        return [
+            {
+                "order_id": order_id,
+                "status": "COMPLETE",
+                "filled_quantity": quantity,
+                "quantity": quantity,
+                "average_price": 100,
+            }
+        ]
 
     def cancel_order(self, order_id, variety="regular"):  # type: ignore[no-untyped-def]
         return {"order_id": order_id, "status": "cancelled", "variety": variety}
@@ -75,7 +89,15 @@ class PartialFillProvider(LiveKiteProvider):
         self.cancelled_entry = False
 
     def order_history(self, order_id):  # type: ignore[no-untyped-def]
-        return [{"order_id": order_id, "status": "OPEN", "filled_quantity": 30, "quantity": 90, "average_price": 101}]
+        return [
+            {
+                "order_id": order_id,
+                "status": "OPEN",
+                "filled_quantity": 30,
+                "quantity": 90,
+                "average_price": 101,
+            }
+        ]
 
     def cancel_order(self, order_id, variety="regular"):  # type: ignore[no-untyped-def]
         self.cancelled_entry = True
@@ -103,7 +125,11 @@ class BlockingRiskService:
             "reasons": ["max daily loss reached"],
             "limits": {"available_cash": 100000.0},
             "summary": {"trades": 1, "pnl": -2000.0, "stop_losses": 1},
-            "open_exposure": {"open_trades": 0, "by_symbol": {}, "premium_exposure": 0.0},
+            "open_exposure": {
+                "open_trades": 0,
+                "by_symbol": {},
+                "premium_exposure": 0.0,
+            },
             "risk_state": {"realized_daily_pnl": -2000.0},
         }
 
@@ -174,7 +200,10 @@ class OrderServiceTests(unittest.TestCase):
             "lot_size": 15,
             "score": 85,
             "factor_scores": {
-                "strategy_metadata": {"strategy_name": "banknifty_option_buying", "strategy_version": "test"},
+                "strategy_metadata": {
+                    "strategy_name": "banknifty_option_buying",
+                    "strategy_version": "test",
+                },
                 "contract": {"expiry": "2099-12-31"},
             },
         }
@@ -204,7 +233,9 @@ class OrderServiceTests(unittest.TestCase):
             service.place_signal_order(self._signal(), order_mode="paper")
         self.assertEqual(paper.positions, [])
 
-    def test_paper_persistence_failure_rolls_back_position_and_releases_episode(self) -> None:
+    def test_paper_persistence_failure_rolls_back_position_and_releases_episode(
+        self,
+    ) -> None:
         from app.services.database import SetupEpisodeRecord, get_session
 
         paper = PaperTradingService()
@@ -238,7 +269,13 @@ class OrderServiceTests(unittest.TestCase):
 
     def test_rejects_expired_contract(self) -> None:
         service = OrderService(kite_provider=FailingKiteProvider())  # type: ignore[arg-type]
-        signal = self._signal(expiry="2024-06-30", factor_scores={"strategy_metadata": {"strategy_version": "test"}, "contract": {"expiry": "2024-06-30"}})
+        signal = self._signal(
+            expiry="2024-06-30",
+            factor_scores={
+                "strategy_metadata": {"strategy_version": "test"},
+                "contract": {"expiry": "2024-06-30"},
+            },
+        )
 
         with self.assertRaisesRegex(ValueError, "expired"):
             service.place_signal_order(signal, confirm_live=False)
@@ -291,19 +328,33 @@ class OrderServiceTests(unittest.TestCase):
         try:
             object.__setattr__(order_service.settings, "live_trading_mode", True)
             object.__setattr__(order_service.settings, "paper_trading_mode", False)
-            object.__setattr__(order_service.settings, "enable_broker_emergency_sl", True)
-            result = service.place_signal_order(signal, confirm_live=True, order_mode="live")
+            object.__setattr__(
+                order_service.settings, "enable_broker_emergency_sl", True
+            )
+            result = service.place_signal_order(
+                signal, confirm_live=True, order_mode="live"
+            )
         finally:
-            object.__setattr__(order_service.settings, "live_trading_mode", original_live)
-            object.__setattr__(order_service.settings, "paper_trading_mode", original_paper)
-            object.__setattr__(order_service.settings, "enable_broker_emergency_sl", original_protection)
+            object.__setattr__(
+                order_service.settings, "live_trading_mode", original_live
+            )
+            object.__setattr__(
+                order_service.settings, "paper_trading_mode", original_paper
+            )
+            object.__setattr__(
+                order_service.settings,
+                "enable_broker_emergency_sl",
+                original_protection,
+            )
 
         self.assertEqual(result["status"], "live")
         self.assertEqual(result["requested_quantity"], 150)
         self.assertEqual(result["placed_quantity"], 90)
         self.assertEqual(provider.order["quantity"], 90)
 
-    def test_live_order_places_broker_emergency_sl_when_enabled_and_entry_filled(self) -> None:
+    def test_live_order_places_broker_emergency_sl_when_enabled_and_entry_filled(
+        self,
+    ) -> None:
         provider = LiveKiteProvider()
         repo = CapturingTradeRepository()
         service = OrderService(
@@ -324,8 +375,12 @@ class OrderServiceTests(unittest.TestCase):
         try:
             object.__setattr__(order_service.settings, "live_trading_mode", True)
             object.__setattr__(order_service.settings, "paper_trading_mode", False)
-            object.__setattr__(order_service.settings, "enable_broker_emergency_sl", True)
-            result = service.place_signal_order(signal, confirm_live=True, order_mode="live")
+            object.__setattr__(
+                order_service.settings, "enable_broker_emergency_sl", True
+            )
+            result = service.place_signal_order(
+                signal, confirm_live=True, order_mode="live"
+            )
         finally:
             for key, value in originals.items():
                 object.__setattr__(order_service.settings, key, value)
@@ -338,7 +393,9 @@ class OrderServiceTests(unittest.TestCase):
         self.assertEqual(provider.orders[1]["trigger_price"], 80)
         self.assertEqual(repo.protective["status"], "submitted")
 
-    def test_live_order_is_blocked_when_required_broker_protection_is_disabled(self) -> None:
+    def test_live_order_is_blocked_when_required_broker_protection_is_disabled(
+        self,
+    ) -> None:
         provider = LiveKiteProvider()
         service = OrderService(
             kite_provider=provider,  # type: ignore[arg-type]
@@ -355,10 +412,18 @@ class OrderServiceTests(unittest.TestCase):
         try:
             object.__setattr__(order_service.settings, "live_trading_mode", True)
             object.__setattr__(order_service.settings, "paper_trading_mode", False)
-            object.__setattr__(order_service.settings, "enable_broker_emergency_sl", False)
-            object.__setattr__(order_service.settings, "require_broker_protective_stop_for_live_entry", True)
+            object.__setattr__(
+                order_service.settings, "enable_broker_emergency_sl", False
+            )
+            object.__setattr__(
+                order_service.settings,
+                "require_broker_protective_stop_for_live_entry",
+                True,
+            )
             with self.assertRaisesRegex(ValueError, "LIVE_PROTECTIVE_STOP_REQUIRED"):
-                service.place_signal_order(self._signal(), confirm_live=True, order_mode="live")
+                service.place_signal_order(
+                    self._signal(), confirm_live=True, order_mode="live"
+                )
         finally:
             for key, value in originals.items():
                 object.__setattr__(order_service.settings, key, value)
@@ -380,8 +445,12 @@ class OrderServiceTests(unittest.TestCase):
         try:
             object.__setattr__(order_service.settings, "live_trading_mode", True)
             object.__setattr__(order_service.settings, "paper_trading_mode", False)
-            object.__setattr__(order_service.settings, "enable_broker_emergency_sl", True)
-            first = service.place_signal_order(self._signal(), confirm_live=True, order_mode="live")
+            object.__setattr__(
+                order_service.settings, "enable_broker_emergency_sl", True
+            )
+            first = service.place_signal_order(
+                self._signal(), confirm_live=True, order_mode="live"
+            )
             self.assertFalse(first["broker_emergency_sl"]["submitted"])
             with self.assertRaisesRegex(ValueError, "previous protective stop failure"):
                 service.place_signal_order(
@@ -394,7 +463,9 @@ class OrderServiceTests(unittest.TestCase):
             for key, value in originals.items():
                 object.__setattr__(order_service.settings, key, value)
 
-    def test_partial_entry_is_cancelled_then_only_filled_quantity_is_protected(self) -> None:
+    def test_partial_entry_is_cancelled_then_only_filled_quantity_is_protected(
+        self,
+    ) -> None:
         provider = PartialFillProvider()
         service = OrderService(
             kite_provider=provider,  # type: ignore[arg-type]
@@ -410,8 +481,12 @@ class OrderServiceTests(unittest.TestCase):
         try:
             object.__setattr__(order_service.settings, "live_trading_mode", True)
             object.__setattr__(order_service.settings, "paper_trading_mode", False)
-            object.__setattr__(order_service.settings, "enable_broker_emergency_sl", True)
-            result = service.place_signal_order(self._signal(quantity=90), confirm_live=True, order_mode="live")
+            object.__setattr__(
+                order_service.settings, "enable_broker_emergency_sl", True
+            )
+            result = service.place_signal_order(
+                self._signal(quantity=90), confirm_live=True, order_mode="live"
+            )
         finally:
             for key, value in originals.items():
                 object.__setattr__(order_service.settings, key, value)
@@ -458,11 +533,19 @@ class OrderServiceTests(unittest.TestCase):
             confirm_live=False,
             order_mode="paper",
             metadata=metadata,
-            execution_quality_override={"passed": True, "reasons": [], "details": {"source": "event_driven_websocket"}},
+            execution_quality_override={
+                "passed": True,
+                "reasons": [],
+                "details": {"source": "event_driven_websocket"},
+            },
         )
 
-        self.assertEqual(result["trade"]["metadata"]["entry_source"], "event_driven_websocket")
-        self.assertEqual(repo.created["order_response"]["metadata"]["armed_setup_id"], "armed-test")
+        self.assertEqual(
+            result["trade"]["metadata"]["entry_source"], "event_driven_websocket"
+        )
+        self.assertEqual(
+            repo.created["order_response"]["metadata"]["armed_setup_id"], "armed-test"
+        )
         self.assertIn("entry_source=event_driven_websocket", repo.created["notes"])
 
 

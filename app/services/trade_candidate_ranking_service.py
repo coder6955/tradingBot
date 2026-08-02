@@ -32,8 +32,18 @@ class TradeCandidateRankingService:
         risk = max(0.0, entry - stop)
         reward = max(0.0, target - entry)
         rr = reward / risk if risk > 0 else 0.0
-        spread_pct = ((contract.ask - contract.bid) / max(contract.ask or contract.last_price, 0.01) * 100) if contract.ask > contract.bid > 0 else settings.max_bid_ask_spread_pct
-        estimated_cost_pct = max(0.0, spread_pct / 2) + settings.candidate_round_trip_cost_pct
+        spread_pct = (
+            (
+                (contract.ask - contract.bid)
+                / max(contract.ask or contract.last_price, 0.01)
+                * 100
+            )
+            if contract.ask > contract.bid > 0
+            else settings.max_bid_ask_spread_pct
+        )
+        estimated_cost_pct = (
+            max(0.0, spread_pct / 2) + settings.candidate_round_trip_cost_pct
+        )
         confidence = self._float(market_state.get("confidence"), 0.0)
         uncertainty = self._float(market_state.get("uncertainty"), 1.0)
         policy_score = self._float(setup_family.get("policy_score"), 50.0)
@@ -52,7 +62,9 @@ class TradeCandidateRankingService:
         rr_component = max(-20.0, min(20.0, (rr - 1.0) * 16.0))
         cost_penalty = min(25.0, estimated_cost_pct * 2.5)
         uncertainty_penalty = min(30.0, uncertainty * 30.0)
-        utility = max(0.0, min(100.0, quality + rr_component - cost_penalty - uncertainty_penalty))
+        utility = max(
+            0.0, min(100.0, quality + rr_component - cost_penalty - uncertainty_penalty)
+        )
 
         expected_net_value = None
         expectancy_source = "unavailable_until_outcome_calibration"
@@ -62,7 +74,10 @@ class TradeCandidateRankingService:
             expected_net_value = round(gross_ev - costs, 2)
             expectancy_source = "calibrated_probability_after_costs"
 
-        eligible = utility >= settings.candidate_min_utility_score and rr >= settings.min_risk_reward
+        eligible = (
+            utility >= settings.candidate_min_utility_score
+            and rr >= settings.min_risk_reward
+        )
         abstention = None
         if rr < settings.min_risk_reward:
             abstention = "INSUFFICIENT_AFTER_COST_REWARD_RISK"

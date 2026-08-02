@@ -15,7 +15,15 @@ class SignalRepository:
 
             init_db(database_url)
 
-    def save_signal(self, symbol: str, action: str, score: int, confidence: float, trend: str, explanation: str | None = None) -> SignalRecord:
+    def save_signal(
+        self,
+        symbol: str,
+        action: str,
+        score: int,
+        confidence: float,
+        trend: str,
+        explanation: str | None = None,
+    ) -> SignalRecord:
         session = get_session()
         try:
             record = SignalRecord(

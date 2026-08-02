@@ -11,10 +11,18 @@ from sqlalchemy import inspect
 from app.config import settings
 from app.models import Signal
 from app.providers.kite_feed import KiteFeed
-from app.services.database import Candle, DecisionRiskEvidenceRecord, SetupEpisodeRecord, get_session, init_db
+from app.services.database import (
+    Candle,
+    DecisionRiskEvidenceRecord,
+    SetupEpisodeRecord,
+    get_session,
+    init_db,
+)
 from app.services.decision_evidence_repository import DecisionEvidenceRepository
 from app.services.episode_reservation_service import EpisodeReservationService
-from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
+from app.services.option_premium_confirmation_service import (
+    OptionPremiumConfirmationService,
+)
 from app.services.price_action_service import PriceActionService
 from app.services.pre_order_risk_service import PreOrderRiskService
 from app.services.risk_policy_service import (
@@ -40,7 +48,11 @@ class PassingAccountRisk:
             "passed": True,
             "reasons": [],
             "summary": {"trades": 0, "pnl": 0.0, "stop_losses": 0},
-            "open_exposure": {"open_trades": 0, "by_symbol": {}, "premium_exposure": 0.0},
+            "open_exposure": {
+                "open_trades": 0,
+                "by_symbol": {},
+                "premium_exposure": 0.0,
+            },
             "limits": {"available_cash": 100000.0},
             "risk_state": {
                 "realized_daily_pnl": 0.0,
@@ -62,12 +74,18 @@ class PremiumFeed:
         return self.candles[-limit:]
 
     def premium_candle_status(self, token):  # type: ignore[no-untyped-def]
-        return {"subscribed": True, "ticks_seen": 20, "current_session_candle_count": len(self.candles)}
+        return {
+            "subscribed": True,
+            "ticks_seen": 20,
+            "current_session_candle_count": len(self.candles),
+        }
 
 
 class RiskTierFoundationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.settings_snapshot = {item.name: getattr(settings, item.name) for item in fields(type(settings))}
+        self.settings_snapshot = {
+            item.name: getattr(settings, item.name) for item in fields(type(settings))
+        }
         for key, value in {
             "active_paper_max_risk_tier": TIER_4_EXCEPTIONAL,
             "active_live_max_risk_tier": TIER_1_BASE,
@@ -109,7 +127,12 @@ class RiskTierFoundationTests(unittest.TestCase):
             "acceptable_mae_and_loss_streak": True,
             "current_distribution_match": True,
             "unvalidated_event_or_recovery": False,
-            "policy_permitted_tiers": [tier, TIER_2_STRONG, TIER_3_HIGH, TIER_4_EXCEPTIONAL],
+            "policy_permitted_tiers": [
+                tier,
+                TIER_2_STRONG,
+                TIER_3_HIGH,
+                TIER_4_EXCEPTIONAL,
+            ],
             "evidence_version": "oos-test-v1",
         }
 
@@ -153,10 +176,20 @@ class RiskTierFoundationTests(unittest.TestCase):
     def test_base_strong_high_and_exceptional_tier_sizing(self) -> None:
         service = RiskPolicyService()
         decisions = [service.evaluate(self._context(tier)) for tier in service.TIERS]
-        self.assertEqual([row.approved_risk_percent for row in decisions], [1.0, 2.0, 3.0, 5.0])
+        self.assertEqual(
+            [row.approved_risk_percent for row in decisions], [1.0, 2.0, 3.0, 5.0]
+        )
         self.assertEqual([row.approved_tier for row in decisions], list(service.TIERS))
-        self.assertTrue(all(row.estimated_total_loss_at_stop <= row.approved_risk_amount for row in decisions))
-        self.assertEqual(sorted(row.maximum_quantity for row in decisions), [row.maximum_quantity for row in decisions])
+        self.assertTrue(
+            all(
+                row.estimated_total_loss_at_stop <= row.approved_risk_amount
+                for row in decisions
+            )
+        )
+        self.assertEqual(
+            sorted(row.maximum_quantity for row in decisions),
+            [row.maximum_quantity for row in decisions],
+        )
 
     def test_configuration_above_five_percent_is_rejected(self) -> None:
         object.__setattr__(settings, "absolute_max_risk_per_trade_percent", 5.1)
@@ -170,35 +203,54 @@ class RiskTierFoundationTests(unittest.TestCase):
         object.__setattr__(settings, "max_daily_planned_risk_percent", 2.0)
         service = RiskPolicyService()
         conflicts = service.configuration_conflicts()
-        self.assertIn("POLICY_CONFLICT_PER_TRADE_MAX_EXCEEDS_REALIZED_DAILY_LOSS_CAP", conflicts)
-        self.assertIn("POLICY_CONFLICT_PER_TRADE_MAX_EXCEEDS_DAILY_PLANNED_RISK_CAP", conflicts)
+        self.assertIn(
+            "POLICY_CONFLICT_PER_TRADE_MAX_EXCEEDS_REALIZED_DAILY_LOSS_CAP", conflicts
+        )
+        self.assertIn(
+            "POLICY_CONFLICT_PER_TRADE_MAX_EXCEEDS_DAILY_PLANNED_RISK_CAP", conflicts
+        )
         result = service.evaluate(self._context(TIER_4_EXCEPTIONAL))
         self.assertFalse(result.passed)
         self.assertIn(RISK_EXCEEDS_DAILY_CAP, result.rejection_reasons)
 
     def test_one_lot_not_fitting_returns_zero(self) -> None:
-        result = RiskPolicyService().evaluate(self._context(TIER_1_BASE, account_equity=1000.0))
+        result = RiskPolicyService().evaluate(
+            self._context(TIER_1_BASE, account_equity=1000.0)
+        )
         self.assertFalse(result.passed)
         self.assertEqual(result.maximum_quantity, 0)
         self.assertIn(RISK_BUDGET_BELOW_MINIMUM_LOT, result.rejection_reasons)
 
     def test_slippage_can_make_one_lot_infeasible(self) -> None:
         result = RiskPolicyService().evaluate(
-            self._context(TIER_1_BASE, account_equity=10000.0, expected_entry_slippage=4.0, expected_exit_slippage=4.0)
+            self._context(
+                TIER_1_BASE,
+                account_equity=10000.0,
+                expected_entry_slippage=4.0,
+                expected_exit_slippage=4.0,
+            )
         )
         self.assertFalse(result.passed)
         self.assertEqual(result.maximum_quantity, 0)
 
     def test_unvalidated_higher_tier_is_downgraded_to_base(self) -> None:
-        result = RiskPolicyService().evaluate(self._context(TIER_4_EXCEPTIONAL, setup_quality_evidence={}))
+        result = RiskPolicyService().evaluate(
+            self._context(TIER_4_EXCEPTIONAL, setup_quality_evidence={})
+        )
         self.assertTrue(result.passed)
         self.assertEqual(result.approved_tier, TIER_1_BASE)
         self.assertIn(RISK_TIER_DOWNGRADED, result.downgrade_reasons)
 
     def test_drawdown_and_loss_streak_disable_higher_tiers(self) -> None:
-        drawdown = RiskPolicyService().evaluate(self._context(TIER_3_HIGH, current_drawdown_pct=6.0))
-        loss = RiskPolicyService().evaluate(self._context(TIER_3_HIGH, consecutive_losses=1))
-        unrealized = RiskPolicyService().evaluate(self._context(TIER_4_EXCEPTIONAL, unrealized_daily_pnl=-6000.0))
+        drawdown = RiskPolicyService().evaluate(
+            self._context(TIER_3_HIGH, current_drawdown_pct=6.0)
+        )
+        loss = RiskPolicyService().evaluate(
+            self._context(TIER_3_HIGH, consecutive_losses=1)
+        )
+        unrealized = RiskPolicyService().evaluate(
+            self._context(TIER_4_EXCEPTIONAL, unrealized_daily_pnl=-6000.0)
+        )
         self.assertEqual(drawdown.approved_tier, TIER_1_BASE)
         self.assertEqual(loss.approved_tier, TIER_1_BASE)
         self.assertEqual(unrealized.approved_tier, TIER_1_BASE)
@@ -209,7 +261,9 @@ class RiskTierFoundationTests(unittest.TestCase):
         self.assertIn(RISK_EXCEEDS_DAILY_CAP, daily.rejection_reasons)
         object.__setattr__(settings, "max_daily_planned_risk_percent", 10.0)
         object.__setattr__(settings, "max_total_open_risk_percent", 2.0)
-        opened = RiskPolicyService().evaluate(self._context(TIER_2_STRONG, total_open_risk=1000.0))
+        opened = RiskPolicyService().evaluate(
+            self._context(TIER_2_STRONG, total_open_risk=1000.0)
+        )
         self.assertIn(RISK_EXCEEDS_OPEN_RISK_CAP, opened.rejection_reasons)
 
     def test_paper_and_live_use_identical_active_risk_math(self) -> None:
@@ -219,15 +273,23 @@ class RiskTierFoundationTests(unittest.TestCase):
         self.assertEqual(paper.approved_risk_amount, live.approved_risk_amount)
         self.assertEqual(paper.maximum_quantity, live.maximum_quantity)
 
-    def test_episode_reservation_prevents_duplicate_and_validates_transitions(self) -> None:
+    def test_episode_reservation_prevents_duplicate_and_validates_transitions(
+        self,
+    ) -> None:
         service = EpisodeReservationService()
         signal = self._signal()
         first = service.reserve(signal, metadata={"trigger_identifier": "episode-a"})
         second = service.reserve(signal, metadata={"trigger_identifier": "episode-a"})
         self.assertTrue(first["acquired"])
         self.assertFalse(second["acquired"])
-        self.assertTrue(service.mark_order_pending(first["episode_key"], first["reservation_token"]))
-        self.assertTrue(service.mark_open(first["episode_key"], first["reservation_token"], trade_id=1))
+        self.assertTrue(
+            service.mark_order_pending(first["episode_key"], first["reservation_token"])
+        )
+        self.assertTrue(
+            service.mark_open(
+                first["episode_key"], first["reservation_token"], trade_id=1
+            )
+        )
         self.assertFalse(service.validate_transition("OPEN", "RESERVED"))
         self.assertTrue(service.close(first["episode_key"]))
 
@@ -238,7 +300,11 @@ class RiskTierFoundationTests(unittest.TestCase):
 
         def reserve() -> None:
             barrier.wait()
-            results.append(service.reserve(self._signal(), metadata={"trigger_identifier": "concurrent"}))
+            results.append(
+                service.reserve(
+                    self._signal(), metadata={"trigger_identifier": "concurrent"}
+                )
+            )
 
         threads = [threading.Thread(target=reserve), threading.Thread(target=reserve)]
         for thread in threads:
@@ -250,10 +316,16 @@ class RiskTierFoundationTests(unittest.TestCase):
     def test_concurrent_expired_reservation_reclaim_has_one_winner(self) -> None:
         service = EpisodeReservationService()
         signal = self._signal()
-        first = service.reserve(signal, metadata={"trigger_identifier": "expired-concurrent"})
+        first = service.reserve(
+            signal, metadata={"trigger_identifier": "expired-concurrent"}
+        )
         session = get_session()
         try:
-            record = session.query(SetupEpisodeRecord).filter(SetupEpisodeRecord.episode_key == first["episode_key"]).one()
+            record = (
+                session.query(SetupEpisodeRecord)
+                .filter(SetupEpisodeRecord.episode_key == first["episode_key"])
+                .one()
+            )
             record.reservation_expires_at = ist_now_naive() - timedelta(seconds=1)
             session.commit()
         finally:
@@ -264,7 +336,11 @@ class RiskTierFoundationTests(unittest.TestCase):
 
         def reclaim() -> None:
             barrier.wait()
-            results.append(service.reserve(signal, metadata={"trigger_identifier": "expired-concurrent"}))
+            results.append(
+                service.reserve(
+                    signal, metadata={"trigger_identifier": "expired-concurrent"}
+                )
+            )
 
         threads = [threading.Thread(target=reclaim) for _ in range(6)]
         for thread in threads:
@@ -273,7 +349,9 @@ class RiskTierFoundationTests(unittest.TestCase):
             thread.join()
         self.assertEqual(sum(1 for row in results if row.get("acquired")), 1)
 
-    def test_pre_order_persists_active_and_shadow_without_shadow_quantity_authority(self) -> None:
+    def test_pre_order_persists_active_and_shadow_without_shadow_quantity_authority(
+        self,
+    ) -> None:
         service = PreOrderRiskService(risk_management_service=PassingAccountRisk())
         result = service.evaluate_and_reserve(
             self._signal(),
@@ -282,24 +360,44 @@ class RiskTierFoundationTests(unittest.TestCase):
             execution_quality={
                 "passed": True,
                 "reasons": [],
-                "details": {"ask": 100, "bid": 99.5, "spread_pct": 0.5, "bid_depth_quantity": 1000, "ask_depth_quantity": 1000},
+                "details": {
+                    "ask": 100,
+                    "bid": 99.5,
+                    "spread_pct": 0.5,
+                    "bid_depth_quantity": 1000,
+                    "ask_depth_quantity": 1000,
+                },
             },
             metadata={"trigger_identifier": "pre-order-evidence"},
         )
         self.assertTrue(result["passed"])
         self.assertEqual(result["risk_decision"]["approved_tier"], TIER_1_BASE)
         self.assertGreater(
-            result["shadow_risk_decisions"][TIER_4_EXCEPTIONAL]["counterfactual_maximum_quantity"],
+            result["shadow_risk_decisions"][TIER_4_EXCEPTIONAL][
+                "counterfactual_maximum_quantity"
+            ],
             result["approved_quantity"],
         )
-        self.assertFalse(result["shadow_risk_decisions"][TIER_4_EXCEPTIONAL]["counterfactual_can_reach_order_router"])
-        self.assertLessEqual(result["approved_quantity"], result["risk_decision"]["maximum_quantity"])
-        self.assertIsNotNone(DecisionEvidenceRepository().get_decision(result["evidence"]["decision_id"]))
+        self.assertFalse(
+            result["shadow_risk_decisions"][TIER_4_EXCEPTIONAL][
+                "counterfactual_can_reach_order_router"
+            ]
+        )
+        self.assertLessEqual(
+            result["approved_quantity"], result["risk_decision"]["maximum_quantity"]
+        )
+        self.assertIsNotNone(
+            DecisionEvidenceRepository().get_decision(result["evidence"]["decision_id"])
+        )
 
     def test_decision_evidence_is_append_only(self) -> None:
         repo = DecisionEvidenceRepository()
-        first = repo.record_decision(decision_type="test", final_state="OBSERVE", context={"value": 1})
-        second = repo.record_decision(decision_type="test", final_state="PREPARED", context={"value": 2})
+        first = repo.record_decision(
+            decision_type="test", final_state="OBSERVE", context={"value": 1}
+        )
+        second = repo.record_decision(
+            decision_type="test", final_state="PREPARED", context={"value": 2}
+        )
         session = get_session()
         try:
             self.assertEqual(session.query(DecisionRiskEvidenceRecord).count(), 2)
@@ -307,7 +405,9 @@ class RiskTierFoundationTests(unittest.TestCase):
         finally:
             session.close()
 
-    def test_counterfactual_tiers_are_hypothetical_and_episode_outcomes_deduplicate(self) -> None:
+    def test_counterfactual_tiers_are_hypothetical_and_episode_outcomes_deduplicate(
+        self,
+    ) -> None:
         policy = RiskPolicyService()
         context = self._context(TIER_1_BASE)
         shadow = policy.shadow_tier_evaluations(context)
@@ -320,7 +420,9 @@ class RiskTierFoundationTests(unittest.TestCase):
             charges_per_unit=0.5,
         )
         self.assertEqual(set(result["tiers"]), set(policy.TIERS))
-        self.assertTrue(all(item["hypothetical_only"] for item in result["tiers"].values()))
+        self.assertTrue(
+            all(item["hypothetical_only"] for item in result["tiers"].values())
+        )
         self.assertIsNone(result["risk_of_ruin"])
         first = repository.record_outcome(
             episode_key="episode-counterfactual",
@@ -353,8 +455,14 @@ class RiskTierFoundationTests(unittest.TestCase):
             self.assertIn("setup_episodes", schema.get_table_names())
             self.assertIn("decision_risk_evidence", schema.get_table_names())
             self.assertIn("decision_outcomes", schema.get_table_names())
-            episode_columns = {item["name"] for item in schema.get_columns("setup_episodes")}
-            self.assertTrue({"state", "reservation_token", "risk_policy_version"}.issubset(episode_columns))
+            episode_columns = {
+                item["name"] for item in schema.get_columns("setup_episodes")
+            }
+            self.assertTrue(
+                {"state", "reservation_token", "risk_policy_version"}.issubset(
+                    episode_columns
+                )
+            )
         finally:
             session.close()
 
@@ -380,7 +488,12 @@ class RiskTierFoundationTests(unittest.TestCase):
             init_db(f"sqlite:///{legacy.name}")
             session = get_session()
             try:
-                columns = {item["name"] for item in inspect(session.get_bind()).get_columns("setup_episodes")}
+                columns = {
+                    item["name"]
+                    for item in inspect(session.get_bind()).get_columns(
+                        "setup_episodes"
+                    )
+                }
                 self.assertTrue(
                     {
                         "state",
@@ -404,7 +517,9 @@ class RiskTierFoundationTests(unittest.TestCase):
                 unique_names = {
                     str(item.get("name"))
                     for item in (
-                        inspect(session.get_bind()).get_unique_constraints("decision_outcomes")
+                        inspect(session.get_bind()).get_unique_constraints(
+                            "decision_outcomes"
+                        )
                         + inspect(session.get_bind()).get_indexes("decision_outcomes")
                     )
                 }
@@ -419,7 +534,13 @@ class RiskTierFoundationTests(unittest.TestCase):
                 pass
 
     def test_missing_indicators_are_unknown_not_bearish_evidence(self) -> None:
-        snapshot = {"symbol": "BANKNIFTY", "price": 58000, "ema_alignment": None, "macd_positive": None, "rsi": 50}
+        snapshot = {
+            "symbol": "BANKNIFTY",
+            "price": 58000,
+            "ema_alignment": None,
+            "macd_positive": None,
+            "rsi": 50,
+        }
         bullish = PriceActionService().evaluate(snapshot, "bullish", "BUY")
         bearish = PriceActionService().evaluate(snapshot, "bearish", "BUY")
         self.assertIn("EMA trend alignment is unavailable", bullish["reasons"])
@@ -446,18 +567,37 @@ class RiskTierFoundationTests(unittest.TestCase):
                 )()
             )
         contract = OptionContract(
-            "BANKNIFTY99DEC58000CE", "NFO", 580001, "BANKNIFTY", "2099-12-31", 58000, "CE", 15,
-            112, 100000, 100000, 111.5, 112, bid_quantity=1000, ask_quantity=1000,
+            "BANKNIFTY99DEC58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-12-31",
+            58000,
+            "CE",
+            15,
+            112,
+            100000,
+            100000,
+            111.5,
+            112,
+            bid_quantity=1000,
+            ask_quantity=1000,
         )
-        result = OptionPremiumConfirmationService(PremiumFeed(candles)).evaluate(contract=contract)
+        result = OptionPremiumConfirmationService(PremiumFeed(candles)).evaluate(
+            contract=contract
+        )
         self.assertTrue(result["details"]["building_candle_used"])
         self.assertEqual(result["details"]["last_candle_state"], "building")
-        self.assertEqual(result["details"]["candle_provenance"][-1]["state"], "building")
+        self.assertEqual(
+            result["details"]["candle_provenance"][-1]["state"], "building"
+        )
 
     def test_initial_snapshot_loader_excludes_generated_structure_candles(self) -> None:
         session = get_session()
         try:
-            start = (ist_now_naive() - timedelta(days=1)).replace(hour=9, minute=15, second=0, microsecond=0)
+            start = (ist_now_naive() - timedelta(days=1)).replace(
+                hour=9, minute=15, second=0, microsecond=0
+            )
             for index in range(6):
                 session.add(
                     Candle(

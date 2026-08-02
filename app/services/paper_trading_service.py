@@ -54,15 +54,26 @@ class PaperTradingService:
         self.equity = float(filled_entry)
         return trade
 
-    def close_trade(self, symbol: str, exit_price: float, outcome: str = "exit", bid: float | None = None, ask: float | None = None) -> Dict[str, object]:
-        position = next((item for item in self.positions if item["symbol"] == symbol), None)
+    def close_trade(
+        self,
+        symbol: str,
+        exit_price: float,
+        outcome: str = "exit",
+        bid: float | None = None,
+        ask: float | None = None,
+    ) -> Dict[str, object]:
+        position = next(
+            (item for item in self.positions if item["symbol"] == symbol), None
+        )
         if position is None:
             raise ValueError(f"no open position for {symbol}")
         self.positions.remove(position)
         fill = (
             self.execution_realism_service.exit_fill(
                 intended_price=exit_price,
-                side="BUY" if str(position.get("action", "")).upper().startswith("BUY") else "SELL",
+                side="BUY"
+                if str(position.get("action", "")).upper().startswith("BUY")
+                else "SELL",
                 outcome=outcome,
                 bid=bid,
                 ask=ask,
@@ -75,7 +86,9 @@ class PaperTradingService:
             entry_price=float(position["entry_price"]),
             exit_price=filled_exit,
             quantity=int(position["quantity"]),
-            side="BUY" if str(position.get("action", "")).upper().startswith("BUY") else "SELL",
+            side="BUY"
+            if str(position.get("action", "")).upper().startswith("BUY")
+            else "SELL",
             include_slippage=not settings.enable_execution_realism,
             include_spread=not settings.enable_execution_realism,
         )
@@ -84,21 +97,25 @@ class PaperTradingService:
         realism_payload = dict(position.get("execution_realism") or {})
         if fill:
             realism_payload["exit_fill"] = fill.to_dict()
-        self.closed_trades.append({
-            "symbol": symbol,
-            "entry_price": position["entry_price"],
-            "intended_entry_price": position.get("intended_entry_price", position["entry_price"]),
-            "exit_price": filled_exit,
-            "intended_exit_price": exit_price,
-            "quantity": position["quantity"],
-            "gross_pnl": breakdown.gross_pnl,
-            "charges": breakdown.charges,
-            "slippage_cost": breakdown.slippage_cost,
-            "spread_cost": breakdown.spread_cost,
-            "net_pnl": pnl,
-            "pnl": pnl,
-            "execution_realism": realism_payload,
-        })
+        self.closed_trades.append(
+            {
+                "symbol": symbol,
+                "entry_price": position["entry_price"],
+                "intended_entry_price": position.get(
+                    "intended_entry_price", position["entry_price"]
+                ),
+                "exit_price": filled_exit,
+                "intended_exit_price": exit_price,
+                "quantity": position["quantity"],
+                "gross_pnl": breakdown.gross_pnl,
+                "charges": breakdown.charges,
+                "slippage_cost": breakdown.slippage_cost,
+                "spread_cost": breakdown.spread_cost,
+                "net_pnl": pnl,
+                "pnl": pnl,
+                "execution_realism": realism_payload,
+            }
+        )
         return self.closed_trades[-1]
 
     def rollback_unpersisted_trade(self, trade: Dict[str, object]) -> bool:
@@ -117,7 +134,9 @@ class PaperTradingService:
             "pnl": self.pnl,
         }
 
-    def _nested_float(self, payload: Dict[str, object] | None, *path: str) -> float | None:
+    def _nested_float(
+        self, payload: Dict[str, object] | None, *path: str
+    ) -> float | None:
         current: object = payload or {}
         for key in path:
             if not isinstance(current, dict):

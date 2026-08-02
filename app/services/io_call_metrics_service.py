@@ -19,7 +19,9 @@ class IoCallMetricsService:
     """Count synchronous I/O performed inside one decision path."""
 
     def __init__(self) -> None:
-        self._current: ContextVar[_PathCounter | None] = ContextVar("decision_io_counter", default=None)
+        self._current: ContextVar[_PathCounter | None] = ContextVar(
+            "decision_io_counter", default=None
+        )
         self._last: dict[str, dict[str, Any]] = {}
         self._lock = RLock()
 

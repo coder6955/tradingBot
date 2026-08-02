@@ -29,43 +29,95 @@ class EntryTimingServiceTests(unittest.TestCase):
             object.__setattr__(settings, key, value)
 
     def test_setup_below_trigger_returns_armed_for_entry(self) -> None:
-        result = self._evaluate(current=101.5, trigger=102.0, base=100.0, target=120.0, stop=95.0, breakout=False)
+        result = self._evaluate(
+            current=101.5,
+            trigger=102.0,
+            base=100.0,
+            target=120.0,
+            stop=95.0,
+            breakout=False,
+        )
 
         self.assertEqual(result["state"], EntryTimingService.ARMED_FOR_ENTRY)
         self.assertTrue(result["entry_should_wait"])
         self.assertIn("waiting_for_entry_trigger", result["reasons"])
 
     def test_premium_breakout_with_good_room_returns_enter_now(self) -> None:
-        result = self._evaluate(current=103.0, trigger=102.0, base=100.0, target=120.0, stop=96.0, breakout=True)
+        result = self._evaluate(
+            current=103.0,
+            trigger=102.0,
+            base=100.0,
+            target=120.0,
+            stop=96.0,
+            breakout=True,
+        )
 
         self.assertEqual(result["state"], EntryTimingService.ENTER_NOW)
         self.assertTrue(result["passed"])
 
     def test_premium_spike_far_above_trigger_returns_too_late(self) -> None:
-        result = self._evaluate(current=110.0, trigger=102.0, base=100.0, target=130.0, stop=96.0, breakout=True)
+        result = self._evaluate(
+            current=110.0,
+            trigger=102.0,
+            base=100.0,
+            target=130.0,
+            stop=96.0,
+            breakout=True,
+        )
 
         self.assertEqual(result["state"], EntryTimingService.TOO_LATE)
         self.assertIn("chase_risk_high", result["reasons"])
 
     def test_weak_premium_participation_remains_watching_setup(self) -> None:
-        result = self._evaluate(current=98.0, trigger=102.0, base=100.0, target=120.0, stop=94.0, breakout=False, premium_change=-2.0)
+        result = self._evaluate(
+            current=98.0,
+            trigger=102.0,
+            base=100.0,
+            target=120.0,
+            stop=94.0,
+            breakout=False,
+            premium_change=-2.0,
+        )
 
         self.assertEqual(result["state"], EntryTimingService.WATCHING_SETUP)
 
     def test_insufficient_room_blocks_enter_now(self) -> None:
-        result = self._evaluate(current=103.0, trigger=102.0, base=100.0, target=106.0, stop=96.0, breakout=True)
+        result = self._evaluate(
+            current=103.0,
+            trigger=102.0,
+            base=100.0,
+            target=106.0,
+            stop=96.0,
+            breakout=True,
+        )
 
         self.assertEqual(result["state"], EntryTimingService.TOO_LATE)
         self.assertIn("insufficient_target_room_after_entry", result["reasons"])
 
     def test_expected_move_too_small_blocks_enter_now(self) -> None:
-        result = self._evaluate(current=103.0, trigger=102.0, base=100.0, target=120.0, stop=96.0, breakout=True, expected_coverage=0.5)
+        result = self._evaluate(
+            current=103.0,
+            trigger=102.0,
+            base=100.0,
+            target=120.0,
+            stop=96.0,
+            breakout=True,
+            expected_coverage=0.5,
+        )
 
         self.assertEqual(result["state"], EntryTimingService.TOO_LATE)
         self.assertIn("expected_move_coverage_weak", result["reasons"])
 
     def test_spread_widening_after_trigger_blocks_enter_now(self) -> None:
-        result = self._evaluate(current=103.0, trigger=102.0, base=100.0, target=120.0, stop=96.0, breakout=True, spread_pct=8.0)
+        result = self._evaluate(
+            current=103.0,
+            trigger=102.0,
+            base=100.0,
+            target=120.0,
+            stop=96.0,
+            breakout=True,
+            spread_pct=8.0,
+        )
 
         self.assertNotEqual(result["state"], EntryTimingService.ENTER_NOW)
         self.assertIn("entry_spread_too_wide", result["reasons"])
@@ -100,7 +152,12 @@ class EntryTimingServiceTests(unittest.TestCase):
         )
         return EntryTimingService().evaluate(
             contract=contract,
-            prices={"entry_price": current, "stop_loss": stop, "target_1": target, "risk_reward": 1.5},
+            prices={
+                "entry_price": current,
+                "stop_loss": stop,
+                "target_1": target,
+                "risk_reward": 1.5,
+            },
             premium_eval={
                 "passed": breakout,
                 "details": {
@@ -117,8 +174,16 @@ class EntryTimingServiceTests(unittest.TestCase):
             data_quality={"passed": True},
             freshness={"passed": True},
             option_quality={"passed": True},
-            banknifty_eval={"score": 75, "passed": True, "details": {"expectedMoveCheck": {"coverage": expected_coverage}}},
-            price_action={"score": 75, "passed": True, "details": {"room_to_level_pct": 0.8}},
+            banknifty_eval={
+                "score": 75,
+                "passed": True,
+                "details": {"expectedMoveCheck": {"coverage": expected_coverage}},
+            },
+            price_action={
+                "score": 75,
+                "passed": True,
+                "details": {"room_to_level_pct": 0.8},
+            },
             liquidity_score=90,
             trend="bullish",
         )

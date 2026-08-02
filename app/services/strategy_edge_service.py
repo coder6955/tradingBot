@@ -36,23 +36,41 @@ class StrategyEdgeService:
         direction = direction.upper()
         cache_key = f"{symbol.upper()}|{direction}|{timeframe}"
         cached = self.cache.get(cache_key)
-        if cached and not refresh and ist_now_naive() - cached[0] < timedelta(seconds=settings.strategy_edge_cache_seconds):
+        if (
+            cached
+            and not refresh
+            and ist_now_naive() - cached[0]
+            < timedelta(seconds=settings.strategy_edge_cache_seconds)
+        ):
             return cached[1]
 
-        latest = None if refresh else self.repository.latest(
-            strategy_name=self.STRATEGY_NAME,
-            symbol=symbol,
-            timeframe=timeframe,
-            direction=direction,
+        latest = (
+            None
+            if refresh
+            else self.repository.latest(
+                strategy_name=self.STRATEGY_NAME,
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=direction,
+            )
         )
         if latest is None:
-            result = self.validate(symbol=symbol, direction=direction, timeframe=timeframe)
+            result = self.validate(
+                symbol=symbol, direction=direction, timeframe=timeframe
+            )
         else:
             result = self._record_to_evaluation(latest)
         self.cache[cache_key] = (ist_now_naive(), result)
         return result
 
-    def validate(self, *, symbol: str, direction: str = "BOTH", timeframe: str = "5minute", limit: int = 3000) -> dict[str, Any]:
+    def validate(
+        self,
+        *,
+        symbol: str,
+        direction: str = "BOTH",
+        timeframe: str = "5minute",
+        limit: int = 3000,
+    ) -> dict[str, Any]:
         result = self.backtest_service.run_walk_forward(
             symbol=symbol,
             timeframe=timeframe,
@@ -72,14 +90,19 @@ class StrategyEdgeService:
         return self._record_to_evaluation(record)
 
     def recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        return [self._record_to_evaluation(record) for record in self.repository.recent(limit=limit)]
+        return [
+            self._record_to_evaluation(record)
+            for record in self.repository.recent(limit=limit)
+        ]
 
     def _record_to_evaluation(self, record: Any) -> dict[str, Any]:
         try:
             result = json.loads(record.result_json)
         except Exception:
             result = {}
-        reasons = result.get("reasons") or ([] if bool(record.passed) else ["strategy validation did not pass"])
+        reasons = result.get("reasons") or (
+            [] if bool(record.passed) else ["strategy validation did not pass"]
+        )
         return {
             "strategy_name": record.strategy_name,
             "symbol": record.symbol,

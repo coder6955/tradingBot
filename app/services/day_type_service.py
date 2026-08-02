@@ -11,11 +11,28 @@ from app.services.time_utils import ist_today
 class DayTypeService:
     """Classify intraday structure so option buying is favored on expansion days."""
 
-    def evaluate(self, *, symbol: str, trend: str, timeframe: str = "5minute", candles: list[Candle] | None = None) -> dict[str, Any]:
+    def evaluate(
+        self,
+        *,
+        symbol: str,
+        trend: str,
+        timeframe: str = "5minute",
+        candles: list[Candle] | None = None,
+    ) -> dict[str, Any]:
         if not settings.enable_day_type_filter:
-            return {"enabled": False, "score": 100, "passed": True, "reasons": [], "details": {}}
+            return {
+                "enabled": False,
+                "score": 100,
+                "passed": True,
+                "reasons": [],
+                "details": {},
+            }
 
-        candles = list(candles) if candles is not None else self._today_candles(symbol=symbol.upper(), timeframe=timeframe)
+        candles = (
+            list(candles)
+            if candles is not None
+            else self._today_candles(symbol=symbol.upper(), timeframe=timeframe)
+        )
         if len(candles) < 6:
             return {
                 "enabled": True,
@@ -36,10 +53,16 @@ class DayTypeService:
         opening = self._opening_range(candles)
         broke_or_high = last_close > opening["high"]
         broke_or_low = last_close < opening["low"]
-        ema_like_slope = float(candles[-1].close_price) - float(candles[max(0, len(candles) - 6)].close_price)
-        directional = (bullish and close_location >= 0.65 and ema_like_slope > 0) or ((not bullish) and close_location <= 0.35 and ema_like_slope < 0)
+        ema_like_slope = float(candles[-1].close_price) - float(
+            candles[max(0, len(candles) - 6)].close_price
+        )
+        directional = (bullish and close_location >= 0.65 and ema_like_slope > 0) or (
+            (not bullish) and close_location <= 0.35 and ema_like_slope < 0
+        )
         opening_break = (bullish and broke_or_high) or ((not bullish) and broke_or_low)
-        rotating = opening["low"] <= last_close <= opening["high"] and day_range_pct < 0.65
+        rotating = (
+            opening["low"] <= last_close <= opening["high"] and day_range_pct < 0.65
+        )
 
         score = 40
         reasons: list[str] = []
@@ -62,7 +85,9 @@ class DayTypeService:
         expansion_confirmed = day_type in {"trend_expansion", "directional_acceptance"}
         passed = score >= settings.min_day_type_score and expansion_confirmed
         if not expansion_confirmed:
-            reasons.append("option buying requires an expansion or directional acceptance day")
+            reasons.append(
+                "option buying requires an expansion or directional acceptance day"
+            )
         if not passed:
             reasons.append("day type score is below threshold")
 
@@ -92,7 +117,12 @@ class DayTypeService:
             end = datetime.combine(today, time.max)
             return (
                 session.query(Candle)
-                .filter(Candle.symbol == symbol.upper(), Candle.timeframe == timeframe, Candle.timestamp >= start, Candle.timestamp <= end)
+                .filter(
+                    Candle.symbol == symbol.upper(),
+                    Candle.timeframe == timeframe,
+                    Candle.timestamp >= start,
+                    Candle.timestamp <= end,
+                )
                 .order_by(Candle.timestamp.asc())
                 .all()
             )

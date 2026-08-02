@@ -42,7 +42,12 @@ def classify_completed_structure(
     low_values = _aligned(lows, close_values, fallback_close=True)
     volume_values = _aligned(volumes, close_values, fallback_zero=True)
 
-    ranges = [max(high - low, abs(close - open_price), 0.01) for open_price, high, low, close in zip(open_values, high_values, low_values, close_values)]
+    ranges = [
+        max(high - low, abs(close - open_price), 0.01)
+        for open_price, high, low, close in zip(
+            open_values, high_values, low_values, close_values
+        )
+    ]
     typical_range = _median(ranges[:-1] or ranges)
     moves = [right - left for left, right in zip(close_values[:-1], close_values[1:])]
     lookback = min(8, len(moves))
@@ -59,8 +64,12 @@ def classify_completed_structure(
     older_low = min(low_values[:split])
     recent_high = max(high_values[split:])
     recent_low = min(low_values[split:])
-    higher_swings = recent_high > older_high and recent_low >= older_low - typical_range * 0.20
-    lower_swings = recent_low < older_low and recent_high <= older_high + typical_range * 0.20
+    higher_swings = (
+        recent_high > older_high and recent_low >= older_low - typical_range * 0.20
+    )
+    lower_swings = (
+        recent_low < older_low and recent_high <= older_high + typical_range * 0.20
+    )
 
     acceptance_buffer = typical_range * 0.08
     bullish_breakout = close_values[-1] > prior_high + acceptance_buffer
@@ -75,27 +84,49 @@ def classify_completed_structure(
     peak_index = close_values.index(max(close_values))
     trough_index = close_values.index(min(close_values))
     bullish_retracement = (
-        (max(close_values) - close_values[-1]) / max(max(close_values) - min(close_values), 0.01)
+        (max(close_values) - close_values[-1])
+        / max(max(close_values) - min(close_values), 0.01)
         if peak_index < len(close_values) - 1
         else 0.0
     )
     bearish_retracement = (
-        (close_values[-1] - min(close_values)) / max(max(close_values) - min(close_values), 0.01)
+        (close_values[-1] - min(close_values))
+        / max(max(close_values) - min(close_values), 0.01)
         if trough_index < len(close_values) - 1
         else 0.0
     )
-    bullish_pullback_held = net_points > 0 and bullish_retracement <= 0.45 and close_values[-1] > older_low
-    bearish_pullback_held = net_points < 0 and bearish_retracement <= 0.45 and close_values[-1] < older_high
+    bullish_pullback_held = (
+        net_points > 0 and bullish_retracement <= 0.45 and close_values[-1] > older_low
+    )
+    bearish_pullback_held = (
+        net_points < 0 and bearish_retracement <= 0.45 and close_values[-1] < older_high
+    )
 
-    bullish_impulse = impulse_atr >= (0.75 if opening_session else 1.15) and up_breadth >= 0.55
-    bearish_impulse = impulse_atr <= (-0.75 if opening_session else -1.15) and down_breadth >= 0.55
-    bullish_votes = sum((bullish_impulse, higher_swings, bullish_pullback_held, bullish_acceptance))
-    bearish_votes = sum((bearish_impulse, lower_swings, bearish_pullback_held, bearish_acceptance))
+    bullish_impulse = (
+        impulse_atr >= (0.75 if opening_session else 1.15) and up_breadth >= 0.55
+    )
+    bearish_impulse = (
+        impulse_atr <= (-0.75 if opening_session else -1.15) and down_breadth >= 0.55
+    )
+    bullish_votes = sum(
+        (bullish_impulse, higher_swings, bullish_pullback_held, bullish_acceptance)
+    )
+    bearish_votes = sum(
+        (bearish_impulse, lower_swings, bearish_pullback_held, bearish_acceptance)
+    )
     min_votes = 2
-    if bullish_votes >= min_votes and bullish_votes > bearish_votes and up_breadth >= 0.50:
+    if (
+        bullish_votes >= min_votes
+        and bullish_votes > bearish_votes
+        and up_breadth >= 0.50
+    ):
         direction = "bullish"
         directional_agreement = up_breadth
-    elif bearish_votes >= min_votes and bearish_votes > bullish_votes and down_breadth >= 0.50:
+    elif (
+        bearish_votes >= min_votes
+        and bearish_votes > bullish_votes
+        and down_breadth >= 0.50
+    ):
         direction = "bearish"
         directional_agreement = down_breadth
     else:
@@ -130,10 +161,26 @@ def classify_completed_structure(
         "opening_session": bool(opening_session),
         "impulse_atr": round(impulse_atr, 3),
         "directional_agreement": round(directional_agreement, 3),
-        "swing_structure": "higher_high_higher_low" if higher_swings else "lower_high_lower_low" if lower_swings else "mixed",
-        "pullback_held": bullish_pullback_held if direction == "bullish" else bearish_pullback_held if direction == "bearish" else False,
-        "breakout": bullish_breakout if direction == "bullish" else bearish_breakout if direction == "bearish" else False,
-        "breakout_accepted": bullish_acceptance if direction == "bullish" else bearish_acceptance if direction == "bearish" else False,
+        "swing_structure": "higher_high_higher_low"
+        if higher_swings
+        else "lower_high_lower_low"
+        if lower_swings
+        else "mixed",
+        "pullback_held": bullish_pullback_held
+        if direction == "bullish"
+        else bearish_pullback_held
+        if direction == "bearish"
+        else False,
+        "breakout": bullish_breakout
+        if direction == "bullish"
+        else bearish_breakout
+        if direction == "bearish"
+        else False,
+        "breakout_accepted": bullish_acceptance
+        if direction == "bullish"
+        else bearish_acceptance
+        if direction == "bearish"
+        else False,
         "volume_expansion": volume_expansion,
         "bullish_evidence_votes": bullish_votes,
         "bearish_evidence_votes": bearish_votes,
@@ -152,9 +199,11 @@ def _aligned(
     fallback_zero: bool = False,
 ) -> list[float]:
     if values is not None and len(values) >= len(closes):
-        return [float(value) for value in values][-len(closes):]
+        return [float(value) for value in values][-len(closes) :]
     if fallback_previous:
-        return [closes[index - 1] if index else closes[0] for index in range(len(closes))]
+        return [
+            closes[index - 1] if index else closes[0] for index in range(len(closes))
+        ]
     if fallback_close:
         return list(closes)
     if fallback_zero:

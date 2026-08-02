@@ -41,9 +41,18 @@ class EvidencePersistenceQueue:
         self.repository = repository or DecisionEvidenceRepository()
         self.episode_service = episode_service or EpisodeReservationService()
         self.max_size = max(1, int(max_size or settings.evidence_queue_max_size))
-        self.max_retries = max(0, int(max_retries if max_retries is not None else settings.evidence_queue_max_retries))
+        self.max_retries = max(
+            0,
+            int(
+                max_retries
+                if max_retries is not None
+                else settings.evidence_queue_max_retries
+            ),
+        )
         self._queue: queue.Queue[EvidenceQueueItem] = queue.Queue(maxsize=self.max_size)
-        self._dead_letters: deque[dict[str, Any]] = deque(maxlen=max(100, self.max_size))
+        self._dead_letters: deque[dict[str, Any]] = deque(
+            maxlen=max(100, self.max_size)
+        )
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
@@ -62,7 +71,9 @@ class EvidencePersistenceQueue:
             if self._worker is not None and self._worker.is_alive():
                 return
             self._stop.clear()
-            self._worker = threading.Thread(target=self._run, name="decision-evidence-writer", daemon=True)
+            self._worker = threading.Thread(
+                target=self._run, name="decision-evidence-writer", daemon=True
+            )
             self._worker.start()
 
     def enqueue_decision(
@@ -83,10 +94,20 @@ class EvidencePersistenceQueue:
             with self._lock:
                 self.queue_full_count += 1
                 self.last_error = "EVIDENCE_QUEUE_FULL"
-            return {"accepted": False, "event_id": item.event_id, "decision_id": item.event_id, "reason": "EVIDENCE_QUEUE_FULL"}
+            return {
+                "accepted": False,
+                "event_id": item.event_id,
+                "decision_id": item.event_id,
+                "reason": "EVIDENCE_QUEUE_FULL",
+            }
         with self._lock:
             self.enqueued_count += 1
-        return {"accepted": True, "event_id": item.event_id, "decision_id": item.event_id, "reason": None}
+        return {
+            "accepted": True,
+            "event_id": item.event_id,
+            "decision_id": item.event_id,
+            "reason": None,
+        }
 
     def recover_pending_order_evidence(self) -> int:
         recovered = 0
@@ -97,9 +118,13 @@ class EvidencePersistenceQueue:
             receipt = self.enqueue_decision(
                 {
                     "decision_type": "pre_order_recovered",
-                    "final_state": str(intent.get("canonical_state") or "ORDER_PENDING"),
+                    "final_state": str(
+                        intent.get("canonical_state") or "ORDER_PENDING"
+                    ),
                     "episode_key": intent.get("episode_key"),
-                    "context": {"recovered_order_intent": intent.get("order_intent") or {}},
+                    "context": {
+                        "recovered_order_intent": intent.get("order_intent") or {}
+                    },
                     "gate_results": {"recovered_after_process_interruption": True},
                 },
                 episode_key=str(intent.get("episode_key") or "") or None,
@@ -156,7 +181,9 @@ class EvidencePersistenceQueue:
         try:
             self.repository.record_decision(**item.payload, decision_id=item.event_id)
             if item.episode_key:
-                self.episode_service.mark_evidence_status(item.episode_key, item.event_id, "PERSISTED")
+                self.episode_service.mark_evidence_status(
+                    item.episode_key, item.event_id, "PERSISTED"
+                )
             with self._lock:
                 self.persisted_count += 1
                 self.last_error = None
@@ -165,7 +192,9 @@ class EvidencePersistenceQueue:
                 self.failure_count += 1
                 self.last_error = f"{type(exc).__name__}: {exc}"
             if item.attempt < self.max_retries and not self._stop.is_set():
-                retry = EvidenceQueueItem(item.event_id, item.episode_key, item.payload, item.attempt + 1)
+                retry = EvidenceQueueItem(
+                    item.event_id, item.episode_key, item.payload, item.attempt + 1
+                )
                 try:
                     self._queue.put_nowait(retry)
                     with self._lock:
@@ -185,6 +214,8 @@ class EvidencePersistenceQueue:
                 )
             if item.episode_key:
                 try:
-                    self.episode_service.mark_evidence_status(item.episode_key, item.event_id, "DEAD_LETTER")
+                    self.episode_service.mark_evidence_status(
+                        item.episode_key, item.event_id, "DEAD_LETTER"
+                    )
                 except Exception:
                     pass

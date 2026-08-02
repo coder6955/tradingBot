@@ -32,14 +32,18 @@ class BrokerSyncService:
         self.notification_service = notification_service or NotificationService()
         self.exit_confirmation_callback = exit_confirmation_callback
         self.latency_metrics = latency_metrics
-        self.episode_reservation_service = episode_reservation_service or EpisodeReservationService()
+        self.episode_reservation_service = (
+            episode_reservation_service or EpisodeReservationService()
+        )
         self.live_trading_blocked = False
         self.live_block_reason: str | None = None
         self._persistent_live_block_reasons: set[str] = set()
         self.last_reconciliation: dict[str, Any] = {}
         self._seen_postbacks: set[str] = set()
 
-    def set_exit_confirmation_callback(self, callback: ExitConfirmationCallback) -> None:
+    def set_exit_confirmation_callback(
+        self, callback: ExitConfirmationCallback
+    ) -> None:
         self.exit_confirmation_callback = callback
 
     def sync_open_trades(self, limit: int = 100) -> dict[str, Any]:
@@ -47,27 +51,37 @@ class BrokerSyncService:
         trades = [
             trade
             for trade in self.trade_repository.list_trades(limit=limit)
-            if trade.mode == "live" and trade.status != "closed" and trade.broker_order_id
+            if trade.mode == "live"
+            and trade.status != "closed"
+            and trade.broker_order_id
         ]
         results: list[dict[str, Any]] = []
         for trade in trades:
             try:
                 results.append(self.sync_trade(int(trade.id), provider=provider))
             except Exception as exc:
-                results.append({"trade_id": trade.id, "status": "error", "message": str(exc)})
+                results.append(
+                    {"trade_id": trade.id, "status": "error", "message": str(exc)}
+                )
         return {"count": len(results), "results": results}
 
-    def sync_trade(self, trade_id: int, provider: KiteProvider | None = None) -> dict[str, Any]:
+    def sync_trade(
+        self, trade_id: int, provider: KiteProvider | None = None
+    ) -> dict[str, Any]:
         provider = provider or self.kite_provider_factory()
         trade = self.trade_repository.get_trade(trade_id)
         if trade is None:
             raise ValueError(f"trade {trade_id} was not found")
-        if str(trade.status).lower() == "closing" and getattr(trade, "exit_order_id", None):
+        if str(trade.status).lower() == "closing" and getattr(
+            trade, "exit_order_id", None
+        ):
             if self.exit_confirmation_callback is not None:
                 return self.exit_confirmation_callback(trade_id)
             history = provider.order_history(str(trade.exit_order_id))
             latest = history[-1] if history else {}
-            status = str(latest.get("status") or trade.exit_order_status or "unknown").lower()
+            status = str(
+                latest.get("status") or trade.exit_order_status or "unknown"
+            ).lower()
             updated = self.trade_repository.update_exit_order_status(
                 trade_id,
                 status=status,
@@ -97,8 +111,14 @@ class BrokerSyncService:
             filled_quantity=filled_quantity,
             average_price=average_price,
         )
-        protective = self._maybe_place_pending_protective_sl(updated, provider, status=status, filled_quantity=filled_quantity)
-        if self.latency_metrics is not None and status in {"complete", "filled"} and previous_status not in {"complete", "filled"}:
+        protective = self._maybe_place_pending_protective_sl(
+            updated, provider, status=status, filled_quantity=filled_quantity
+        )
+        if (
+            self.latency_metrics is not None
+            and status in {"complete", "filled"}
+            and previous_status not in {"complete", "filled"}
+        ):
             self.latency_metrics.record_between(
                 "broker_acknowledgement_to_fill",
                 getattr(trade, "created_at", None),
@@ -117,10 +137,16 @@ class BrokerSyncService:
         provider = self.kite_provider_factory()
         local_trades = self.trade_repository.live_open_trades(limit=500)
         broker_positions = self._broker_open_positions(provider)
-        local_by_symbol = {str(trade.tradingsymbol).upper(): trade for trade in local_trades}
-        broker_by_symbol = {str(row.get("tradingsymbol") or "").upper(): row for row in broker_positions}
+        local_by_symbol = {
+            str(trade.tradingsymbol).upper(): trade for trade in local_trades
+        }
+        broker_by_symbol = {
+            str(row.get("tradingsymbol") or "").upper(): row for row in broker_positions
+        }
         mismatches: list[dict[str, Any]] = []
-        pending_order_intents = self.episode_reservation_service.recoverable_order_intents()
+        pending_order_intents = (
+            self.episode_reservation_service.recoverable_order_intents()
+        )
 
         for intent in pending_order_intents:
             if str(intent.get("order_mode") or "").lower() != "live":
@@ -141,7 +167,13 @@ class BrokerSyncService:
 
         for symbol, row in broker_by_symbol.items():
             if symbol and symbol not in local_by_symbol:
-                mismatches.append({"type": "broker_position_without_local_trade", "tradingsymbol": symbol, "broker_position": row})
+                mismatches.append(
+                    {
+                        "type": "broker_position_without_local_trade",
+                        "tradingsymbol": symbol,
+                        "broker_position": row,
+                    }
+                )
 
         for trade in local_trades:
             symbol = str(trade.tradingsymbol).upper()
@@ -152,10 +184,22 @@ class BrokerSyncService:
                     reason="local live trade open but broker position is flat/missing",
                     broker_payload={"broker_positions": broker_positions},
                 )
-                mismatches.append({"type": "local_trade_without_broker_position", "trade_id": updated.id, "tradingsymbol": symbol})
+                mismatches.append(
+                    {
+                        "type": "local_trade_without_broker_position",
+                        "trade_id": updated.id,
+                        "tradingsymbol": symbol,
+                    }
+                )
                 continue
             quantity = int(self._float(row.get("quantity")) or 0)
-            expected = int(trade.remaining_quantity or trade.filled_quantity or trade.placed_quantity or trade.requested_quantity or 0)
+            expected = int(
+                trade.remaining_quantity
+                or trade.filled_quantity
+                or trade.placed_quantity
+                or trade.requested_quantity
+                or 0
+            )
             if expected > 0 and abs(quantity) != expected:
                 mismatches.append(
                     {
@@ -167,7 +211,9 @@ class BrokerSyncService:
                     }
                 )
 
-        mismatch_blocked = bool(mismatches) and settings.live_reconciliation_blocks_automation
+        mismatch_blocked = (
+            bool(mismatches) and settings.live_reconciliation_blocks_automation
+        )
         reasons = sorted(self._persistent_live_block_reasons)
         if mismatch_blocked:
             reasons.append("broker/local live position mismatch")
@@ -184,10 +230,19 @@ class BrokerSyncService:
             "recoverable_order_intents": len(pending_order_intents),
         }
         if self.live_trading_blocked:
-            self._alert(f"CRITICAL: live trading blocked by startup reconciliation mismatch count={len(mismatches)}")
+            self._alert(
+                f"CRITICAL: live trading blocked by startup reconciliation mismatch count={len(mismatches)}"
+            )
         return self.last_reconciliation
 
-    def _maybe_place_pending_protective_sl(self, trade: Any, provider: KiteProvider, *, status: str, filled_quantity: int | None) -> dict[str, Any]:
+    def _maybe_place_pending_protective_sl(
+        self,
+        trade: Any,
+        provider: KiteProvider,
+        *,
+        status: str,
+        filled_quantity: int | None,
+    ) -> dict[str, Any]:
         if not settings.enable_broker_emergency_sl:
             if settings.require_broker_protective_stop_for_live_entry:
                 self._block_live("broker-side protective stop is required but disabled")
@@ -197,29 +252,70 @@ class BrokerSyncService:
                 if settings.require_broker_protective_stop_for_live_entry
                 else "broker-side protective stop is disabled",
             }
-        if str(getattr(trade, "mode", "")).lower() != "live" or str(getattr(trade, "side", "")).upper() != "BUY":
-            return {"enabled": True, "submitted": False, "reason": "not a live BUY trade"}
-        if str(getattr(trade, "protective_order_status", "") or "").lower() not in {"pending_entry_confirmation", "failed", ""}:
-            return {"enabled": True, "submitted": False, "reason": "protective order already handled", "status": trade.protective_order_status}
+        if (
+            str(getattr(trade, "mode", "")).lower() != "live"
+            or str(getattr(trade, "side", "")).upper() != "BUY"
+        ):
+            return {
+                "enabled": True,
+                "submitted": False,
+                "reason": "not a live BUY trade",
+            }
+        if str(getattr(trade, "protective_order_status", "") or "").lower() not in {
+            "pending_entry_confirmation",
+            "failed",
+            "",
+        }:
+            return {
+                "enabled": True,
+                "submitted": False,
+                "reason": "protective order already handled",
+                "status": trade.protective_order_status,
+            }
         if status not in {"complete", "filled"} and int(filled_quantity or 0) <= 0:
-            return {"enabled": True, "submitted": False, "reason": "entry order is not complete", "entry_status": status}
-        quantity = int(filled_quantity or trade.filled_quantity or trade.placed_quantity or trade.requested_quantity or 0)
+            return {
+                "enabled": True,
+                "submitted": False,
+                "reason": "entry order is not complete",
+                "entry_status": status,
+            }
+        quantity = int(
+            filled_quantity
+            or trade.filled_quantity
+            or trade.placed_quantity
+            or trade.requested_quantity
+            or 0
+        )
         trigger_price = float(trade.stop_loss or 0.0)
         if quantity <= 0 or trigger_price <= 0:
             self.trade_repository.update_protective_order(
                 int(trade.id),
                 status="failed",
-                broker_payload={"reason": "quantity or stop loss missing", "quantity": quantity, "trigger_price": trigger_price},
+                broker_payload={
+                    "reason": "quantity or stop loss missing",
+                    "quantity": quantity,
+                    "trigger_price": trigger_price,
+                },
                 error="quantity or stop loss missing",
             )
             self._block_live("protective stop quantity or trigger price is invalid")
-            return {"enabled": True, "submitted": False, "reason": "quantity or stop loss missing"}
+            return {
+                "enabled": True,
+                "submitted": False,
+                "reason": "quantity or stop loss missing",
+            }
         if status not in {"complete", "filled"} and quantity > 0:
             try:
                 provider.cancel_order(str(trade.broker_order_id), variety="regular")
             except Exception as exc:
-                self._block_live(f"partial entry cancellation failed before protection: {exc}")
-                return {"enabled": True, "submitted": False, "reason": f"partial entry cancellation failed: {exc}"}
+                self._block_live(
+                    f"partial entry cancellation failed before protection: {exc}"
+                )
+                return {
+                    "enabled": True,
+                    "submitted": False,
+                    "reason": f"partial entry cancellation failed: {exc}",
+                }
         try:
             response = provider.place_order(
                 tradingsymbol=str(trade.tradingsymbol),
@@ -234,17 +330,40 @@ class BrokerSyncService:
             self.trade_repository.update_protective_order(
                 int(trade.id),
                 status="failed",
-                broker_payload={"reason": str(exc), "quantity": quantity, "trigger_price": trigger_price},
+                broker_payload={
+                    "reason": str(exc),
+                    "quantity": quantity,
+                    "trigger_price": trigger_price,
+                },
                 trigger_price=trigger_price,
                 error=str(exc),
             )
-            self._alert(f"CRITICAL: broker emergency SL placement failed for {trade.tradingsymbol} trade_id={trade.id}: {exc}")
+            self._alert(
+                f"CRITICAL: broker emergency SL placement failed for {trade.tradingsymbol} trade_id={trade.id}: {exc}"
+            )
             self._block_live(f"broker emergency SL placement failed: {exc}")
             return {"enabled": True, "submitted": False, "reason": str(exc)}
-        protective_order_id = str(response.get("order_id")) if isinstance(response, dict) and response.get("order_id") else None
-        response_status = str(response.get("status") or "submitted").lower() if isinstance(response, dict) else "submitted"
-        if not protective_order_id or response_status in {"rejected", "cancelled", "canceled", "failed"}:
-            reason = "protective stop broker acknowledgement is missing an order id" if not protective_order_id else f"protective stop order {response_status}"
+        protective_order_id = (
+            str(response.get("order_id"))
+            if isinstance(response, dict) and response.get("order_id")
+            else None
+        )
+        response_status = (
+            str(response.get("status") or "submitted").lower()
+            if isinstance(response, dict)
+            else "submitted"
+        )
+        if not protective_order_id or response_status in {
+            "rejected",
+            "cancelled",
+            "canceled",
+            "failed",
+        }:
+            reason = (
+                "protective stop broker acknowledgement is missing an order id"
+                if not protective_order_id
+                else f"protective stop order {response_status}"
+            )
             self.trade_repository.update_protective_order(
                 int(trade.id),
                 status="failed",
@@ -254,15 +373,27 @@ class BrokerSyncService:
                 error=reason,
             )
             self._block_live(reason)
-            return {"enabled": True, "submitted": False, "reason": reason, "protective_order_id": protective_order_id}
+            return {
+                "enabled": True,
+                "submitted": False,
+                "reason": reason,
+                "protective_order_id": protective_order_id,
+            }
         self.trade_repository.update_protective_order(
             int(trade.id),
-            status=str(response.get("status") or "submitted") if isinstance(response, dict) else "submitted",
+            status=str(response.get("status") or "submitted")
+            if isinstance(response, dict)
+            else "submitted",
             protective_order_id=protective_order_id,
             trigger_price=trigger_price,
             broker_payload={"protective_order": response, "source": "broker_sync"},
         )
-        return {"enabled": True, "submitted": True, "protective_order_id": protective_order_id, "trigger_price": trigger_price}
+        return {
+            "enabled": True,
+            "submitted": True,
+            "protective_order_id": protective_order_id,
+            "trigger_price": trigger_price,
+        }
 
     def live_block_status(self) -> dict[str, Any]:
         return {
@@ -294,15 +425,26 @@ class BrokerSyncService:
         for trade in trades:
             try:
                 if str(getattr(trade, "protective_order_id", "") or "") == order_id:
-                    results.append(self._handle_protective_order_postback(trade, data, provider))
+                    results.append(
+                        self._handle_protective_order_postback(trade, data, provider)
+                    )
                 else:
                     results.append(self.sync_trade(int(trade.id), provider=provider))
             except Exception as exc:
                 logger.exception("Broker postback sync failed for order %s", order_id)
-                results.append({"trade_id": trade.id, "status": "error", "message": str(exc)})
-        return {"handled": bool(trades), "order_id": order_id, "status": status, "synced": results}
+                results.append(
+                    {"trade_id": trade.id, "status": "error", "message": str(exc)}
+                )
+        return {
+            "handled": bool(trades),
+            "order_id": order_id,
+            "status": status,
+            "synced": results,
+        }
 
-    def _handle_protective_order_postback(self, trade: Any, data: dict[str, Any], provider: KiteProvider) -> dict[str, Any]:
+    def _handle_protective_order_postback(
+        self, trade: Any, data: dict[str, Any], provider: KiteProvider
+    ) -> dict[str, Any]:
         status = str(data.get("status") or data.get("order_status") or "").lower()
         protective_order_id = str(getattr(trade, "protective_order_id", "") or "")
         self.trade_repository.update_protective_order(
@@ -314,14 +456,25 @@ class BrokerSyncService:
         if status not in {"complete", "filled"}:
             if status in {"rejected", "cancelled", "canceled", "failed"}:
                 self._block_live(f"protective stop order {status}")
-            return {"trade_id": trade.id, "protective_order_id": protective_order_id, "status": status or "unknown"}
+            return {
+                "trade_id": trade.id,
+                "protective_order_id": protective_order_id,
+                "status": status or "unknown",
+            }
         if self.latency_metrics is not None:
             self.latency_metrics.record_between(
                 "exit_trigger_to_fill",
-                getattr(trade, "exit_requested_at", None) or getattr(trade, "price_timestamp", None),
-                detail={"trade_id": trade.id, "protective_order_id": protective_order_id, "source": "protective_stop_postback"},
+                getattr(trade, "exit_requested_at", None)
+                or getattr(trade, "price_timestamp", None),
+                detail={
+                    "trade_id": trade.id,
+                    "protective_order_id": protective_order_id,
+                    "source": "protective_stop_postback",
+                },
             )
-        exit_price = self._float(data.get("average_price")) or float(trade.stop_loss or 0.0)
+        exit_price = self._float(data.get("average_price")) or float(
+            trade.stop_loss or 0.0
+        )
         claimed = self.trade_repository.try_mark_closing(
             int(trade.id),
             outcome="stop_loss",
@@ -329,7 +482,12 @@ class BrokerSyncService:
             notes="Broker protective SL postback complete; confirming broker position",
         )
         if claimed is None:
-            return {"trade_id": trade.id, "protective_order_id": protective_order_id, "status": status, "reason": "trade_already_closing_or_closed"}
+            return {
+                "trade_id": trade.id,
+                "protective_order_id": protective_order_id,
+                "status": status,
+                "reason": "trade_already_closing_or_closed",
+            }
         self.trade_repository.update_exit_order_status(
             int(trade.id),
             status=status,
@@ -339,7 +497,12 @@ class BrokerSyncService:
         if self.exit_confirmation_callback is not None:
             return self.exit_confirmation_callback(int(trade.id))
         history = provider.order_history(protective_order_id)
-        return {"trade_id": trade.id, "protective_order_id": protective_order_id, "status": status, "history": history}
+        return {
+            "trade_id": trade.id,
+            "protective_order_id": protective_order_id,
+            "status": status,
+            "history": history,
+        }
 
     def _broker_open_positions(self, provider: KiteProvider) -> list[dict[str, Any]]:
         positions = provider.positions()
@@ -351,7 +514,10 @@ class BrokerSyncService:
                     rows.extend(item for item in payload if isinstance(item, dict))
         open_rows = []
         for row in rows:
-            if str(row.get("exchange") or "").upper() != settings.option_exchange.upper():
+            if (
+                str(row.get("exchange") or "").upper()
+                != settings.option_exchange.upper()
+            ):
                 continue
             quantity = int(self._float(row.get("quantity")) or 0)
             if quantity != 0:

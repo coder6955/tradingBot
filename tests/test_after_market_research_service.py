@@ -42,7 +42,12 @@ class FakeInsightsService:
         }
 
     def data_completeness(self, *, symbol="BANKNIFTY"):
-        return {"status": "ok", "symbol": symbol, "candles": {"rows": 100}, "option_snapshots": {"rows": 100}}
+        return {
+            "status": "ok",
+            "symbol": symbol,
+            "candles": {"rows": 100},
+            "option_snapshots": {"rows": 100},
+        }
 
     def analyze(self, *, symbol="BANKNIFTY", limit=3000):
         return {"status": "ok", "symbol": symbol, "limit": limit}
@@ -63,7 +68,12 @@ class FakeInsightsService:
         return {"status": "ok", "symbol": symbol, "limit": limit}
 
     def daily_review(self, *, symbol="BANKNIFTY", review_date=None, limit=3000):
-        return {"status": "ok", "symbol": symbol, "date": review_date.isoformat(), "limit": limit}
+        return {
+            "status": "ok",
+            "symbol": symbol,
+            "date": review_date.isoformat(),
+            "limit": limit,
+        }
 
 
 class ReadyInsightsService(FakeInsightsService):
@@ -87,11 +97,19 @@ class FakeDataIngestionService:
 
     def backfill_relevant_option_candles(self, **kwargs):
         self.calls.append("targeted_backfill")
-        return {"status": "ok", "kwargs": kwargs, "coverage_after": {"summary": {"data_quality": "high_confidence"}}}
+        return {
+            "status": "ok",
+            "kwargs": kwargs,
+            "coverage_after": {"summary": {"data_quality": "high_confidence"}},
+        }
 
     def option_candle_coverage_report(self, **kwargs):
         self.calls.append("coverage")
-        return {"status": "ok", "summary": {"data_quality": "high_confidence"}, "kwargs": kwargs}
+        return {
+            "status": "ok",
+            "summary": {"data_quality": "high_confidence"},
+            "kwargs": kwargs,
+        }
 
 
 class FakeRejectedOutcomeService:
@@ -101,7 +119,11 @@ class FakeRejectedOutcomeService:
 
     def evaluate_batches(self, **kwargs):
         self.calls.append("replay")
-        return {"status": "ok", "data_ingestion_calls_before_replay": list(self.data_ingestion.calls), "kwargs": kwargs}
+        return {
+            "status": "ok",
+            "data_ingestion_calls_before_replay": list(self.data_ingestion.calls),
+            "kwargs": kwargs,
+        }
 
 
 class FakeJobRepository:
@@ -110,7 +132,11 @@ class FakeJobRepository:
         self.next_id = 1
 
     def latest(self, *, job_name: str, trading_date: str):
-        matches = [row for row in self.rows if row["job_name"] == job_name and row["trading_date"] == trading_date]
+        matches = [
+            row
+            for row in self.rows
+            if row["job_name"] == job_name and row["trading_date"] == trading_date
+        ]
         return dict(matches[-1]) if matches else None
 
     def count(self, *, job_name: str, trading_date: str, status: str | None = None):
@@ -182,8 +208,16 @@ class AfterMarketResearchServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["action"], "after_market_research")
         self.assertEqual(service.status()["last_run_date"], "2026-07-03")
-        self.assertEqual([name for name, _ in backtest.calls], ["option_backtest", "ablation", "walk_forward"])
-        self.assertTrue(all(call[1].get("decision_mode", "scanner_parity") == "scanner_parity" for call in backtest.calls))
+        self.assertEqual(
+            [name for name, _ in backtest.calls],
+            ["option_backtest", "ablation", "walk_forward"],
+        )
+        self.assertTrue(
+            all(
+                call[1].get("decision_mode", "scanner_parity") == "scanner_parity"
+                for call in backtest.calls
+            )
+        )
 
     def test_scheduled_research_runs_only_once_per_day(self) -> None:
         backtest = FakeBacktestService()
@@ -226,7 +260,10 @@ class AfterMarketResearchServiceTests(unittest.TestCase):
         self.assertEqual(data_ingestion.calls, ["targeted_backfill", "coverage"])
         self.assertEqual(rejected.calls, ["replay"])
         replay = result["reports"]["rejected_outcome_replay"]["result"]
-        self.assertEqual(replay["data_ingestion_calls_before_replay"], ["targeted_backfill", "coverage"])
+        self.assertEqual(
+            replay["data_ingestion_calls_before_replay"],
+            ["targeted_backfill", "coverage"],
+        )
 
     def test_recommendation_uses_stage_results_not_report_wrappers(self) -> None:
         service = AfterMarketResearchService(
@@ -241,7 +278,9 @@ class AfterMarketResearchServiceTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertIn("Evidence is improving", result["recommendation"]["reason"])
 
-    def test_restart_after_partial_after_market_pipeline_does_not_repeat_heavy_stages(self) -> None:
+    def test_restart_after_partial_after_market_pipeline_does_not_repeat_heavy_stages(
+        self,
+    ) -> None:
         job_repository = FakeJobRepository()
         data_ingestion = FakeDataIngestionService()
         first = AfterMarketResearchService(
@@ -263,7 +302,12 @@ class AfterMarketResearchServiceTests(unittest.TestCase):
         second_result = restarted.maybe_run_after_market()
 
         self.assertEqual(first_result["status"], "partial")
-        self.assertEqual(job_repository.latest(job_name=AfterMarketResearchService.JOB_NAME, trading_date="2026-07-03")["status"], "partial")
+        self.assertEqual(
+            job_repository.latest(
+                job_name=AfterMarketResearchService.JOB_NAME, trading_date="2026-07-03"
+            )["status"],
+            "partial",
+        )
         self.assertEqual(second_result["status"], "idle")
         self.assertEqual(second_result["reason"], "already_ran_today")
         self.assertEqual(data_ingestion.calls, ["targeted_backfill", "coverage"])
@@ -290,9 +334,14 @@ class AfterMarketResearchServiceTests(unittest.TestCase):
         result = forced.run_once(trigger="manual", force=True)
 
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(data_ingestion.calls, ["targeted_backfill", "coverage", "targeted_backfill", "coverage"])
+        self.assertEqual(
+            data_ingestion.calls,
+            ["targeted_backfill", "coverage", "targeted_backfill", "coverage"],
+        )
 
-    def _service(self, backtest: FakeBacktestService, now: datetime) -> AfterMarketResearchService:
+    def _service(
+        self, backtest: FakeBacktestService, now: datetime
+    ) -> AfterMarketResearchService:
         return AfterMarketResearchService(
             backtest_service=backtest,
             professional_insights_service=FakeInsightsService(),

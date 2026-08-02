@@ -25,7 +25,9 @@ class HighScoreFeedWithoutOptions:
 
 
 class ScannerRealContractTests(unittest.TestCase):
-    def test_high_score_without_option_contract_does_not_emit_placeholder_signal(self) -> None:
+    def test_high_score_without_option_contract_does_not_emit_placeholder_signal(
+        self,
+    ) -> None:
         scanner = ScannerService(feed=HighScoreFeedWithoutOptions())  # type: ignore[arg-type]
 
         opportunities = scanner.scan_symbols(symbols=["TEST"], side="BUY")

@@ -6,7 +6,13 @@ from types import SimpleNamespace
 
 from app.config import settings
 from app.services.backtest_service import BacktestService
-from app.services.database import Candle, OptionQuoteSnapshot, RejectedOpportunityRecord, get_session, init_db
+from app.services.database import (
+    Candle,
+    OptionQuoteSnapshot,
+    RejectedOpportunityRecord,
+    get_session,
+    init_db,
+)
 
 
 class BacktestScannerParityTests(unittest.TestCase):
@@ -98,7 +104,9 @@ class BacktestScannerParityTests(unittest.TestCase):
         self.assertEqual(result["mode"], "scanner_parity_option_premium_replay")
         self.assertEqual(result["decision_engine"], "ScannerService")
         self.assertGreater(result["decisions_scanned"], 0)
-        self.assertIn("TradeSetupService.build_prices", result["shared_live_components"])
+        self.assertIn(
+            "TradeSetupService.build_prices", result["shared_live_components"]
+        )
         self.assertIn("legacy", result["legacy_mode_available"])
 
     def test_scanner_parity_backtest_does_not_persist_rejected_rows(self) -> None:
@@ -144,9 +152,30 @@ class BacktestScannerParityTests(unittest.TestCase):
         ]
         option_candles = {
             "BANKNIFTY26JUL58000CE": [
-                SimpleNamespace(timestamp=start, open_price=100, high_price=101, low_price=99, close_price=100, volume=10000),
-                SimpleNamespace(timestamp=start + timedelta(minutes=5), open_price=118, high_price=120.4, low_price=116, close_price=119, volume=10000),
-                SimpleNamespace(timestamp=start + timedelta(minutes=10), open_price=110, high_price=112, low_price=108, close_price=110, volume=10000),
+                SimpleNamespace(
+                    timestamp=start,
+                    open_price=100,
+                    high_price=101,
+                    low_price=99,
+                    close_price=100,
+                    volume=10000,
+                ),
+                SimpleNamespace(
+                    timestamp=start + timedelta(minutes=5),
+                    open_price=118,
+                    high_price=120.4,
+                    low_price=116,
+                    close_price=119,
+                    volume=10000,
+                ),
+                SimpleNamespace(
+                    timestamp=start + timedelta(minutes=10),
+                    open_price=110,
+                    high_price=112,
+                    low_price=108,
+                    close_price=110,
+                    volume=10000,
+                ),
             ]
         }
 
@@ -172,12 +201,32 @@ class BacktestScannerParityTests(unittest.TestCase):
                 timestamp = start + timedelta(minutes=5 * idx)
                 bank_close = 58000 + idx * 18
                 nifty_close = 24000 + idx * 5
-                self._add_candle(session, "BANKNIFTY", timestamp, bank_close, volume=100000 + idx * 1000)
-                self._add_candle(session, "NIFTY", timestamp, nifty_close, volume=200000 + idx * 1000)
+                self._add_candle(
+                    session,
+                    "BANKNIFTY",
+                    timestamp,
+                    bank_close,
+                    volume=100000 + idx * 1000,
+                )
+                self._add_candle(
+                    session, "NIFTY", timestamp, nifty_close, volume=200000 + idx * 1000
+                )
                 ce_close = 100 + idx * 1.4
                 pe_close = max(20.0, 180 - idx * 0.7)
-                self._add_candle(session, "BANKNIFTY26JUL58000CE", timestamp, ce_close, volume=5000 + idx * 100)
-                self._add_candle(session, "BANKNIFTY26JUL58000PE", timestamp, pe_close, volume=4500 + idx * 90)
+                self._add_candle(
+                    session,
+                    "BANKNIFTY26JUL58000CE",
+                    timestamp,
+                    ce_close,
+                    volume=5000 + idx * 100,
+                )
+                self._add_candle(
+                    session,
+                    "BANKNIFTY26JUL58000PE",
+                    timestamp,
+                    pe_close,
+                    volume=4500 + idx * 90,
+                )
                 session.add(
                     OptionQuoteSnapshot(
                         underlying="BANKNIFTY",
@@ -214,7 +263,9 @@ class BacktestScannerParityTests(unittest.TestCase):
         finally:
             session.close()
 
-    def _add_candle(self, session, symbol: str, timestamp: datetime, close: float, *, volume: float) -> None:
+    def _add_candle(
+        self, session, symbol: str, timestamp: datetime, close: float, *, volume: float
+    ) -> None:
         session.add(
             Candle(
                 symbol=symbol,

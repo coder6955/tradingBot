@@ -38,7 +38,9 @@ class DecisionEngineService:
             "option_quality": quality_score,
             "banknifty_intelligence": banknifty_score,
         }
-        contributions = {key: round(components[key] * value, 2) for key, value in weights.items()}
+        contributions = {
+            key: round(components[key] * value, 2) for key, value in weights.items()
+        }
         score = min(100, max(0, round(sum(contributions.values()))))
         return {
             "score": score,

@@ -55,7 +55,9 @@ class TradeSetupServiceTests(unittest.TestCase):
             }
         }
 
-        contract = service.select_contract(instruments, "NIFTY", 22120, "bullish", quotes=quotes)
+        contract = service.select_contract(
+            instruments, "NIFTY", 22120, "bullish", quotes=quotes
+        )
 
         self.assertIsNotNone(contract)
         self.assertEqual(contract.tradingsymbol, "NIFTY24JUN22000CE")
@@ -66,7 +68,9 @@ class TradeSetupServiceTests(unittest.TestCase):
         self.assertEqual(service.option_type_for("bullish", "SELL"), "PE")
         self.assertEqual(service.option_type_for("bearish", "SELL"), "CE")
 
-    def test_banknifty_contract_selection_is_sticky_until_replacement_is_materially_better(self) -> None:
+    def test_banknifty_contract_selection_is_sticky_until_replacement_is_materially_better(
+        self,
+    ) -> None:
         service = TradeSetupService()
         instruments = [
             {
@@ -93,10 +97,16 @@ class TradeSetupServiceTests(unittest.TestCase):
         original = settings.banknifty_contract_switch_score_advantage
         object.__setattr__(settings, "banknifty_contract_switch_score_advantage", 100.0)
         try:
-            first = service.select_contract(instruments, "BANKNIFTY", 58020, "bullish", quotes=quotes)
-            second = service.select_contract(instruments, "BANKNIFTY", 58120, "bullish", quotes=quotes)
+            first = service.select_contract(
+                instruments, "BANKNIFTY", 58020, "bullish", quotes=quotes
+            )
+            second = service.select_contract(
+                instruments, "BANKNIFTY", 58120, "bullish", quotes=quotes
+            )
         finally:
-            object.__setattr__(settings, "banknifty_contract_switch_score_advantage", original)
+            object.__setattr__(
+                settings, "banknifty_contract_switch_score_advantage", original
+            )
 
         self.assertEqual(first.instrument_token, second.instrument_token)
 
@@ -140,12 +150,54 @@ class TradeSetupServiceTests(unittest.TestCase):
             "BANKNIFTY26JUL58000CE",
             "5minute",
             [
-                {"timestamp": "2026-07-02 10:00:00", "open": 95, "high": 105, "low": 92, "close": 100, "volume": 1000},
-                {"timestamp": "2026-07-02 10:05:00", "open": 100, "high": 112, "low": 97, "close": 108, "volume": 1200},
-                {"timestamp": "2026-07-02 10:10:00", "open": 108, "high": 118, "low": 104, "close": 115, "volume": 1300},
-                {"timestamp": "2026-07-02 10:15:00", "open": 115, "high": 124, "low": 110, "close": 121, "volume": 1600},
-                {"timestamp": "2026-07-02 10:20:00", "open": 121, "high": 130, "low": 116, "close": 126, "volume": 1800},
-                {"timestamp": "2026-07-02 10:25:00", "open": 126, "high": 136, "low": 120, "close": 132, "volume": 2000},
+                {
+                    "timestamp": "2026-07-02 10:00:00",
+                    "open": 95,
+                    "high": 105,
+                    "low": 92,
+                    "close": 100,
+                    "volume": 1000,
+                },
+                {
+                    "timestamp": "2026-07-02 10:05:00",
+                    "open": 100,
+                    "high": 112,
+                    "low": 97,
+                    "close": 108,
+                    "volume": 1200,
+                },
+                {
+                    "timestamp": "2026-07-02 10:10:00",
+                    "open": 108,
+                    "high": 118,
+                    "low": 104,
+                    "close": 115,
+                    "volume": 1300,
+                },
+                {
+                    "timestamp": "2026-07-02 10:15:00",
+                    "open": 115,
+                    "high": 124,
+                    "low": 110,
+                    "close": 121,
+                    "volume": 1600,
+                },
+                {
+                    "timestamp": "2026-07-02 10:20:00",
+                    "open": 121,
+                    "high": 130,
+                    "low": 116,
+                    "close": 126,
+                    "volume": 1800,
+                },
+                {
+                    "timestamp": "2026-07-02 10:25:00",
+                    "open": 126,
+                    "high": 136,
+                    "low": 120,
+                    "close": 132,
+                    "volume": 2000,
+                },
             ],
         )
         contract = OptionContract(

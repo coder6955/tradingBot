@@ -19,7 +19,9 @@ from app.services.trade_repository import TradeRepository
 class FakeScanner:
     feed = None
 
-    def scan_with_diagnostics(self, symbols=None, side="BUY", order_mode="paper", rejection_source="scanner"):
+    def scan_with_diagnostics(
+        self, symbols=None, side="BUY", order_mode="paper", rejection_source="scanner"
+    ):
         return [
             {
                 "symbol": "BANKNIFTY",
@@ -33,7 +35,9 @@ class FakeScanner:
 
 
 class FakeOrderService:
-    def place_signal_order(self, signal, confirm_live=False, opportunity_id=None, order_mode=None):
+    def place_signal_order(
+        self, signal, confirm_live=False, opportunity_id=None, order_mode=None
+    ):
         return {
             "status": "paper" if not confirm_live else "live",
             "confirm_live": confirm_live,
@@ -45,7 +49,13 @@ class FakeOrderService:
 
 class FakeExitService:
     def evaluate_once(self, limit=100):
-        return {"enabled": True, "evaluated": 0, "closed": 0, "results": [], "limit": limit}
+        return {
+            "enabled": True,
+            "evaluated": 0,
+            "closed": 0,
+            "results": [],
+            "limit": limit,
+        }
 
 
 class FakeAfterMarketResearchService:
@@ -59,7 +69,12 @@ class FakeAfterMarketResearchService:
         }
 
     def run_once(self, *, trigger="manual", force=False):
-        return {"action": "after_market_research", "status": "ok", "trigger": trigger, "force": force}
+        return {
+            "action": "after_market_research",
+            "status": "ok",
+            "trigger": trigger,
+            "force": force,
+        }
 
 
 class FakePollingProvider:
@@ -83,17 +98,40 @@ class SimpleAsgiClient:
     def get(self, path: str, headers: dict[str, str] | None = None) -> AsgiResponse:
         return self.request("GET", path, headers=headers)
 
-    def post(self, path: str, json_body=None, json=None, headers: dict[str, str] | None = None) -> AsgiResponse:
+    def post(
+        self,
+        path: str,
+        json_body=None,
+        json=None,
+        headers: dict[str, str] | None = None,
+    ) -> AsgiResponse:
         body_value = json if json is not None else json_body
         return self.request("POST", path, json_body=body_value, headers=headers)
 
-    def request(self, method: str, path: str, json_body=None, headers: dict[str, str] | None = None) -> AsgiResponse:
-        return asyncio.run(self._request(method, path, json_body=json_body, headers=headers))
+    def request(
+        self,
+        method: str,
+        path: str,
+        json_body=None,
+        headers: dict[str, str] | None = None,
+    ) -> AsgiResponse:
+        return asyncio.run(
+            self._request(method, path, json_body=json_body, headers=headers)
+        )
 
-    async def _request(self, method: str, path: str, json_body=None, headers: dict[str, str] | None = None) -> AsgiResponse:
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        json_body=None,
+        headers: dict[str, str] | None = None,
+    ) -> AsgiResponse:
         parsed = urlsplit(path)
         body = b"" if json_body is None else json.dumps(json_body).encode("utf-8")
-        request_headers = [(b"host", b"testserver"), (b"content-type", b"application/json")]
+        request_headers = [
+            (b"host", b"testserver"),
+            (b"content-type", b"application/json"),
+        ]
         for key, value in (headers or {}).items():
             request_headers.append((key.lower().encode("ascii"), value.encode("utf-8")))
         scope = {
@@ -122,14 +160,25 @@ class SimpleAsgiClient:
             messages.append(message)
 
         await self.app(scope, receive, send)
-        status = next(message["status"] for message in messages if message["type"] == "http.response.start")
-        chunks = [message.get("body", b"") for message in messages if message["type"] == "http.response.body"]
+        status = next(
+            message["status"]
+            for message in messages
+            if message["type"] == "http.response.start"
+        )
+        chunks = [
+            message.get("body", b"")
+            for message in messages
+            if message["type"] == "http.response.body"
+        ]
         return AsgiResponse(status_code=status, body=b"".join(chunks))
 
 
 class ApiIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self._settings_snapshot = {item.name: getattr(api.settings, item.name) for item in fields(type(api.settings))}
+        self._settings_snapshot = {
+            item.name: getattr(api.settings, item.name)
+            for item in fields(type(api.settings))
+        }
         self._runtime_config_snapshot = {
             "mode": api.runtime_trading_config_service.mode,
             "options": dict(api.runtime_trading_config_service.options),
@@ -141,7 +190,9 @@ class ApiIntegrationTests(unittest.TestCase):
         self.temp_db.close()
         init_db(f"sqlite:///{self.temp_db.name}")
         self.client = SimpleAsgiClient(api.app)
-        self.market_session_patcher = patch.object(api, "_current_market_session", return_value="AFTER_MARKET")
+        self.market_session_patcher = patch.object(
+            api, "_current_market_session", return_value="AFTER_MARKET"
+        )
         self.market_session_patcher.start()
         self._api_auth_token = api.settings.api_auth_token
         self._api_auth_required = api.settings.api_auth_required
@@ -152,7 +203,11 @@ class ApiIntegrationTests(unittest.TestCase):
         for key, value in self._settings_snapshot.items():
             object.__setattr__(api.settings, key, value)
         for key, value in self._runtime_config_snapshot.items():
-            setattr(api.runtime_trading_config_service, key, dict(value) if isinstance(value, dict) else value)
+            setattr(
+                api.runtime_trading_config_service,
+                key,
+                dict(value) if isinstance(value, dict) else value,
+            )
         try:
             if os.path.exists(self.temp_db.name):
                 os.remove(self.temp_db.name)
@@ -177,37 +232,63 @@ class ApiIntegrationTests(unittest.TestCase):
     def test_protected_endpoint_requires_api_auth_when_configured(self) -> None:
         self._enable_api_auth()
 
-        unauthorized = self.client.post("/automation/start", json={"symbols": "BANKNIFTY"})
-        invalid = self.client.post("/automation/start", json={"symbols": "BANKNIFTY"}, headers={"X-API-Key": "wrong"})
+        unauthorized = self.client.post(
+            "/automation/start", json={"symbols": "BANKNIFTY"}
+        )
+        invalid = self.client.post(
+            "/automation/start",
+            json={"symbols": "BANKNIFTY"},
+            headers={"X-API-Key": "wrong"},
+        )
 
         self.assertEqual(unauthorized.status_code, 401)
         self.assertEqual(invalid.status_code, 401)
 
     def test_protected_endpoint_accepts_bearer_token(self) -> None:
         headers = self._enable_api_auth()
-        with patch.object(api.automation_supervisor_service, "start", return_value={"running": True, "duplicate_start_prevented": False}):
-            response = self.client.post("/automation/start", json={"symbols": "BANKNIFTY"}, headers=headers)
+        with patch.object(
+            api.automation_supervisor_service,
+            "start",
+            return_value={"running": True, "duplicate_start_prevented": False},
+        ):
+            response = self.client.post(
+                "/automation/start", json={"symbols": "BANKNIFTY"}, headers=headers
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["running"])
 
     def test_auto_trader_status_does_not_evaluate_risk(self) -> None:
-        with patch.object(api.auto_trader_service.risk_management_service, "evaluate_entry", side_effect=AssertionError("risk evaluated")):
+        with patch.object(
+            api.auto_trader_service.risk_management_service,
+            "evaluate_entry",
+            side_effect=AssertionError("risk evaluated"),
+        ):
             response = self.client.get("/auto-trader/status")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["risk"]["status"], "deferred")
 
-    def test_heavy_ingestion_blocked_during_market_without_manual_override(self) -> None:
+    def test_heavy_ingestion_blocked_during_market_without_manual_override(
+        self,
+    ) -> None:
         headers = self._enable_api_auth()
         self.market_session_patcher.stop()
-        self.market_session_patcher = patch.object(api, "_current_market_session", return_value="REGULAR_MARKET")
+        self.market_session_patcher = patch.object(
+            api, "_current_market_session", return_value="REGULAR_MARKET"
+        )
         self.market_session_patcher.start()
 
-        blocked = self.client.post("/data/ingest/candles", json={"symbols": "BANKNIFTY"}, headers=headers)
+        blocked = self.client.post(
+            "/data/ingest/candles", json={"symbols": "BANKNIFTY"}, headers=headers
+        )
         self.assertEqual(blocked.status_code, 409)
 
-        with patch.object(api.data_ingestion_service, "ingest_candles", return_value={"status": "ok", "days": 365}) as ingest:
+        with patch.object(
+            api.data_ingestion_service,
+            "ingest_candles",
+            return_value={"status": "ok", "days": 365},
+        ) as ingest:
             allowed = self.client.post(
                 "/data/ingest/candles",
                 json={"symbols": "BANKNIFTY", "days": 999, "manual_override": True},
@@ -247,9 +328,17 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("const DASHBOARD_BROKER_REFRESH_MS = 60000;", html)
         self.assertIn("AbortController", html)
         self.assertIn("timeoutMs=4500", html)
-        self.assertIn("getJsonCached(\"margins\", \"/kite/margins\", DASHBOARD_BROKER_REFRESH_MS)", html)
-        self.assertIn("getReviewJsonCached(\"learning\", \"/research/outcome-learning\"", html)
-        self.assertIn("/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300", html)
+        self.assertIn(
+            'getJsonCached("margins", "/kite/margins", DASHBOARD_BROKER_REFRESH_MS)',
+            html,
+        )
+        self.assertIn(
+            'getReviewJsonCached("learning", "/research/outcome-learning"', html
+        )
+        self.assertIn(
+            "/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300",
+            html,
+        )
         self.assertIn("dashboard_skip", html)
         self.assertIn("/market-data/pipeline-status", html)
         self.assertIn("/runtime/status", html)
@@ -277,41 +366,63 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(preview.status_code, 200)
         live_preview = preview.json()
         self.assertEqual(live_preview["mode"], "live")
-        self.assertTrue(live_preview["required"]["settings_overrides"]["LIVE_TRADING_MODE"])
-        self.assertIn("Broker emergency SL", [choice["label"] for choice in live_preview["optional_choices"]])
+        self.assertTrue(
+            live_preview["required"]["settings_overrides"]["LIVE_TRADING_MODE"]
+        )
+        self.assertIn(
+            "Broker emergency SL",
+            [choice["label"] for choice in live_preview["optional_choices"]],
+        )
 
         live = self.client.post(
             "/runtime/trading-config/apply",
             json={
                 "mode": "live",
                 "warning_acknowledged": True,
-                "options": {"broker_emergency_sl": True, "event_driven_live_entry": False},
+                "options": {
+                    "broker_emergency_sl": True,
+                    "event_driven_live_entry": False,
+                },
             },
         )
         self.assertEqual(live.status_code, 200)
         live_payload = live.json()
         self.assertEqual(live_payload["mode"], "live")
         self.assertTrue(live_payload["effective"]["automation"]["confirm_live"])
-        self.assertTrue(live_payload["effective"]["runtime_options"]["broker_emergency_sl"])
-        self.assertEqual(live_payload["required"]["settings_overrides"]["MAX_OPEN_TRADES"], 1)
+        self.assertTrue(
+            live_payload["effective"]["runtime_options"]["broker_emergency_sl"]
+        )
+        self.assertEqual(
+            live_payload["required"]["settings_overrides"]["MAX_OPEN_TRADES"], 1
+        )
 
         paper = self.client.post(
             "/runtime/trading-config/apply",
-            json={"mode": "paper", "warning_acknowledged": True, "options": {"broker_emergency_sl": True}},
+            json={
+                "mode": "paper",
+                "warning_acknowledged": True,
+                "options": {"broker_emergency_sl": True},
+            },
         )
         self.assertEqual(paper.status_code, 200)
         paper_payload = paper.json()
         self.assertEqual(paper_payload["mode"], "paper")
         self.assertFalse(paper_payload["effective"]["automation"]["confirm_live"])
-        self.assertFalse(paper_payload["effective"]["runtime_options"]["broker_emergency_sl"])
-        self.assertFalse(paper_payload["required"]["settings_overrides"]["LIVE_TRADING_MODE"])
+        self.assertFalse(
+            paper_payload["effective"]["runtime_options"]["broker_emergency_sl"]
+        )
+        self.assertFalse(
+            paper_payload["required"]["settings_overrides"]["LIVE_TRADING_MODE"]
+        )
 
     def test_runtime_trading_config_preview_shows_all_optional_choices(self) -> None:
         preview = self.client.get("/runtime/trading-config/preview?mode=live")
 
         self.assertEqual(preview.status_code, 200)
         keys = {choice["key"] for choice in preview.json()["optional_choices"]}
-        self.assertEqual(keys, set(api.runtime_trading_config_service.OPTIONAL_DEFAULTS))
+        self.assertEqual(
+            keys, set(api.runtime_trading_config_service.OPTIONAL_DEFAULTS)
+        )
 
     def test_runtime_status_is_lightweight_control_snapshot(self) -> None:
         response = self.client.get("/runtime/status")
@@ -343,7 +454,12 @@ class ApiIntegrationTests(unittest.TestCase):
 
     def test_automation_error_event_explains_missing_field_and_source(self) -> None:
         event = api._decision_event_from_error(
-            {"time": "21 Jul 2026, 10:01:05 AM IST", "error": "'score'", "error_type": "KeyError", "source": "scheduled_scan"}
+            {
+                "time": "21 Jul 2026, 10:01:05 AM IST",
+                "error": "'score'",
+                "error_type": "KeyError",
+                "source": "scheduled_scan",
+            }
         )
 
         self.assertEqual(event["title"], "Automation error: scheduled scan")
@@ -351,7 +467,9 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(event["source"], "scheduled_scan")
         self.assertEqual(event["error_type"], "KeyError")
 
-    def test_fast_candidate_gate_failure_is_a_decision_not_an_automation_error(self) -> None:
+    def test_fast_candidate_gate_failure_is_a_decision_not_an_automation_error(
+        self,
+    ) -> None:
         event = api._decision_event_from_auto_decision(
             {
                 "time": "23 Jul 2026, 02:33:30 PM IST",
@@ -369,7 +487,9 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertNotIn("Automation error", event["title"])
         self.assertIn("one_minute_and_five_minute_direction_disagree", event["message"])
 
-    def test_fast_rally_dispatch_suppression_explains_why_validation_did_not_run(self) -> None:
+    def test_fast_rally_dispatch_suppression_explains_why_validation_did_not_run(
+        self,
+    ) -> None:
         event = api._decision_event_from_auto_decision(
             {
                 "time": "23 Jul 2026, 02:33:29 PM IST",
@@ -389,7 +509,9 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(event["title"], "Fast-rally validation suppressed")
         self.assertIn("fast_rescan_cooldown", event["message"])
 
-    def test_decision_feed_timestamp_sorting_handles_display_and_iso_formats(self) -> None:
+    def test_decision_feed_timestamp_sorting_handles_display_and_iso_formats(
+        self,
+    ) -> None:
         newer_iso = api._decision_sort_timestamp("2026-07-23T15:10:13 IST")
         older_display = api._decision_sort_timestamp("23 Jul 2026, 02:33:30 PM IST")
 
@@ -409,7 +531,9 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(event["title"], "Scheduled scan completed")
         self.assertIn("no actionable opportunity", event["message"])
 
-    def test_decision_feed_places_new_scan_heartbeat_above_older_fast_rejection(self) -> None:
+    def test_decision_feed_places_new_scan_heartbeat_above_older_fast_rejection(
+        self,
+    ) -> None:
         original_scan_result = api.auto_trader_service.last_scan_result
         original_decisions = list(api.auto_trader_service.decision_events)
         original_errors = list(api.auto_trader_service.errors)
@@ -433,15 +557,23 @@ class ApiIntegrationTests(unittest.TestCase):
             api.auto_trader_service.errors = []
             api.auto_trader_service.executions = []
             with (
-                patch.object(api.opportunity_repository, "list_opportunities", return_value=[]),
-                patch.object(api.rejected_opportunity_repository, "list_rejections", return_value=[]),
+                patch.object(
+                    api.opportunity_repository, "list_opportunities", return_value=[]
+                ),
+                patch.object(
+                    api.rejected_opportunity_repository,
+                    "list_rejections",
+                    return_value=[],
+                ),
                 patch.object(api.trade_repository, "list_trades", return_value=[]),
             ):
                 payload = self.client.get("/dashboard/decision-feed?limit=10").json()
 
             self.assertEqual(payload["events"][0]["type"], "scan_heartbeat")
             self.assertEqual(payload["events"][1]["type"], "candidate_validation")
-            self.assertEqual(payload["events"][1]["title"], "Fast-rally candidate rejected")
+            self.assertEqual(
+                payload["events"][1]["title"], "Fast-rally candidate rejected"
+            )
         finally:
             api.auto_trader_service.last_scan_result = original_scan_result
             api.auto_trader_service.decision_events = original_decisions
@@ -450,7 +582,9 @@ class ApiIntegrationTests(unittest.TestCase):
 
     def test_scanner_diagnostics_endpoint(self) -> None:
         with patch.object(api, "get_scanner_service", return_value=FakeScanner()):
-            response = self.client.get("/scanner/diagnostics?side=BUY&symbols=BANKNIFTY&order_mode=paper&limit=1")
+            response = self.client.get(
+                "/scanner/diagnostics?side=BUY&symbols=BANKNIFTY&order_mode=paper&limit=1"
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -458,8 +592,17 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("websocket", payload)
 
     def test_scanner_opportunities_returns_fast_when_market_closed(self) -> None:
-        with patch.object(api, "_scanner_market_is_open", return_value=False), patch.object(api, "get_scanner_service", side_effect=AssertionError("scanner should not be built")):
-            response = self.client.get("/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3")
+        with (
+            patch.object(api, "_scanner_market_is_open", return_value=False),
+            patch.object(
+                api,
+                "get_scanner_service",
+                side_effect=AssertionError("scanner should not be built"),
+            ),
+        ):
+            response = self.client.get(
+                "/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3"
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -471,8 +614,16 @@ class ApiIntegrationTests(unittest.TestCase):
     def test_review_analysis_endpoints_defer_during_market(self) -> None:
         with (
             patch.object(api, "_current_market_session", return_value="REGULAR_MARKET"),
-            patch.object(api.outcome_learning_service, "analyze", side_effect=AssertionError("learning should be deferred")),
-            patch.object(api.opportunity_repository, "failure_analysis", side_effect=AssertionError("failure analysis should be deferred")),
+            patch.object(
+                api.outcome_learning_service,
+                "analyze",
+                side_effect=AssertionError("learning should be deferred"),
+            ),
+            patch.object(
+                api.opportunity_repository,
+                "failure_analysis",
+                side_effect=AssertionError("failure analysis should be deferred"),
+            ),
         ):
             learning = self.client.get("/research/outcome-learning")
             failures = self.client.get("/opportunities/failure-analysis")
@@ -484,7 +635,9 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(failures.json()["status"], "deferred")
         self.assertEqual(failures.json()["report"], "opportunity_failure_analysis")
 
-    def test_scanner_opportunities_starts_background_refresh_when_cache_empty(self) -> None:
+    def test_scanner_opportunities_starts_background_refresh_when_cache_empty(
+        self,
+    ) -> None:
         api.scanner_response_cache.clear()
         started: list[str] = []
 
@@ -494,9 +647,15 @@ class ApiIntegrationTests(unittest.TestCase):
         with (
             patch.object(api, "_scanner_market_is_open", return_value=True),
             patch.object(api, "_start_scanner_refresh", side_effect=fake_start),
-            patch.object(api, "get_scanner_service", side_effect=AssertionError("scanner should not run in request thread")),
+            patch.object(
+                api,
+                "get_scanner_service",
+                side_effect=AssertionError("scanner should not run in request thread"),
+            ),
         ):
-            response = self.client.get("/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3")
+            response = self.client.get(
+                "/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3"
+            )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -580,7 +739,9 @@ class ApiIntegrationTests(unittest.TestCase):
             reasons=["liquidity/spread"],
         )
 
-        response = self.client.get("/opportunities/rejections?symbol=BANKNIFTY&limit=10")
+        response = self.client.get(
+            "/opportunities/rejections?symbol=BANKNIFTY&limit=10"
+        )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -609,19 +770,27 @@ class ApiIntegrationTests(unittest.TestCase):
         report = self.client.get("/trades/test-artifacts")
         self.assertEqual(report.status_code, 200)
         self.assertEqual(report.json()["count"], 1)
-        self.assertEqual(report.json()["artifacts"][0]["tradingsymbol"], "NIFTY24JUN22000CE")
+        self.assertEqual(
+            report.json()["artifacts"][0]["tradingsymbol"], "NIFTY24JUN22000CE"
+        )
 
-        dry_run = self.client.post("/trades/test-artifacts/quarantine", json={"dry_run": True})
+        dry_run = self.client.post(
+            "/trades/test-artifacts/quarantine", json={"dry_run": True}
+        )
         self.assertEqual(dry_run.status_code, 200)
         self.assertTrue(dry_run.json()["dry_run"])
         self.assertEqual(self.client.get("/trades/test-artifacts").json()["count"], 1)
 
-        quarantine = self.client.post("/trades/test-artifacts/quarantine", json={"dry_run": False})
+        quarantine = self.client.post(
+            "/trades/test-artifacts/quarantine", json={"dry_run": False}
+        )
         self.assertEqual(quarantine.status_code, 200)
         self.assertFalse(quarantine.json()["dry_run"])
         self.assertEqual(self.client.get("/trades/test-artifacts").json()["count"], 0)
         self.assertEqual(self.client.get("/trades").json()["count"], 0)
-        self.assertEqual(self.client.get("/trades?include_artifacts=true").json()["count"], 1)
+        self.assertEqual(
+            self.client.get("/trades?include_artifacts=true").json()["count"], 1
+        )
 
     def test_daily_banknifty_summary_endpoint(self) -> None:
         trade_repo = TradeRepository()
@@ -638,7 +807,10 @@ class ApiIntegrationTests(unittest.TestCase):
             side="BUY",
             action="BUY_PE",
             score=76,
-            reasons=["insufficient_current_session_premium_candles", "expected move is smaller than option premium target requirement"],
+            reasons=[
+                "insufficient_current_session_premium_candles",
+                "expected move is smaller than option premium target requirement",
+            ],
         )
 
         response = self.client.get("/research/daily-banknifty-summary")
@@ -651,16 +823,27 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(payload["total_closed_paper_trades"], 1)
         self.assertTrue(payload["low_sample_warning"])
         self.assertFalse(payload["recommendation"]["safe_to_enable_live"])
-        self.assertEqual(payload["rejection_reasons_count"]["insufficient_current_session_premium_candles"], 1)
-        self.assertEqual(payload["rejection_reasons_count"]["expected_move_too_small"], 1)
+        self.assertEqual(
+            payload["rejection_reasons_count"][
+                "insufficient_current_session_premium_candles"
+            ],
+            1,
+        )
+        self.assertEqual(
+            payload["rejection_reasons_count"]["expected_move_too_small"], 1
+        )
 
     def test_daily_summary_does_not_change_scanner_endpoint(self) -> None:
         self.client.get("/research/daily-banknifty-summary")
         with patch.object(api, "get_scanner_service", return_value=FakeScanner()):
-            response = self.client.get("/scanner/diagnostics?side=BUY&symbols=BANKNIFTY&order_mode=paper&limit=1")
+            response = self.client.get(
+                "/scanner/diagnostics?side=BUY&symbols=BANKNIFTY&order_mode=paper&limit=1"
+            )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["diagnostics"][0]["reasons"], ["test rejection"])
+        self.assertEqual(
+            response.json()["diagnostics"][0]["reasons"], ["test rejection"]
+        )
 
     def test_after_market_research_endpoints(self) -> None:
         fake_service = FakeAfterMarketResearchService()
@@ -677,16 +860,28 @@ class ApiIntegrationTests(unittest.TestCase):
     def test_evidence_matrix_endpoint_is_read_only_and_bounded(self) -> None:
         class FakeEvidence:
             def report(self, *, group_by=None, limit=0):
-                return {"dimensions": group_by, "limit": limit, "groups": [], "accepted_outcomes": 0, "rejected_observations": 0}
+                return {
+                    "dimensions": group_by,
+                    "limit": limit,
+                    "groups": [],
+                    "accepted_outcomes": 0,
+                    "rejected_observations": 0,
+                }
 
         with patch.object(api, "evidence_matrix_service", FakeEvidence()):
-            response = self.client.get("/research/evidence-matrix?group_by=setup_family,market_regime&limit=99999")
+            response = self.client.get(
+                "/research/evidence-matrix?group_by=setup_family,market_regime&limit=99999"
+            )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["dimensions"], ["setup_family", "market_regime"])
+        self.assertEqual(
+            response.json()["dimensions"], ["setup_family", "market_regime"]
+        )
         self.assertEqual(response.json()["limit"], 10000)
 
-    def test_professional_readiness_endpoint_serves_after_market_cache_only(self) -> None:
+    def test_professional_readiness_endpoint_serves_after_market_cache_only(
+        self,
+    ) -> None:
         class FakeCachedResearch:
             def status(self):
                 return {
@@ -694,14 +889,23 @@ class ApiIntegrationTests(unittest.TestCase):
                     "last_result": {
                         "reports": {
                             "professional_readiness": {
-                                "result": {"status": "ok", "ready_for_live": False, "checks": []}
+                                "result": {
+                                    "status": "ok",
+                                    "ready_for_live": False,
+                                    "checks": [],
+                                }
                             }
                         }
                     },
                 }
 
-        with patch.object(api, "after_market_research_service", FakeCachedResearch()), patch.object(
-            api.professional_readiness_service, "report", side_effect=AssertionError("hot-path report must not run")
+        with (
+            patch.object(api, "after_market_research_service", FakeCachedResearch()),
+            patch.object(
+                api.professional_readiness_service,
+                "report",
+                side_effect=AssertionError("hot-path report must not run"),
+            ),
         ):
             response = self.client.get("/research/professional-readiness")
 
@@ -710,7 +914,9 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(response.json()["source"], "after_market_research_cache")
 
     def test_research_engine_endpoint(self) -> None:
-        response = self.client.get("/research/research-engine?symbol=BANKNIFTY&limit=10")
+        response = self.client.get(
+            "/research/research-engine?symbol=BANKNIFTY&limit=10"
+        )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -727,9 +933,17 @@ class ApiIntegrationTests(unittest.TestCase):
             "rejected_summary": {"reviewed": 1},
             "gates": [{"gate_or_reason": "premium_confirmation_failed"}],
         }
-        with patch.object(api.professional_insights_service, "gate_effectiveness_report", return_value=report) as gate_report:
-            first = self.client.get("/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300")
-            second = self.client.get("/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300")
+        with patch.object(
+            api.professional_insights_service,
+            "gate_effectiveness_report",
+            return_value=report,
+        ) as gate_report:
+            first = self.client.get(
+                "/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300"
+            )
+            second = self.client.get(
+                "/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300"
+            )
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
@@ -741,7 +955,9 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertEqual(gate_report.call_args.kwargs["top_n"], 12)
 
     def test_threshold_validation_endpoint(self) -> None:
-        response = self.client.get("/research/threshold-validation?symbol=BANKNIFTY&limit=10&mode=all")
+        response = self.client.get(
+            "/research/threshold-validation?symbol=BANKNIFTY&limit=10&mode=all"
+        )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -752,7 +968,9 @@ class ApiIntegrationTests(unittest.TestCase):
         self.assertIn("verdicts", payload)
 
     def test_execution_realism_endpoint(self) -> None:
-        response = self.client.get("/research/execution-realism?symbol=BANKNIFTY&limit=10")
+        response = self.client.get(
+            "/research/execution-realism?symbol=BANKNIFTY&limit=10"
+        )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -870,7 +1088,9 @@ class ApiIntegrationTests(unittest.TestCase):
         try:
             object.__setattr__(api.settings, "enable_kite_websocket", True)
             object.__setattr__(api.settings, "websocket_live_stale_blocks", True)
-            object.__setattr__(api.settings, "websocket_live_gap_polling_fallback", False)
+            object.__setattr__(
+                api.settings, "websocket_live_gap_polling_fallback", False
+            )
             ws = KiteWebSocketPriceFeed(api_key="k", access_token="t")
             active = ActiveTradePriceFeed(ws)
 
@@ -883,11 +1103,19 @@ class ApiIntegrationTests(unittest.TestCase):
             )
         finally:
             object.__setattr__(api.settings, "enable_kite_websocket", original_enabled)
-            object.__setattr__(api.settings, "websocket_live_stale_blocks", original_blocks)
-            object.__setattr__(api.settings, "websocket_live_gap_polling_fallback", original_gap_fallback)
+            object.__setattr__(
+                api.settings, "websocket_live_stale_blocks", original_blocks
+            )
+            object.__setattr__(
+                api.settings,
+                "websocket_live_gap_polling_fallback",
+                original_gap_fallback,
+            )
 
         self.assertIsNone(tick)
-        self.assertIn(active.last_reason, {"websocket_disabled", "websocket_disconnected"})
+        self.assertIn(
+            active.last_reason, {"websocket_disabled", "websocket_disconnected"}
+        )
 
     def _signal(self, action: str, tradingsymbol: str) -> Signal:
         return Signal(

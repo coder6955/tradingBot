@@ -83,12 +83,16 @@ class EpisodeOutcomeCollector:
         shadow_policy_service: Any | None = None,
     ) -> None:
         self.repository = repository or DecisionEvidenceRepository()
-        self.max_queue_size = max(1, int(max_queue_size or settings.outcome_queue_max_size))
+        self.max_queue_size = max(
+            1, int(max_queue_size or settings.outcome_queue_max_size)
+        )
         self.horizons = self._configured_horizons()
         self.persist_observations = bool(persist_observations)
         self.latency_metrics = latency_metrics
         self.shadow_policy_service = shadow_policy_service
-        self._queue: queue.Queue[MarketPathEvent] = queue.Queue(maxsize=self.max_queue_size)
+        self._queue: queue.Queue[MarketPathEvent] = queue.Queue(
+            maxsize=self.max_queue_size
+        )
         self._trackers: dict[str, EpisodePathState] = {}
         self._token_index: dict[int, set[str]] = {}
         self._lock = threading.RLock()
@@ -110,7 +114,9 @@ class EpisodeOutcomeCollector:
             if self._worker is not None and self._worker.is_alive():
                 return
             self._stop.clear()
-            self._worker = threading.Thread(target=self._run, name="episode-outcome-collector", daemon=True)
+            self._worker = threading.Thread(
+                target=self._run, name="episode-outcome-collector", daemon=True
+            )
             self._worker.start()
 
     def stop(self, timeout: float = 3.0) -> None:
@@ -140,7 +146,9 @@ class EpisodeOutcomeCollector:
             raise ValueError(f"unsupported outcome-collector state: {normalized_state}")
         timestamp = self._naive(observed_at or ist_now_naive())
         underlying_token = self._optional_int(context.get("underlying_token"))
-        option_token = self._optional_int(context.get("option_token") or context.get("instrument_token"))
+        option_token = self._optional_int(
+            context.get("option_token") or context.get("instrument_token")
+        )
         with self._lock:
             tracker = self._trackers.get(episode_key)
             created = tracker is None
@@ -162,9 +170,15 @@ class EpisodeOutcomeCollector:
             self._record_transition_locked(tracker, normalized_state, timestamp)
         if self.persist_observations and persist_immediately:
             self._persist_observation(tracker)
-        return {"episode_key": episode_key, "created": created, "state": normalized_state}
+        return {
+            "episode_key": episode_key,
+            "created": created,
+            "state": normalized_state,
+        }
 
-    def transition(self, episode_key: str, state: str, *, timestamp: datetime | None = None) -> bool:
+    def transition(
+        self, episode_key: str, state: str, *, timestamp: datetime | None = None
+    ) -> bool:
         normalized = str(state).upper()
         if normalized not in TRACKED_STATES:
             raise ValueError(f"unsupported outcome-collector state: {normalized}")
@@ -173,7 +187,9 @@ class EpisodeOutcomeCollector:
             if tracker is None:
                 return False
             tracker.state = normalized
-            self._record_transition_locked(tracker, normalized, self._naive(timestamp or ist_now_naive()))
+            self._record_transition_locked(
+                tracker, normalized, self._naive(timestamp or ist_now_naive())
+            )
         if self.persist_observations:
             self._persist_observation(tracker)
         return True
@@ -186,8 +202,18 @@ class EpisodeOutcomeCollector:
             bid=self._positive(tick.bid),
             ask=self._positive(tick.ask),
             ltp=self._positive(tick.price),
-            bid_depth=sum(int(item.get("quantity") or 0) for item in tick.buy_depth if isinstance(item, dict)) or None,
-            ask_depth=sum(int(item.get("quantity") or 0) for item in tick.sell_depth if isinstance(item, dict)) or None,
+            bid_depth=sum(
+                int(item.get("quantity") or 0)
+                for item in tick.buy_depth
+                if isinstance(item, dict)
+            )
+            or None,
+            ask_depth=sum(
+                int(item.get("quantity") or 0)
+                for item in tick.sell_depth
+                if isinstance(item, dict)
+            )
+            or None,
             source=str(tick.timestamp_source or "websocket"),
             provenance="websocket",
             candle_state="tick",
@@ -200,7 +226,9 @@ class EpisodeOutcomeCollector:
         except queue.Full:
             with self._lock:
                 self.queue_full_count += 1
-                for episode_key in self._token_index.get(int(event.instrument_token), set()):
+                for episode_key in self._token_index.get(
+                    int(event.instrument_token), set()
+                ):
                     tracker = self._trackers.get(episode_key)
                     if tracker is not None:
                         tracker.dropped_event_count += 1
@@ -213,7 +241,9 @@ class EpisodeOutcomeCollector:
     def process_event(self, event: MarketPathEvent) -> int:
         started = time_module.perf_counter()
         with self._lock:
-            episode_keys = list(self._token_index.get(int(event.instrument_token), set()))
+            episode_keys = list(
+                self._token_index.get(int(event.instrument_token), set())
+            )
         processed = 0
         for episode_key in episode_keys:
             with self._lock:
@@ -234,7 +264,10 @@ class EpisodeOutcomeCollector:
             self.latency_metrics.record(
                 "outcome_collector_processing_duration",
                 (time_module.perf_counter() - started) * 1000.0,
-                detail={"instrument_token": event.instrument_token, "matched_episodes": processed},
+                detail={
+                    "instrument_token": event.instrument_token,
+                    "matched_episodes": processed,
+                },
             )
         return processed
 
@@ -248,16 +281,24 @@ class EpisodeOutcomeCollector:
             context_values = dict(payload)
             observed_at = context_values.get("observed_at")
             if not isinstance(observed_at, datetime):
-                context_values["observed_at"] = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00")).replace(tzinfo=None)
+                context_values["observed_at"] = datetime.fromisoformat(
+                    str(observed_at).replace("Z", "+00:00")
+                ).replace(tzinfo=None)
             events = sorted(
                 [*tracker.underlying_events, *tracker.option_events],
                 key=lambda item: (item.exchange_timestamp, item.receive_timestamp),
             )
-            self.shadow_policy_service.compare(EntryPolicyContext(**context_values), events, persist=self.persist_observations)
+            self.shadow_policy_service.compare(
+                EntryPolicyContext(**context_values),
+                events,
+                persist=self.persist_observations,
+            )
         except Exception as exc:
             with self._lock:
                 self.persistence_failure_count += 1
-                self.last_error = f"shadow_policy_comparison:{type(exc).__name__}: {exc}"
+                self.last_error = (
+                    f"shadow_policy_comparison:{type(exc).__name__}: {exc}"
+                )
 
     def snapshot(self, episode_key: str) -> dict[str, Any] | None:
         with self._lock:
@@ -296,7 +337,9 @@ class EpisodeOutcomeCollector:
             finally:
                 self._queue.task_done()
 
-    def _append_event_locked(self, tracker: EpisodePathState, event: MarketPathEvent) -> bool:
+    def _append_event_locked(
+        self, tracker: EpisodePathState, event: MarketPathEvent
+    ) -> bool:
         key = (
             event.instrument_token,
             event.exchange_timestamp,
@@ -311,10 +354,16 @@ class EpisodeOutcomeCollector:
         tracker.event_keys.add(key)
         if event.instrument_token == tracker.option_token:
             if tracker.last_option_event_at is not None:
-                gap = (event.exchange_timestamp - tracker.last_option_event_at).total_seconds()
+                gap = (
+                    event.exchange_timestamp - tracker.last_option_event_at
+                ).total_seconds()
                 if gap > float(settings.outcome_missing_interval_seconds):
                     tracker.missing_intervals.append(
-                        {"start": tracker.last_option_event_at.isoformat(), "end": event.exchange_timestamp.isoformat(), "seconds": gap}
+                        {
+                            "start": tracker.last_option_event_at.isoformat(),
+                            "end": event.exchange_timestamp.isoformat(),
+                            "seconds": gap,
+                        }
                     )
             tracker.last_option_event_at = event.exchange_timestamp
             tracker.option_events.append(event)
@@ -322,11 +371,17 @@ class EpisodeOutcomeCollector:
                 tracker.first_executable_at = event.exchange_timestamp
                 tracker.first_executable_ask = event.ask
                 tracker.hypothetical_entry = self._entry_value(event.ask)
-                tracker.transition_times.setdefault("FIRST_EXECUTABLE", event.exchange_timestamp)
+                tracker.transition_times.setdefault(
+                    "FIRST_EXECUTABLE", event.exchange_timestamp
+                )
             target = self._float(tracker.context.get("target_1"))
             stop = self._float(tracker.context.get("stop_loss"))
             if event.bid is not None:
-                if target > 0 and event.bid >= target and tracker.first_target_at is None:
+                if (
+                    target > 0
+                    and event.bid >= target
+                    and tracker.first_target_at is None
+                ):
                     tracker.first_target_at = event.exchange_timestamp
                 if stop > 0 and event.bid <= stop and tracker.first_stop_at is None:
                     tracker.first_stop_at = event.exchange_timestamp
@@ -334,7 +389,9 @@ class EpisodeOutcomeCollector:
             tracker.underlying_events.append(event)
         return True
 
-    def _due_horizons_locked(self, tracker: EpisodePathState, current: datetime) -> list[str]:
+    def _due_horizons_locked(
+        self, tracker: EpisodePathState, current: datetime
+    ) -> list[str]:
         due: list[str] = []
         elapsed = (current - tracker.first_observed_at).total_seconds()
         for name, seconds in self.horizons.items():
@@ -342,7 +399,9 @@ class EpisodeOutcomeCollector:
                 tracker.completed_horizons.add(name)
                 due.append(name)
         resolution = "original_stop_or_target"
-        if resolution not in tracker.completed_horizons and (tracker.first_target_at or tracker.first_stop_at):
+        if resolution not in tracker.completed_horizons and (
+            tracker.first_target_at or tracker.first_stop_at
+        ):
             tracker.completed_horizons.add(resolution)
             due.append(resolution)
         cutoff = self._session_cutoff(current)
@@ -366,25 +425,60 @@ class EpisodeOutcomeCollector:
             metadata={"horizon": horizon},
         )
 
-    def _summary_locked(self, tracker: EpisodePathState | None, horizon: str | None) -> dict[str, Any]:
+    def _summary_locked(
+        self, tracker: EpisodePathState | None, horizon: str | None
+    ) -> dict[str, Any]:
         if tracker is None:
             return {}
         cutoff = self._horizon_cutoff(tracker, horizon)
-        option_events = [event for event in tracker.option_events if cutoff is None or event.exchange_timestamp <= cutoff]
-        underlying_events = [event for event in tracker.underlying_events if cutoff is None or event.exchange_timestamp <= cutoff]
+        option_events = [
+            event
+            for event in tracker.option_events
+            if cutoff is None or event.exchange_timestamp <= cutoff
+        ]
+        underlying_events = [
+            event
+            for event in tracker.underlying_events
+            if cutoff is None or event.exchange_timestamp <= cutoff
+        ]
         executable = [event for event in option_events if event.bid is not None]
         option_count = len(option_events)
         coverage_pct = (len(executable) / option_count * 100.0) if option_count else 0.0
         entry = tracker.hypothetical_entry
-        net_values = [(event.exchange_timestamp, self._exit_value(float(event.bid)) - entry) for event in executable] if entry is not None else []
+        net_values = (
+            [
+                (event.exchange_timestamp, self._exit_value(float(event.bid)) - entry)
+                for event in executable
+            ]
+            if entry is not None
+            else []
+        )
         mfe = max(net_values, key=lambda item: item[1]) if net_values else None
         mae = min(net_values, key=lambda item: item[1]) if net_values else None
         latest = executable[-1] if executable else None
-        best = max(executable, key=lambda item: float(item.bid or 0.0)) if executable else None
+        best = (
+            max(executable, key=lambda item: float(item.bid or 0.0))
+            if executable
+            else None
+        )
         target = self._float(tracker.context.get("target_1"))
         stop = self._float(tracker.context.get("stop_loss"))
-        ltp_target_without_bid = any((event.ltp or 0.0) >= target and event.bid is None for event in option_events) if target > 0 else False
-        ltp_stop_without_bid = any((event.ltp or float("inf")) <= stop and event.bid is None for event in option_events) if stop > 0 else False
+        ltp_target_without_bid = (
+            any(
+                (event.ltp or 0.0) >= target and event.bid is None
+                for event in option_events
+            )
+            if target > 0
+            else False
+        )
+        ltp_stop_without_bid = (
+            any(
+                (event.ltp or float("inf")) <= stop and event.bid is None
+                for event in option_events
+            )
+            if stop > 0
+            else False
+        )
         sufficient = bool(
             entry is not None
             and executable
@@ -393,11 +487,17 @@ class EpisodeOutcomeCollector:
         )
         target_before_stop = bool(
             tracker.first_target_at
-            and (tracker.first_stop_at is None or tracker.first_target_at < tracker.first_stop_at)
+            and (
+                tracker.first_stop_at is None
+                or tracker.first_target_at < tracker.first_stop_at
+            )
         )
         stop_before_target = bool(
             tracker.first_stop_at
-            and (tracker.first_target_at is None or tracker.first_stop_at < tracker.first_target_at)
+            and (
+                tracker.first_target_at is None
+                or tracker.first_stop_at < tracker.first_target_at
+            )
         )
         if not sufficient:
             classification = "UNDETERMINABLE_DATA"
@@ -407,8 +507,12 @@ class EpisodeOutcomeCollector:
             classification = "STOP_BEFORE_TARGET"
         else:
             classification = "NEITHER_REACHED"
-        underlying_ltps = [float(event.ltp) for event in underlying_events if event.ltp is not None]
-        option_bids = [float(event.bid) for event in executable if event.bid is not None]
+        underlying_ltps = [
+            float(event.ltp) for event in underlying_events if event.ltp is not None
+        ]
+        option_bids = [
+            float(event.bid) for event in executable if event.bid is not None
+        ]
         return {
             "episode_key": tracker.episode_key,
             "state": tracker.state,
@@ -416,41 +520,78 @@ class EpisodeOutcomeCollector:
             "executable_data_sufficient": sufficient,
             "classification": classification,
             "hypothetical_entry_ask": tracker.first_executable_ask,
-            "hypothetical_entry_after_cost": round(entry, 4) if entry is not None else None,
+            "hypothetical_entry_after_cost": round(entry, 4)
+            if entry is not None
+            else None,
             "latest_executable_bid": latest.bid if latest else None,
-            "latest_exit_after_cost": round(self._exit_value(float(latest.bid)), 4) if latest else None,
-            "after_cost_result_per_unit": round(self._exit_value(float(latest.bid)) - entry, 4) if latest and entry is not None else None,
+            "latest_exit_after_cost": round(self._exit_value(float(latest.bid)), 4)
+            if latest
+            else None,
+            "after_cost_result_per_unit": round(
+                self._exit_value(float(latest.bid)) - entry, 4
+            )
+            if latest and entry is not None
+            else None,
             "after_cost_result": (
-                round((self._exit_value(float(latest.bid)) - entry) * int(tracker.context.get("quantity") or 1), 2)
+                round(
+                    (self._exit_value(float(latest.bid)) - entry)
+                    * int(tracker.context.get("quantity") or 1),
+                    2,
+                )
                 if latest and entry is not None
                 else None
             ),
             "best_executable_bid": best.bid if best else None,
-            "best_exit_after_cost": round(self._exit_value(float(best.bid)), 4) if best else None,
+            "best_exit_after_cost": round(self._exit_value(float(best.bid)), 4)
+            if best
+            else None,
             "net_mfe_per_unit": round(mfe[1], 4) if mfe else None,
             "net_mae_per_unit": round(mae[1], 4) if mae else None,
-            "time_to_mfe_seconds": round((mfe[0] - tracker.first_observed_at).total_seconds(), 3) if mfe else None,
-            "time_to_mae_seconds": round((mae[0] - tracker.first_observed_at).total_seconds(), 3) if mae else None,
-            "first_target_at": tracker.first_target_at.isoformat() if tracker.first_target_at else None,
-            "first_stop_at": tracker.first_stop_at.isoformat() if tracker.first_stop_at else None,
+            "time_to_mfe_seconds": round(
+                (mfe[0] - tracker.first_observed_at).total_seconds(), 3
+            )
+            if mfe
+            else None,
+            "time_to_mae_seconds": round(
+                (mae[0] - tracker.first_observed_at).total_seconds(), 3
+            )
+            if mae
+            else None,
+            "first_target_at": tracker.first_target_at.isoformat()
+            if tracker.first_target_at
+            else None,
+            "first_stop_at": tracker.first_stop_at.isoformat()
+            if tracker.first_stop_at
+            else None,
             "target_before_stop": target_before_stop if sufficient else None,
             "stop_before_target": stop_before_target if sufficient else None,
             "ltp_target_without_executable_bid": ltp_target_without_bid,
             "ltp_stop_without_executable_bid": ltp_stop_without_bid,
-            "market_moved_without_executable_quote": bool(underlying_events and not option_events),
-            "option_ltp_moved_without_executable_bid": bool(option_events and not executable),
+            "market_moved_without_executable_quote": bool(
+                underlying_events and not option_events
+            ),
+            "option_ltp_moved_without_executable_bid": bool(
+                option_events and not executable
+            ),
             "option_event_count": option_count,
             "executable_bid_event_count": len(executable),
             "executable_coverage_percent": round(coverage_pct, 2),
             "missing_intervals": list(tracker.missing_intervals),
             "dropped_event_count": tracker.dropped_event_count,
-            "feed_gap_count": sum(1 for event in option_events + underlying_events if event.feed_gap),
-            "reconnect_count": sum(1 for event in option_events + underlying_events if event.reconnect),
+            "feed_gap_count": sum(
+                1 for event in option_events + underlying_events if event.feed_gap
+            ),
+            "reconnect_count": sum(
+                1 for event in option_events + underlying_events if event.reconnect
+            ),
             "underlying_high": max(underlying_ltps) if underlying_ltps else None,
             "underlying_low": min(underlying_ltps) if underlying_ltps else None,
             "option_executable_bid_high": max(option_bids) if option_bids else None,
             "option_executable_bid_low": min(option_bids) if option_bids else None,
-            "transition_times": {key: value.isoformat() for key, value in tracker.transition_times.items()},
+            "transition_times": {
+                key: value.isoformat()
+                for key, value in tracker.transition_times.items()
+            },
             "cost_model": {
                 "entry_slippage_percent": settings.risk_expected_entry_slippage_pct,
                 "exit_slippage_percent": settings.risk_expected_exit_slippage_pct,
@@ -464,37 +605,49 @@ class EpisodeOutcomeCollector:
             summary = self._summary_locked(tracker, None)
             transitions = dict(tracker.transition_times)
             context = dict(tracker.context)
+
         def write() -> None:
             session = get_session()
             try:
-                record = session.query(EpisodeObservationRecord).filter(EpisodeObservationRecord.episode_key == tracker.episode_key).first()
+                record = (
+                    session.query(EpisodeObservationRecord)
+                    .filter(EpisodeObservationRecord.episode_key == tracker.episode_key)
+                    .first()
+                )
                 values = {
-                "updated_at": ist_now_naive(),
-                "state": tracker.state,
-                "underlying_token": tracker.underlying_token,
-                "option_token": tracker.option_token,
-                "first_prepared_at": transitions.get("PREPARED"),
-                "first_armed_at": transitions.get("ARMED"),
-                "first_triggered_at": transitions.get("TRIGGERED"),
-                "first_policy_eligible_at": transitions.get("POLICY_ELIGIBLE"),
-                "first_executable_at": tracker.first_executable_at,
-                "actual_order_at": transitions.get("ORDER_PENDING"),
-                "invalidated_at": transitions.get("INVALIDATED"),
-                "terminal_at": transitions.get("EXPIRED") or transitions.get("CLOSED"),
-                "context_json": json.dumps(context, default=str, sort_keys=True),
-                "path_summary_json": json.dumps(summary, default=str, sort_keys=True),
-                "coverage_json": json.dumps(
-                    {
-                        "option_event_count": summary.get("option_event_count"),
-                        "executable_bid_event_count": summary.get("executable_bid_event_count"),
-                        "executable_coverage_percent": summary.get("executable_coverage_percent"),
-                        "missing_intervals": summary.get("missing_intervals"),
-                        "dropped_event_count": summary.get("dropped_event_count"),
-                    },
-                    default=str,
-                    sort_keys=True,
-                ),
-            }
+                    "updated_at": ist_now_naive(),
+                    "state": tracker.state,
+                    "underlying_token": tracker.underlying_token,
+                    "option_token": tracker.option_token,
+                    "first_prepared_at": transitions.get("PREPARED"),
+                    "first_armed_at": transitions.get("ARMED"),
+                    "first_triggered_at": transitions.get("TRIGGERED"),
+                    "first_policy_eligible_at": transitions.get("POLICY_ELIGIBLE"),
+                    "first_executable_at": tracker.first_executable_at,
+                    "actual_order_at": transitions.get("ORDER_PENDING"),
+                    "invalidated_at": transitions.get("INVALIDATED"),
+                    "terminal_at": transitions.get("EXPIRED")
+                    or transitions.get("CLOSED"),
+                    "context_json": json.dumps(context, default=str, sort_keys=True),
+                    "path_summary_json": json.dumps(
+                        summary, default=str, sort_keys=True
+                    ),
+                    "coverage_json": json.dumps(
+                        {
+                            "option_event_count": summary.get("option_event_count"),
+                            "executable_bid_event_count": summary.get(
+                                "executable_bid_event_count"
+                            ),
+                            "executable_coverage_percent": summary.get(
+                                "executable_coverage_percent"
+                            ),
+                            "missing_intervals": summary.get("missing_intervals"),
+                            "dropped_event_count": summary.get("dropped_event_count"),
+                        },
+                        default=str,
+                        sort_keys=True,
+                    ),
+                }
                 if record is None:
                     record = EpisodeObservationRecord(
                         episode_key=tracker.episode_key,
@@ -549,7 +702,9 @@ class EpisodeOutcomeCollector:
                 return False
         return False
 
-    def _record_transition_locked(self, tracker: EpisodePathState, state: str, timestamp: datetime) -> None:
+    def _record_transition_locked(
+        self, tracker: EpisodePathState, state: str, timestamp: datetime
+    ) -> None:
         tracker.transition_times.setdefault(state, timestamp)
 
     def _configured_horizons(self) -> dict[str, int]:
@@ -560,24 +715,41 @@ class EpisodeOutcomeCollector:
             except ValueError:
                 continue
             if seconds > 0:
-                name = "30_seconds" if seconds == 30 else f"{seconds // 60}_minute" if seconds == 60 else f"{seconds // 60}_minutes"
+                name = (
+                    "30_seconds"
+                    if seconds == 30
+                    else f"{seconds // 60}_minute"
+                    if seconds == 60
+                    else f"{seconds // 60}_minutes"
+                )
                 values[name] = seconds
         return values
 
-    def _horizon_cutoff(self, tracker: EpisodePathState, horizon: str | None) -> datetime | None:
+    def _horizon_cutoff(
+        self, tracker: EpisodePathState, horizon: str | None
+    ) -> datetime | None:
         if horizon in self.horizons:
             from datetime import timedelta
 
-            return tracker.first_observed_at + timedelta(seconds=self.horizons[str(horizon)])
+            return tracker.first_observed_at + timedelta(
+                seconds=self.horizons[str(horizon)]
+            )
         if horizon == "original_stop_or_target":
-            candidates = [value for value in (tracker.first_target_at, tracker.first_stop_at) if value is not None]
+            candidates = [
+                value
+                for value in (tracker.first_target_at, tracker.first_stop_at)
+                if value is not None
+            ]
             return min(candidates) if candidates else None
         if horizon == "session_cutoff":
             return self._session_cutoff(tracker.first_observed_at)
         return None
 
     def _session_cutoff(self, value: datetime) -> datetime:
-        hour, minute = (int(item) for item in str(settings.outcome_session_cutoff_time).split(":", 1))
+        hour, minute = (
+            int(item)
+            for item in str(settings.outcome_session_cutoff_time).split(":", 1)
+        )
         return value.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     def _entry_value(self, ask: float) -> float:

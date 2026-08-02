@@ -10,7 +10,9 @@ from app.providers.kite_provider import KiteProvider
 from app.services.database import OpportunityRecord
 from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.opportunity_repository import OpportunityRepository
-from app.services.rejected_opportunity_outcome_service import RejectedOpportunityOutcomeService
+from app.services.rejected_opportunity_outcome_service import (
+    RejectedOpportunityOutcomeService,
+)
 from app.services.time_utils import ist_now_naive, ist_today
 from app.services.trade_exit_service import TradeExitService
 
@@ -82,28 +84,42 @@ class OpportunityOutcomeService:
             try:
                 await asyncio.to_thread(self.evaluate_once)
             except Exception as exc:
-                self.errors.append({"time": ist_now_naive().isoformat(), "error": str(exc)})
+                self.errors.append(
+                    {"time": ist_now_naive().isoformat(), "error": str(exc)}
+                )
             await asyncio.sleep(float(self.interval_seconds))
 
-    def evaluate_once(self, limit: int = 100, *, exhaust_rejected: bool = False) -> dict[str, Any]:
+    def evaluate_once(
+        self, limit: int = 100, *, exhaust_rejected: bool = False
+    ) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
         market_session = self._market_session()
         review_deferred = market_session == "REGULAR_MARKET"
         if not review_deferred:
             provider = self.kite_provider_factory()
-            open_records = self.repository.list_opportunities(status="open", limit=limit)
+            open_records = self.repository.list_opportunities(
+                status="open", limit=limit
+            )
             for record in open_records:
                 results.append(self._evaluate_record(provider, record))
-        trade_exit_result = self.trade_exit_service.evaluate_once(limit=limit) if self.trade_exit_service else None
+        trade_exit_result = (
+            self.trade_exit_service.evaluate_once(limit=limit)
+            if self.trade_exit_service
+            else None
+        )
         self.last_run_at = ist_now_naive().isoformat()
         self.last_results = results
         self.last_trade_exit_result = trade_exit_result
         rejected_result = None
         if not review_deferred and self.rejected_outcome_service:
             if exhaust_rejected:
-                rejected_result = self.rejected_outcome_service.evaluate_batches(batch_limit=limit)
+                rejected_result = self.rejected_outcome_service.evaluate_batches(
+                    batch_limit=limit
+                )
             else:
-                rejected_result = self.rejected_outcome_service.evaluate_once(limit=limit)
+                rejected_result = self.rejected_outcome_service.evaluate_once(
+                    limit=limit
+                )
         return {
             "market_session": market_session,
             "review_analysis_deferred": review_deferred,
@@ -115,12 +131,19 @@ class OpportunityOutcomeService:
             "rejected_opportunities": rejected_result,
         }
 
-    def _evaluate_record(self, provider: KiteProvider, record: OpportunityRecord) -> dict[str, Any]:
+    def _evaluate_record(
+        self, provider: KiteProvider, record: OpportunityRecord
+    ) -> dict[str, Any]:
         current_price = self._current_option_price(provider, record)
         if current_price is None:
             expired_result = self._expired_result(record)
             if expired_result is None:
-                return {"id": record.id, "symbol": record.symbol, "closed": False, "reason": "quote_unavailable"}
+                return {
+                    "id": record.id,
+                    "symbol": record.symbol,
+                    "closed": False,
+                    "reason": "quote_unavailable",
+                }
             current_price = expired_result
 
         outcome = self._outcome_for_price(record, current_price)
@@ -151,13 +174,19 @@ class OpportunityOutcomeService:
             "failure_tags": failure_tags,
         }
 
-    def _current_option_price(self, provider: KiteProvider, record: OpportunityRecord) -> float | None:
+    def _current_option_price(
+        self, provider: KiteProvider, record: OpportunityRecord
+    ) -> float | None:
         if not record.tradingsymbol:
             return None
-        instrument = f"{record.exchange or settings.option_exchange}:{record.tradingsymbol}"
+        instrument = (
+            f"{record.exchange or settings.option_exchange}:{record.tradingsymbol}"
+        )
         try:
             if self.market_data_coordinator is not None:
-                quote = self.market_data_coordinator.quote([instrument], provider=provider)
+                quote = self.market_data_coordinator.quote(
+                    [instrument], provider=provider
+                )
             else:
                 quote = provider.quote([instrument])
         except Exception:
@@ -206,21 +235,41 @@ class OpportunityOutcomeService:
             return "target_1"
         return None
 
-    def _failure_tags(self, record: OpportunityRecord, exit_price: float, outcome: str) -> list[str]:
+    def _failure_tags(
+        self, record: OpportunityRecord, exit_price: float, outcome: str
+    ) -> list[str]:
         if outcome not in {"stop_loss", "false_signal", "loser", "expired"}:
             return []
 
         tags: list[str] = []
         factors = self._json(record.factor_scores_json)
-        contract = factors.get("contract", {}) if isinstance(factors.get("contract"), dict) else {}
-        price_action = factors.get("price_action", {}) if isinstance(factors.get("price_action"), dict) else {}
-        option_chain = factors.get("option_chain", {}) if isinstance(factors.get("option_chain"), dict) else {}
-        prices = factors.get("prices", {}) if isinstance(factors.get("prices"), dict) else {}
+        contract = (
+            factors.get("contract", {})
+            if isinstance(factors.get("contract"), dict)
+            else {}
+        )
+        price_action = (
+            factors.get("price_action", {})
+            if isinstance(factors.get("price_action"), dict)
+            else {}
+        )
+        option_chain = (
+            factors.get("option_chain", {})
+            if isinstance(factors.get("option_chain"), dict)
+            else {}
+        )
+        prices = (
+            factors.get("prices", {}) if isinstance(factors.get("prices"), dict) else {}
+        )
 
         expiry = self._parse_date(record.expiry)
         if expiry is not None and expiry <= ist_today():
             tags.append("expiry_day_or_expired_option")
-        if record.side == "BUY" and record.entry_price is not None and record.entry_price < settings.min_option_buy_premium:
+        if (
+            record.side == "BUY"
+            and record.entry_price is not None
+            and record.entry_price < settings.min_option_buy_premium
+        ):
             tags.append("low_premium_option_noise")
 
         room_pct = self._nested_float(price_action, "details", "room_to_level_pct")
@@ -253,7 +302,9 @@ class OpportunityOutcomeService:
 
         return list(dict.fromkeys(tags))
 
-    def _review_note(self, record: OpportunityRecord, outcome: str, failure_tags: list[str]) -> str:
+    def _review_note(
+        self, record: OpportunityRecord, outcome: str, failure_tags: list[str]
+    ) -> str:
         if failure_tags:
             return f"Auto-classified {outcome}; tags={', '.join(failure_tags)}"
         return f"Auto-classified {outcome}"

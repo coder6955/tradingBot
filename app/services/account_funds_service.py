@@ -29,7 +29,11 @@ class AccountFundsService:
     def _margins(self) -> dict[str, Any]:
         now = ist_now_naive()
         ttl = max(0, int(settings.account_funds_cache_ttl_seconds))
-        if self._cached_margins is not None and self._cached_margins_at is not None and (now - self._cached_margins_at).total_seconds() <= ttl:
+        if (
+            self._cached_margins is not None
+            and self._cached_margins_at is not None
+            and (now - self._cached_margins_at).total_seconds() <= ttl
+        ):
             return self._cached_margins
         margins = self.kite_provider.margins()
         AccountFundsService._cached_margins = margins
@@ -38,9 +42,15 @@ class AccountFundsService:
 
     def _available_cash(self, margins: dict[str, Any]) -> float:
         candidates = [
-            margins.get("available", {}).get("cash") if isinstance(margins.get("available"), dict) else None,
-            margins.get("equity", {}).get("available", {}).get("cash") if isinstance(margins.get("equity"), dict) else None,
-            margins.get("equity", {}).get("net") if isinstance(margins.get("equity"), dict) else None,
+            margins.get("available", {}).get("cash")
+            if isinstance(margins.get("available"), dict)
+            else None,
+            margins.get("equity", {}).get("available", {}).get("cash")
+            if isinstance(margins.get("equity"), dict)
+            else None,
+            margins.get("equity", {}).get("net")
+            if isinstance(margins.get("equity"), dict)
+            else None,
         ]
         for value in candidates:
             try:

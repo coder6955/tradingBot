@@ -79,5 +79,10 @@ class OptionSnapshotCollectorService:
             try:
                 await asyncio.to_thread(self.collect_once)
             except Exception as exc:
-                self.errors.append({"time": ist_now_naive().isoformat(timespec="seconds"), "error": str(exc)})
+                self.errors.append(
+                    {
+                        "time": ist_now_naive().isoformat(timespec="seconds"),
+                        "error": str(exc),
+                    }
+                )
             await asyncio.sleep(float(self.interval_seconds))

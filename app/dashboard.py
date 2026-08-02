@@ -19,7 +19,9 @@ API_BASE_URL = os.getenv("DASHBOARD_API_BASE_URL", "http://localhost:8000").rstr
 st.set_page_config(page_title="AI Option Trader", layout="wide")
 
 
-def api_get(path: str, params: dict[str, Any] | None = None) -> tuple[dict[str, Any] | list[Any] | None, str | None]:
+def api_get(
+    path: str, params: dict[str, Any] | None = None
+) -> tuple[dict[str, Any] | list[Any] | None, str | None]:
     try:
         response = requests.get(f"{API_BASE_URL}{path}", params=params, timeout=12)
         response.raise_for_status()
@@ -28,9 +30,13 @@ def api_get(path: str, params: dict[str, Any] | None = None) -> tuple[dict[str, 
         return None, str(exc)
 
 
-def api_post(path: str, payload: dict[str, Any] | None = None) -> tuple[dict[str, Any] | list[Any] | None, str | None]:
+def api_post(
+    path: str, payload: dict[str, Any] | None = None
+) -> tuple[dict[str, Any] | list[Any] | None, str | None]:
     try:
-        response = requests.post(f"{API_BASE_URL}{path}", json=payload or {}, timeout=20)
+        response = requests.post(
+            f"{API_BASE_URL}{path}", json=payload or {}, timeout=20
+        )
         response.raise_for_status()
         return response.json(), None
     except Exception as exc:
@@ -121,7 +127,9 @@ st.markdown(
 
 
 st.title("AI Option Trader Command Center")
-st.caption(f"Connected API: {API_BASE_URL} | Refreshed: {ist_now().strftime('%H:%M:%S IST')}")
+st.caption(
+    f"Connected API: {API_BASE_URL} | Refreshed: {ist_now().strftime('%H:%M:%S IST')}"
+)
 
 health, health_error = api_get("/health")
 db_health, db_error = api_get("/db/health")
@@ -133,22 +141,56 @@ pipeline, pipeline_error = api_get("/market-data/pipeline-status")
 runtime_status, runtime_status_error = api_get("/runtime/status")
 strategy_status, strategy_status_error = api_get("/strategy/versions/current")
 armed_entries, armed_entries_error = api_get("/scanner/armed-entries")
-constituent_status, constituent_status_error = api_get("/market-data/banknifty-constituents/status")
-reconciliation_status, reconciliation_status_error = api_get("/broker/reconciliation/status")
-protection_status, protection_status_error = api_get("/broker/emergency-protection/status")
-after_market_status, after_market_status_error = api_get("/research/after-market/status")
+constituent_status, constituent_status_error = api_get(
+    "/market-data/banknifty-constituents/status"
+)
+reconciliation_status, reconciliation_status_error = api_get(
+    "/broker/reconciliation/status"
+)
+protection_status, protection_status_error = api_get(
+    "/broker/emergency-protection/status"
+)
+after_market_status, after_market_status_error = api_get(
+    "/research/after-market/status"
+)
 
 top_cols = st.columns(5)
 with top_cols[0]:
-    status_pill("API", health_error is None and isinstance(health, dict) and health.get("status") == "ok", health_error or "online")
+    status_pill(
+        "API",
+        health_error is None
+        and isinstance(health, dict)
+        and health.get("status") == "ok",
+        health_error or "online",
+    )
 with top_cols[1]:
-    status_pill("Database", db_error is None and isinstance(db_health, dict) and db_health.get("status") == "ok", db_error or "connected")
+    status_pill(
+        "Database",
+        db_error is None
+        and isinstance(db_health, dict)
+        and db_health.get("status") == "ok",
+        db_error or "connected",
+    )
 with top_cols[2]:
-    status_pill("Kite", kite_error is None and isinstance(kite_health, dict) and kite_health.get("status") == "ok", kite_error or str((kite_health or {}).get("status", "unknown")))
+    status_pill(
+        "Kite",
+        kite_error is None
+        and isinstance(kite_health, dict)
+        and kite_health.get("status") == "ok",
+        kite_error or str((kite_health or {}).get("status", "unknown")),
+    )
 with top_cols[3]:
-    status_pill("Auto Trader", bool((auto_status or {}).get("running")), "running" if (auto_status or {}).get("running") else "stopped")
+    status_pill(
+        "Auto Trader",
+        bool((auto_status or {}).get("running")),
+        "running" if (auto_status or {}).get("running") else "stopped",
+    )
 with top_cols[4]:
-    status_pill("Outcome Monitor", bool((monitor_status or {}).get("running")), "running" if (monitor_status or {}).get("running") else "stopped")
+    status_pill(
+        "Outcome Monitor",
+        bool((monitor_status or {}).get("running")),
+        "running" if (monitor_status or {}).get("running") else "stopped",
+    )
 
 st.divider()
 
@@ -159,13 +201,23 @@ with control_col:
     with st.form("auto_trader_form"):
         side = st.selectbox("Side", ["BUY", "SELL"], index=0)
         symbols = st.text_input("Symbols", value="BANKNIFTY")
-        interval_seconds = st.number_input("Scan interval seconds", min_value=3, max_value=300, value=5, step=1)
-        limit = st.number_input("Max opportunities per scan", min_value=1, max_value=25, value=3, step=1)
+        interval_seconds = st.number_input(
+            "Scan interval seconds", min_value=3, max_value=300, value=5, step=1
+        )
+        limit = st.number_input(
+            "Max opportunities per scan", min_value=1, max_value=25, value=3, step=1
+        )
         place_orders = st.toggle("Auto place orders", value=False)
-        confirm_live = st.toggle("Confirm live orders", value=False, disabled=not place_orders)
+        confirm_live = st.toggle(
+            "Confirm live orders", value=False, disabled=not place_orders
+        )
         monitor_outcomes = st.toggle("Monitor outcomes", value=True)
-        outcome_interval_seconds = st.number_input("Outcome check seconds", min_value=10, max_value=600, value=30, step=5)
-        start_clicked = st.form_submit_button("Start Auto Trader", use_container_width=True)
+        outcome_interval_seconds = st.number_input(
+            "Outcome check seconds", min_value=10, max_value=600, value=30, step=5
+        )
+        start_clicked = st.form_submit_button(
+            "Start Auto Trader", use_container_width=True
+        )
 
     if start_clicked:
         payload = {
@@ -200,7 +252,12 @@ with control_col:
         if st.button("Run One Scan", use_container_width=True):
             result, error = api_post(
                 "/auto-trader/scan-once",
-                {"side": side, "symbols": symbols, "limit": int(limit), "place_orders": False},
+                {
+                    "side": side,
+                    "symbols": symbols,
+                    "limit": int(limit),
+                    "place_orders": False,
+                },
             )
             st.error(error) if error else st.json(result)
     with manual_cols[1]:
@@ -221,7 +278,9 @@ with metrics_col:
     metric_cols_2[0].metric("Open ideas", perf.get("open", 0))
     metric_cols_2[1].metric("Closed", perf.get("closed", 0))
     metric_cols_2[2].metric("Win rate", f"{float(perf.get('win_rate', 0)) * 100:.1f}%")
-    st.caption("Live order guard: real Zerodha orders require live env flags plus `confirm_live=true`.")
+    st.caption(
+        "Live order guard: real Zerodha orders require live env flags plus `confirm_live=true`."
+    )
     st.json({"auto_trader": status, "outcome_monitor": monitor}, expanded=False)
 
 with links_col:
@@ -237,10 +296,22 @@ with links_col:
         ("Paper Positions", "/paper/positions"),
     ]
     for label, path in links:
-        st.markdown(f'<div class="quick-link"><a href="{API_BASE_URL}{path}" target="_blank">{label}</a></div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="quick-link"><a href="{API_BASE_URL}{path}" target="_blank">{label}</a></div>',
+            unsafe_allow_html=True,
+        )
 
-tab_latest, tab_journal, tab_failures, tab_orders, tab_account, tab_operations = st.tabs(
-    ["Latest Scan", "Opportunity Journal", "Failure Analysis", "Orders & Paper", "Account", "V5 Operations"]
+tab_latest, tab_journal, tab_failures, tab_orders, tab_account, tab_operations = (
+    st.tabs(
+        [
+            "Latest Scan",
+            "Opportunity Journal",
+            "Failure Analysis",
+            "Orders & Paper",
+            "Account",
+            "V5 Operations",
+        ]
+    )
 )
 
 with tab_latest:
@@ -257,8 +328,12 @@ with tab_latest:
 with tab_journal:
     st.subheader("Saved Opportunities")
     filter_cols = st.columns([0.4, 0.4, 0.2])
-    status_filter = filter_cols[0].selectbox("Status filter", ["all", "open", "closed"], index=0)
-    journal_limit = filter_cols[1].number_input("Rows", min_value=5, max_value=500, value=50, step=5)
+    status_filter = filter_cols[0].selectbox(
+        "Status filter", ["all", "open", "closed"], index=0
+    )
+    journal_limit = filter_cols[1].number_input(
+        "Rows", min_value=5, max_value=500, value=50, step=5
+    )
     params = {"limit": int(journal_limit)}
     if status_filter != "all":
         params["status"] = status_filter
@@ -273,12 +348,23 @@ with tab_journal:
     st.markdown("#### Manually Mark Outcome")
     outcome_cols = st.columns([0.2, 0.25, 0.25, 0.3])
     opportunity_id = outcome_cols[0].number_input("ID", min_value=1, value=1, step=1)
-    outcome = outcome_cols[1].selectbox("Outcome", ["stop_loss", "target_1", "target_2", "target_3", "false_signal", "expired"])
-    exit_price = outcome_cols[2].number_input("Exit price", min_value=0.0, value=0.0, step=0.05)
+    outcome = outcome_cols[1].selectbox(
+        "Outcome",
+        ["stop_loss", "target_1", "target_2", "target_3", "false_signal", "expired"],
+    )
+    exit_price = outcome_cols[2].number_input(
+        "Exit price", min_value=0.0, value=0.0, step=0.05
+    )
     review_notes = outcome_cols[3].text_input("Notes", value="")
     if st.button("Save Outcome", use_container_width=True):
-        payload = {"outcome": outcome, "exit_price": exit_price, "review_notes": review_notes}
-        result, error = api_post(f"/opportunities/{int(opportunity_id)}/outcome", payload)
+        payload = {
+            "outcome": outcome,
+            "exit_price": exit_price,
+            "review_notes": review_notes,
+        }
+        result, error = api_post(
+            f"/opportunities/{int(opportunity_id)}/outcome", payload
+        )
         st.error(error) if error else st.success("Outcome saved.")
 
 with tab_failures:
@@ -297,7 +383,9 @@ with tab_failures:
 with tab_orders:
     st.subheader("Auto Executions")
     executions, executions_error = api_get("/auto-trader/executions")
-    st.error(executions_error) if executions_error else st.json(executions, expanded=False)
+    st.error(executions_error) if executions_error else st.json(
+        executions, expanded=False
+    )
 
     st.subheader("Paper Trading")
     paper_positions, paper_error = api_get("/paper/trades")
@@ -308,7 +396,9 @@ with tab_account:
     account_cols = st.columns(3)
     margins, margins_error = api_get("/kite/margins")
     positions, positions_error = api_get("/kite/positions")
-    account_cols[0].metric("DB", "OK" if (db_health or {}).get("status") == "ok" else "Check")
+    account_cols[0].metric(
+        "DB", "OK" if (db_health or {}).get("status") == "ok" else "Check"
+    )
     account_cols[1].metric("Kite", (kite_health or {}).get("status", "unknown"))
     account_cols[2].metric("API", (health or {}).get("status", "unknown"))
     st.markdown("##### Margins")
@@ -322,9 +412,14 @@ with tab_operations:
     session = (runtime_status or {}).get("session", {})
     operations_cols = st.columns(4)
     operations_cols[0].metric("Strategy", strategy.get("version") or "-")
-    operations_cols[1].metric("Config drift", "YES" if strategy.get("config_drift_detected") else "NO")
+    operations_cols[1].metric(
+        "Config drift", "YES" if strategy.get("config_drift_detected") else "NO"
+    )
     operations_cols[2].metric("Market session", session.get("runtime_mode") or "-")
-    operations_cols[3].metric("Live modules expected", "YES" if session.get("should_run_live_modules") else "NO")
+    operations_cols[3].metric(
+        "Live modules expected",
+        "YES" if session.get("should_run_live_modules") else "NO",
+    )
 
     st.subheader("Market Data and WebSocket")
     pipeline_payload = pipeline or {}
@@ -340,9 +435,17 @@ with tab_operations:
     st.subheader("Armed Entries, Constituents and Broker Safety")
     safety_cols = st.columns(4)
     safety_cols[0].metric("Active armed", len((armed_entries or {}).get("active", [])))
-    safety_cols[1].metric("Constituent snapshot", (constituent_status or {}).get("source_date") or "-")
-    safety_cols[2].metric("Reconciliation", "BLOCKED" if (reconciliation_status or {}).get("blocked") else "CLEAR")
-    safety_cols[3].metric("Broker protection", "ENABLED" if (protection_status or {}).get("enabled") else "OFF")
+    safety_cols[1].metric(
+        "Constituent snapshot", (constituent_status or {}).get("source_date") or "-"
+    )
+    safety_cols[2].metric(
+        "Reconciliation",
+        "BLOCKED" if (reconciliation_status or {}).get("blocked") else "CLEAR",
+    )
+    safety_cols[3].metric(
+        "Broker protection",
+        "ENABLED" if (protection_status or {}).get("enabled") else "OFF",
+    )
 
     for label, payload, error in (
         ("Pipeline and latency", pipeline, pipeline_error),
@@ -350,9 +453,15 @@ with tab_operations:
         ("Constituent intelligence", constituent_status, constituent_status_error),
         ("Broker reconciliation", reconciliation_status, reconciliation_status_error),
         ("Broker protection", protection_status, protection_status_error),
-        ("After-market readiness cache", after_market_status, after_market_status_error),
+        (
+            "After-market readiness cache",
+            after_market_status,
+            after_market_status_error,
+        ),
     ):
         with st.expander(label):
             st.error(error) if error else st.json(payload)
 
-st.caption("Tip: keep this dashboard open while auto-trader runs. Use the status cards and Last scan value to confirm activity.")
+st.caption(
+    "Tip: keep this dashboard open while auto-trader runs. Use the status cards and Last scan value to confirm activity."
+)

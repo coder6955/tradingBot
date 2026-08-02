@@ -27,8 +27,15 @@ class ResearchDatasetAuditService:
         session = get_session()
         try:
             raw_ticks = int(session.query(func.count(RawTickRecord.id)).scalar() or 0)
-            sessions = int(session.query(func.count(func.distinct(RawTickRecord.session_date))).scalar() or 0)
-            unique_episodes = int(session.query(func.count(SetupEpisodeRecord.id)).scalar() or 0)
+            sessions = int(
+                session.query(
+                    func.count(func.distinct(RawTickRecord.session_date))
+                ).scalar()
+                or 0
+            )
+            unique_episodes = int(
+                session.query(func.count(SetupEpisodeRecord.id)).scalar() or 0
+            )
             bid_ticks = int(
                 session.query(func.count(RawTickRecord.id))
                 .filter(RawTickRecord.bid.isnot(None), RawTickRecord.bid > 0)
@@ -54,7 +61,9 @@ class ResearchDatasetAuditService:
             )
             underlying_ticks = int(
                 session.query(func.count(RawTickRecord.id))
-                .filter(func.upper(RawTickRecord.symbol).in_(("BANKNIFTY", "NIFTY BANK")))
+                .filter(
+                    func.upper(RawTickRecord.symbol).in_(("BANKNIFTY", "NIFTY BANK"))
+                )
                 .scalar()
                 or 0
             )
@@ -68,18 +77,35 @@ class ResearchDatasetAuditService:
                 or 0
             )
             candle_count = int(session.query(func.count(Candle.id)).scalar() or 0)
-            generated = int(session.query(func.count(Candle.id)).filter(Candle.is_generated == 1).scalar() or 0)
+            generated = int(
+                session.query(func.count(Candle.id))
+                .filter(Candle.is_generated == 1)
+                .scalar()
+                or 0
+            )
             backfilled = int(
                 session.query(func.count(Candle.id))
                 .filter(
-                    (func.lower(func.coalesce(Candle.timestamp_source, "")).like("%backfill%"))
-                    | (func.lower(func.coalesce(Candle.data_quality, "")).like("%backfill%"))
+                    (
+                        func.lower(func.coalesce(Candle.timestamp_source, "")).like(
+                            "%backfill%"
+                        )
+                    )
+                    | (
+                        func.lower(func.coalesce(Candle.data_quality, "")).like(
+                            "%backfill%"
+                        )
+                    )
                 )
                 .scalar()
                 or 0
             )
-            observations = int(session.query(func.count(EpisodeObservationRecord.id)).scalar() or 0)
-            policy_decisions = int(session.query(func.count(ShadowPolicyDecisionRecord.id)).scalar() or 0)
+            observations = int(
+                session.query(func.count(EpisodeObservationRecord.id)).scalar() or 0
+            )
+            policy_decisions = int(
+                session.query(func.count(ShadowPolicyDecisionRecord.id)).scalar() or 0
+            )
             missing = self._missing_intervals(session)
         finally:
             session.close()
@@ -165,7 +191,9 @@ class ResearchDatasetAuditService:
             "tokens_with_gaps": len(per_token),
             "largest_counts_by_token": [
                 {"instrument_token": token, "count": token_count}
-                for token, token_count in sorted(per_token.items(), key=lambda item: item[1], reverse=True)[:20]
+                for token, token_count in sorted(
+                    per_token.items(), key=lambda item: item[1], reverse=True
+                )[:20]
             ],
         }
 
@@ -183,7 +211,9 @@ class ShadowPolicyResearchReportService:
         rows = self._rows()
         if not rows:
             return self.evaluator.evaluate([], dataset_label="INSUFFICIENT DATA")
-        result = self.evaluator.evaluate_chronological(rows, maximum_horizon_seconds=maximum_horizon_seconds)
+        result = self.evaluator.evaluate_chronological(
+            rows, maximum_horizon_seconds=maximum_horizon_seconds
+        )
         result["source"] = "persisted_unique_episode_shadow_evidence"
         result["thresholds_frozen_before_final_oos_required"] = True
         return result
@@ -193,12 +223,16 @@ class ShadowPolicyResearchReportService:
         try:
             decisions = session.query(ShadowPolicyDecisionRecord).all()
             observations = {
-                item.episode_key: item for item in session.query(EpisodeObservationRecord).all()
+                item.episode_key: item
+                for item in session.query(EpisodeObservationRecord).all()
             }
             outcomes: dict[str, dict[str, Any]] = {}
             for item in (
                 session.query(DecisionOutcomeRecord)
-                .filter(DecisionOutcomeRecord.outcome_source == "continuous_executable_collector")
+                .filter(
+                    DecisionOutcomeRecord.outcome_source
+                    == "continuous_executable_collector"
+                )
                 .order_by(DecisionOutcomeRecord.created_at.asc())
                 .all()
             ):
@@ -210,7 +244,11 @@ class ShadowPolicyResearchReportService:
             for decision in decisions:
                 payload = self._json(decision.decision_json)
                 observation = observations.get(decision.episode_key)
-                context = self._json(observation.context_json) if observation is not None else {}
+                context = (
+                    self._json(observation.context_json)
+                    if observation is not None
+                    else {}
+                )
                 timing = self._json(decision.timing_waterfall_json)
                 decision_at = (
                     observation.first_observed_at

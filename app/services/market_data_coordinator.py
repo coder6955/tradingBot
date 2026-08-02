@@ -15,9 +15,18 @@ KiteProviderFactory = Callable[[], KiteProvider]
 class MarketDataCoordinator:
     """Shared short-TTL market-data cache for non-order-placement quote reads."""
 
-    def __init__(self, kite_provider_factory: KiteProviderFactory, *, quote_ttl_seconds: int | None = None) -> None:
+    def __init__(
+        self,
+        kite_provider_factory: KiteProviderFactory,
+        *,
+        quote_ttl_seconds: int | None = None,
+    ) -> None:
         self.kite_provider_factory = kite_provider_factory
-        self.quote_ttl_seconds = quote_ttl_seconds if quote_ttl_seconds is not None else settings.kite_quote_cache_ttl_seconds
+        self.quote_ttl_seconds = (
+            quote_ttl_seconds
+            if quote_ttl_seconds is not None
+            else settings.kite_quote_cache_ttl_seconds
+        )
         self._quote_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
         self._instrument_cache: dict[str, tuple[datetime, list[dict[str, Any]]]] = {}
         self._quote_inflight: dict[str, Event] = {}
@@ -34,7 +43,13 @@ class MarketDataCoordinator:
         self.last_quote_error: str | None = None
         self.last_instrument_error: str | None = None
 
-    def quote(self, instruments: Sequence[str], *, provider: KiteProvider | None = None, bypass_cache: bool = False) -> dict[str, Any]:
+    def quote(
+        self,
+        instruments: Sequence[str],
+        *,
+        provider: KiteProvider | None = None,
+        bypass_cache: bool = False,
+    ) -> dict[str, Any]:
         keys = list(dict.fromkeys(str(item) for item in instruments if item))
         if not keys:
             return {}
@@ -163,7 +178,9 @@ class MarketDataCoordinator:
             self._quote_cache.clear()
             self._instrument_cache.clear()
 
-    def _fetch_quotes(self, keys: list[str], *, provider: KiteProvider | None = None) -> dict[str, Any]:
+    def _fetch_quotes(
+        self, keys: list[str], *, provider: KiteProvider | None = None
+    ) -> dict[str, Any]:
         client = provider or self.kite_provider_factory()
         fetched = client.quote(keys)
         now = ist_now_naive()
@@ -178,7 +195,9 @@ class MarketDataCoordinator:
                 clean[str(key)] = dict(payload)
         return clean
 
-    def _fetch_instruments(self, exchange: str | None, *, provider: KiteProvider | None = None) -> list[dict[str, Any]]:
+    def _fetch_instruments(
+        self, exchange: str | None, *, provider: KiteProvider | None = None
+    ) -> list[dict[str, Any]]:
         client = provider or self.kite_provider_factory()
         rows = client.instruments(exchange)
         now = ist_now_naive()

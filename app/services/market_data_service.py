@@ -15,12 +15,16 @@ class MarketDataService:
     def __init__(self, session_factory: Optional[Any] = None) -> None:
         self.session_factory = session_factory or get_session
 
-    def save_candles(self, symbol: str, timeframe: str, candles: List[Dict[str, Any]]) -> int:
+    def save_candles(
+        self, symbol: str, timeframe: str, candles: List[Dict[str, Any]]
+    ) -> int:
         session: Session = self.session_factory()
         try:
             parsed_rows: list[dict[str, Any]] = []
             for candle in candles:
-                parsed_timestamp = self._parse_timestamp(candle.get("timestamp") or candle.get("date"))
+                parsed_timestamp = self._parse_timestamp(
+                    candle.get("timestamp") or candle.get("date")
+                )
                 if parsed_timestamp is None:
                     continue
                 parsed_rows.append({**candle, "timestamp": parsed_timestamp})
@@ -31,7 +35,11 @@ class MarketDataService:
                 existing_timestamps = {
                     item[0]
                     for item in session.query(Candle.timestamp)
-                    .filter(Candle.symbol == symbol.upper(), Candle.timeframe == timeframe, Candle.timestamp.in_(timestamps))
+                    .filter(
+                        Candle.symbol == symbol.upper(),
+                        Candle.timeframe == timeframe,
+                        Candle.timestamp.in_(timestamps),
+                    )
                     .all()
                 }
 
@@ -49,11 +57,19 @@ class MarketDataService:
                         low_price=float(candle["low"]),
                         close_price=float(candle["close"]),
                         volume=float(candle.get("volume", 0.0)),
-                        instrument_token=int(candle["instrument_token"]) if candle.get("instrument_token") is not None else None,
-                        receive_timestamp=self._parse_timestamp(candle.get("receive_timestamp")),
-                        timestamp_source=str(candle.get("timestamp_source")) if candle.get("timestamp_source") else None,
+                        instrument_token=int(candle["instrument_token"])
+                        if candle.get("instrument_token") is not None
+                        else None,
+                        receive_timestamp=self._parse_timestamp(
+                            candle.get("receive_timestamp")
+                        ),
+                        timestamp_source=str(candle.get("timestamp_source"))
+                        if candle.get("timestamp_source")
+                        else None,
                         is_generated=1 if candle.get("is_generated") else 0,
-                        data_quality=str(candle.get("data_quality")) if candle.get("data_quality") else None,
+                        data_quality=str(candle.get("data_quality"))
+                        if candle.get("data_quality")
+                        else None,
                     )
                 )
                 inserted += 1
@@ -96,7 +112,9 @@ class MarketDataService:
         finally:
             session.close()
 
-    def count_candles(self, symbol: str | None = None, timeframe: str | None = None) -> int:
+    def count_candles(
+        self, symbol: str | None = None, timeframe: str | None = None
+    ) -> int:
         session: Session = self.session_factory()
         try:
             query = session.query(Candle)

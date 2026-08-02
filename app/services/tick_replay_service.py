@@ -15,9 +15,17 @@ class TickReplayService:
     def __init__(self, handler: Callable[[WebSocketTick], Any]) -> None:
         self.handler = handler
 
-    def replay(self, events: Iterable[dict[str, Any] | WebSocketTick]) -> dict[str, Any]:
+    def replay(
+        self, events: Iterable[dict[str, Any] | WebSocketTick]
+    ) -> dict[str, Any]:
         ticks = [self._tick(event) for event in events]
-        ordered = sorted(ticks, key=lambda tick: (tick.receive_timestamp or tick.timestamp, tick.instrument_token))
+        ordered = sorted(
+            ticks,
+            key=lambda tick: (
+                tick.receive_timestamp or tick.timestamp,
+                tick.instrument_token,
+            ),
+        )
         results: list[Any] = []
         for tick in ordered:
             results.append(self.handler(tick))
@@ -38,13 +46,17 @@ class TickReplayService:
     ) -> dict[str, Any]:
         session = get_session()
         try:
-            query = session.query(RawTickRecord).filter(RawTickRecord.session_date == str(session_date))
+            query = session.query(RawTickRecord).filter(
+                RawTickRecord.session_date == str(session_date)
+            )
             tokens = {int(token) for token in instrument_tokens or []}
             if tokens:
                 query = query.filter(RawTickRecord.instrument_token.in_(tokens))
             if config_hash:
                 query = query.filter(RawTickRecord.config_hash == str(config_hash))
-            rows = query.order_by(RawTickRecord.sequence.asc(), RawTickRecord.id.asc()).all()
+            rows = query.order_by(
+                RawTickRecord.sequence.asc(), RawTickRecord.id.asc()
+            ).all()
             events = [
                 {
                     "instrument_token": row.instrument_token,
@@ -60,15 +72,21 @@ class TickReplayService:
                 }
                 for row in rows
             ]
-            lineage_values = sorted({(str(row.strategy_version), str(row.config_hash)) for row in rows})
+            lineage_values = sorted(
+                {(str(row.strategy_version), str(row.config_hash)) for row in rows}
+            )
         finally:
             session.close()
         ordered_ticks = [self._tick(event) for event in events]
         replay_results = [self.handler(tick) for tick in ordered_ticks]
         result = {
             "ticks_replayed": len(ordered_ticks),
-            "first_timestamp": self._timestamp(ordered_ticks[0]) if ordered_ticks else None,
-            "last_timestamp": self._timestamp(ordered_ticks[-1]) if ordered_ticks else None,
+            "first_timestamp": self._timestamp(ordered_ticks[0])
+            if ordered_ticks
+            else None,
+            "last_timestamp": self._timestamp(ordered_ticks[-1])
+            if ordered_ticks
+            else None,
             "results": replay_results,
             **current_strategy_lineage(),
         }
@@ -80,8 +98,10 @@ class TickReplayService:
                     {"strategy_version": strategy_version, "config_hash": hash_value}
                     for strategy_version, hash_value in lineage_values
                 ],
-            "mixed_lineage": len(lineage_values) > 1,
-                "sequence_gap_count": self._sequence_gap_count(rows) if not tokens else None,
+                "mixed_lineage": len(lineage_values) > 1,
+                "sequence_gap_count": self._sequence_gap_count(rows)
+                if not tokens
+                else None,
             }
         )
         return result
@@ -89,7 +109,9 @@ class TickReplayService:
     def _tick(self, event: dict[str, Any] | WebSocketTick) -> WebSocketTick:
         if isinstance(event, WebSocketTick):
             return event
-        timestamp = self._datetime(event.get("timestamp") or event.get("exchange_timestamp"))
+        timestamp = self._datetime(
+            event.get("timestamp") or event.get("exchange_timestamp")
+        )
         receive = self._datetime(event.get("receive_timestamp") or timestamp)
         return WebSocketTick(
             instrument_token=int(event["instrument_token"]),
@@ -98,8 +120,16 @@ class TickReplayService:
             volume=float(event["volume"]) if event.get("volume") is not None else None,
             bid=float(event["bid"]) if event.get("bid") is not None else None,
             ask=float(event["ask"]) if event.get("ask") is not None else None,
-            buy_depth=tuple(dict(level) for level in event.get("depth", {}).get("buy", []) if isinstance(level, dict)),
-            sell_depth=tuple(dict(level) for level in event.get("depth", {}).get("sell", []) if isinstance(level, dict)),
+            buy_depth=tuple(
+                dict(level)
+                for level in event.get("depth", {}).get("buy", [])
+                if isinstance(level, dict)
+            ),
+            sell_depth=tuple(
+                dict(level)
+                for level in event.get("depth", {}).get("sell", [])
+                if isinstance(level, dict)
+            ),
             receive_timestamp=receive,
             timestamp_source=str(event.get("timestamp_source") or "replay"),
             packet_type=str(event.get("packet_type") or "replay"),
@@ -116,4 +146,8 @@ class TickReplayService:
     def _sequence_gap_count(self, rows: list[RawTickRecord]) -> int:
         if len(rows) < 2:
             return 0
-        return sum(1 for previous, current in zip(rows, rows[1:]) if int(current.sequence) != int(previous.sequence) + 1)
+        return sum(
+            1
+            for previous, current in zip(rows, rows[1:])
+            if int(current.sequence) != int(previous.sequence) + 1
+        )

@@ -9,7 +9,13 @@ from typing import Any
 
 from app.config import settings
 from app.providers.kite_provider import KiteProvider
-from app.services.database import Candle, OpportunityRecord, RejectedOpportunityRecord, TradeRecord, get_session
+from app.services.database import (
+    Candle,
+    OpportunityRecord,
+    RejectedOpportunityRecord,
+    TradeRecord,
+    get_session,
+)
 from app.services.greeks_service import GreeksService
 from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.market_data_service import MarketDataService
@@ -42,7 +48,9 @@ class DataIngestionService:
     ) -> None:
         self.kite_provider_factory = kite_provider_factory
         self.market_data_service = market_data_service or MarketDataService()
-        self.option_history_repository = option_history_repository or OptionHistoryRepository()
+        self.option_history_repository = (
+            option_history_repository or OptionHistoryRepository()
+        )
         self.greeks_service = greeks_service or GreeksService()
         self.market_data_coordinator = market_data_coordinator
         self.market_session_service = market_session_service or MarketSessionService()
@@ -60,7 +68,9 @@ class DataIngestionService:
         overlap_minutes: int = 30,
     ) -> dict[str, Any]:
         provider = self.kite_provider_factory()
-        default_from_dt, to_dt = self._date_range(from_date=from_date, to_date=to_date, days=days)
+        default_from_dt, to_dt = self._date_range(
+            from_date=from_date, to_date=to_date, days=days
+        )
         nse_instruments = self._instruments(provider, settings.default_exchange)
         results: list[dict[str, Any]] = []
 
@@ -68,7 +78,13 @@ class DataIngestionService:
             normalized = symbol.upper().strip()
             token = self._find_underlying_token(nse_instruments, normalized)
             if token is None:
-                results.append({"symbol": normalized, "status": "error", "message": "instrument token not found"})
+                results.append(
+                    {
+                        "symbol": normalized,
+                        "status": "error",
+                        "message": "instrument token not found",
+                    }
+                )
                 continue
 
             try:
@@ -89,14 +105,23 @@ class DataIngestionService:
                 )
                 candles = [self._kite_candle_to_row(item) for item in fetched]
                 if normalized == "BANKNIFTY" and timeframe in {"1minute", "5minute"}:
-                    candles = self._canonical_banknifty_rows(candles, timeframe=timeframe, instrument_token=token, completed_through=to_dt)
-                inserted = self.market_data_service.save_candles(normalized, timeframe, candles)
+                    candles = self._canonical_banknifty_rows(
+                        candles,
+                        timeframe=timeframe,
+                        instrument_token=token,
+                        completed_through=to_dt,
+                    )
+                inserted = self.market_data_service.save_candles(
+                    normalized, timeframe, candles
+                )
                 results.append(
                     {
                         "symbol": normalized,
                         "status": "ok",
                         "instrument_token": token,
-                        "checkpoint": checkpoint.isoformat(sep=" ") if checkpoint else None,
+                        "checkpoint": checkpoint.isoformat(sep=" ")
+                        if checkpoint
+                        else None,
                         "from": from_dt.isoformat(sep=" "),
                         "to": to_dt.isoformat(sep=" "),
                         "fetched": len(candles),
@@ -105,7 +130,9 @@ class DataIngestionService:
                     }
                 )
             except Exception as exc:
-                results.append({"symbol": normalized, "status": "error", "message": str(exc)})
+                results.append(
+                    {"symbol": normalized, "status": "error", "message": str(exc)}
+                )
 
         return {
             "status": "ok",
@@ -170,7 +197,13 @@ class DataIngestionService:
             normalized = symbol.upper().strip()
             spot = self._spot_price(provider, nse_instruments, normalized)
             if spot <= 0:
-                results.append({"symbol": normalized, "status": "error", "message": "spot price unavailable"})
+                results.append(
+                    {
+                        "symbol": normalized,
+                        "status": "error",
+                        "message": "spot price unavailable",
+                    }
+                )
                 continue
 
             contracts = self._nearby_option_instruments(
@@ -180,21 +213,36 @@ class DataIngestionService:
                 strike_window_pct=strike_window_pct,
                 limit=max_contracts_per_symbol,
             )
-            quote_keys = [f"{settings.option_exchange}:{item['tradingsymbol']}" for item in contracts if item.get("tradingsymbol")]
+            quote_keys = [
+                f"{settings.option_exchange}:{item['tradingsymbol']}"
+                for item in contracts
+                if item.get("tradingsymbol")
+            ]
             quotes = self._quotes(provider, quote_keys)
             rows = [
                 self._option_snapshot_row(
                     symbol=normalized,
                     spot_price=spot,
                     instrument=item,
-                    quote=quotes.get(f"{settings.option_exchange}:{item.get('tradingsymbol')}") or quotes.get(str(item.get("tradingsymbol"))) or {},
+                    quote=quotes.get(
+                        f"{settings.option_exchange}:{item.get('tradingsymbol')}"
+                    )
+                    or quotes.get(str(item.get("tradingsymbol")))
+                    or {},
                     timestamp=now,
                 )
                 for item in contracts
             ]
             rows = [row for row in rows if row]
             all_rows.extend(rows)
-            results.append({"symbol": normalized, "status": "ok", "spot_price": spot, "snapshots": len(rows)})
+            results.append(
+                {
+                    "symbol": normalized,
+                    "status": "ok",
+                    "spot_price": spot,
+                    "snapshots": len(rows),
+                }
+            )
 
         import_result = self.option_history_repository.import_snapshots(all_rows)
         return {
@@ -216,7 +264,9 @@ class DataIngestionService:
         max_contracts_per_symbol: int = 20,
     ) -> dict[str, Any]:
         provider = self.kite_provider_factory()
-        from_dt, to_dt = self._date_range(from_date=from_date, to_date=to_date, days=days)
+        from_dt, to_dt = self._date_range(
+            from_date=from_date, to_date=to_date, days=days
+        )
         option_instruments = self._instruments(provider, settings.option_exchange)
         nse_instruments = self._instruments(provider, settings.default_exchange)
         results: list[dict[str, Any]] = []
@@ -225,7 +275,13 @@ class DataIngestionService:
             normalized = symbol.upper().strip()
             spot = self._spot_price(provider, nse_instruments, normalized)
             if spot <= 0:
-                results.append({"symbol": normalized, "status": "error", "message": "spot price unavailable"})
+                results.append(
+                    {
+                        "symbol": normalized,
+                        "status": "error",
+                        "message": "spot price unavailable",
+                    }
+                )
                 continue
             contracts = self._nearby_option_instruments(
                 option_instruments=option_instruments,
@@ -234,7 +290,12 @@ class DataIngestionService:
                 strike_window_pct=strike_window_pct,
                 limit=max_contracts_per_symbol,
             )
-            symbol_result = {"symbol": normalized, "status": "ok", "spot_price": spot, "contracts": []}
+            symbol_result = {
+                "symbol": normalized,
+                "status": "ok",
+                "spot_price": spot,
+                "contracts": [],
+            }
             for contract in contracts:
                 token = self._safe_int(contract.get("instrument_token"))
                 tradingsymbol = str(contract.get("tradingsymbol") or "")
@@ -243,7 +304,9 @@ class DataIngestionService:
                 try:
                     fetched = provider.historical_data(token, from_dt, to_dt, timeframe)
                     candles = [self._kite_candle_to_row(item) for item in fetched]
-                    inserted = self.market_data_service.save_candles(tradingsymbol, timeframe, candles)
+                    inserted = self.market_data_service.save_candles(
+                        tradingsymbol, timeframe, candles
+                    )
                     symbol_result["contracts"].append(
                         {
                             "tradingsymbol": tradingsymbol,
@@ -254,7 +317,12 @@ class DataIngestionService:
                     )
                 except Exception as exc:
                     symbol_result["contracts"].append(
-                        {"tradingsymbol": tradingsymbol, "instrument_token": token, "status": "error", "message": str(exc)}
+                        {
+                            "tradingsymbol": tradingsymbol,
+                            "instrument_token": token,
+                            "status": "error",
+                            "message": str(exc),
+                        }
                     )
             results.append(symbol_result)
 
@@ -280,10 +348,26 @@ class DataIngestionService:
         day = self._parse_trading_date(trading_date)
         day_start, day_end = self._market_day_window(day)
         selected_timeframes = timeframes or self._targeted_backfill_timeframes()
-        contract_limit = max(1, int(max_contracts or settings.targeted_option_candle_backfill_max_contracts))
-        batch_size = max(1, int(batch_limit or settings.targeted_option_candle_backfill_batch_limit))
-        delay = max(0.0, float(settings.targeted_option_candle_backfill_delay_seconds if delay_seconds is None else delay_seconds))
-        contracts = self.relevant_option_contracts(symbols=symbols, trading_date=day, limit=contract_limit)
+        contract_limit = max(
+            1,
+            int(
+                max_contracts or settings.targeted_option_candle_backfill_max_contracts
+            ),
+        )
+        batch_size = max(
+            1, int(batch_limit or settings.targeted_option_candle_backfill_batch_limit)
+        )
+        delay = max(
+            0.0,
+            float(
+                settings.targeted_option_candle_backfill_delay_seconds
+                if delay_seconds is None
+                else delay_seconds
+            ),
+        )
+        contracts = self.relevant_option_contracts(
+            symbols=symbols, trading_date=day, limit=contract_limit
+        )
         option_instruments: list[dict[str, Any]] | None = None
         results: list[dict[str, Any]] = []
         attempted = 0
@@ -295,10 +379,18 @@ class DataIngestionService:
             tradingsymbol = str(contract.get("tradingsymbol") or "").upper()
             if not token and tradingsymbol:
                 if option_instruments is None:
-                    option_instruments = self._instruments(provider, settings.option_exchange)
+                    option_instruments = self._instruments(
+                        provider, settings.option_exchange
+                    )
                 token = self._resolve_option_token(option_instruments, tradingsymbol)
             if not token or not tradingsymbol:
-                results.append({**contract, "status": "skipped", "reason": "instrument_token_unavailable"})
+                results.append(
+                    {
+                        **contract,
+                        "status": "skipped",
+                        "reason": "instrument_token_unavailable",
+                    }
+                )
                 continue
 
             contract_result: dict[str, Any] = {
@@ -309,9 +401,13 @@ class DataIngestionService:
             }
             for timeframe in selected_timeframes:
                 try:
-                    fetched = provider.historical_data(int(token), day_start, day_end, timeframe)
+                    fetched = provider.historical_data(
+                        int(token), day_start, day_end, timeframe
+                    )
                     candles = [self._kite_candle_to_row(item) for item in fetched]
-                    inserted = self.market_data_service.save_candles(tradingsymbol, timeframe, candles)
+                    inserted = self.market_data_service.save_candles(
+                        tradingsymbol, timeframe, candles
+                    )
                     attempted += 1
                     inserted_total += int(inserted)
                     fetched_total += len(candles)
@@ -322,7 +418,10 @@ class DataIngestionService:
                     }
                 except Exception as exc:
                     contract_result["status"] = "partial"
-                    contract_result["timeframes"][timeframe] = {"status": "error", "message": str(exc)}
+                    contract_result["timeframes"][timeframe] = {
+                        "status": "error",
+                        "message": str(exc),
+                    }
             results.append(contract_result)
             if delay > 0 and idx % batch_size == 0 and idx < len(contracts):
                 time_module.sleep(delay)
@@ -340,7 +439,9 @@ class DataIngestionService:
             "to": day_end.isoformat(sep=" "),
             "timeframes": selected_timeframes,
             "contracts_found": len(contracts),
-            "contracts_attempted": len([row for row in results if row.get("status") in {"ok", "partial"}]),
+            "contracts_attempted": len(
+                [row for row in results if row.get("status") in {"ok", "partial"}]
+            ),
             "historical_calls": attempted,
             "fetched": fetched_total,
             "inserted": inserted_total,
@@ -379,10 +480,16 @@ class DataIngestionService:
                 TradeRecord.tradingsymbol.is_not(None),
             )
             if symbol_set:
-                rejection_query = rejection_query.filter(RejectedOpportunityRecord.symbol.in_(symbol_set))
-                opportunity_query = opportunity_query.filter(OpportunityRecord.symbol.in_(symbol_set))
+                rejection_query = rejection_query.filter(
+                    RejectedOpportunityRecord.symbol.in_(symbol_set)
+                )
+                opportunity_query = opportunity_query.filter(
+                    OpportunityRecord.symbol.in_(symbol_set)
+                )
                 trade_query = trade_query.filter(TradeRecord.symbol.in_(symbol_set))
-            for row in rejection_query.order_by(RejectedOpportunityRecord.id.asc()).all():
+            for row in rejection_query.order_by(
+                RejectedOpportunityRecord.id.asc()
+            ).all():
                 self._merge_contract(
                     contracts,
                     underlying=str(row.symbol or ""),
@@ -411,7 +518,8 @@ class DataIngestionService:
                     contracts,
                     underlying=str(row.symbol or ""),
                     tradingsymbol=row.tradingsymbol,
-                    instrument_token=row.instrument_token or self._extract_token_from_trade(row),
+                    instrument_token=row.instrument_token
+                    or self._extract_token_from_trade(row),
                     seen_at=row.created_at,
                     source="trade",
                     option_type=self._option_type_from_symbol(row.tradingsymbol),
@@ -429,7 +537,7 @@ class DataIngestionService:
             ),
         )
         max_rows = int(limit or settings.targeted_option_candle_backfill_max_contracts)
-        return rows[:max(1, max_rows)]
+        return rows[: max(1, max_rows)]
 
     def option_candle_coverage_report(
         self,
@@ -441,8 +549,15 @@ class DataIngestionService:
     ) -> dict[str, Any]:
         day = self._parse_trading_date(trading_date)
         selected_timeframes = timeframes or self._targeted_backfill_timeframes()
-        contract_limit = max(1, int(max_contracts or settings.targeted_option_candle_backfill_max_contracts))
-        contracts = self.relevant_option_contracts(symbols=symbols, trading_date=day, limit=contract_limit)
+        contract_limit = max(
+            1,
+            int(
+                max_contracts or settings.targeted_option_candle_backfill_max_contracts
+            ),
+        )
+        contracts = self.relevant_option_contracts(
+            symbols=symbols, trading_date=day, limit=contract_limit
+        )
         _, market_close = self._market_day_window(day)
         now = ist_now_naive()
         if day == ist_today():
@@ -450,7 +565,10 @@ class DataIngestionService:
         rows: list[dict[str, Any]] = []
         summaries: dict[str, dict[str, Any]] = {}
         for contract in contracts:
-            first_seen = self._parse_optional_datetime(contract.get("first_seen_at")) or self._market_day_window(day)[0]
+            first_seen = (
+                self._parse_optional_datetime(contract.get("first_seen_at"))
+                or self._market_day_window(day)[0]
+            )
             for timeframe in selected_timeframes:
                 coverage = self._contract_candle_coverage(
                     tradingsymbol=str(contract.get("tradingsymbol") or ""),
@@ -487,21 +605,38 @@ class DataIngestionService:
         delay_seconds: float | None = None,
     ) -> dict[str, Any]:
         if not settings.enable_live_option_candle_gap_backfill:
-            return {"status": "skipped", "reason": "live_option_candle_gap_backfill_disabled"}
+            return {
+                "status": "skipped",
+                "reason": "live_option_candle_gap_backfill_disabled",
+            }
         current = (now or ist_now_naive()).replace(tzinfo=None)
         day = current.date()
         contracts = self.relevant_option_contracts(
             symbols=symbols,
             trading_date=day,
-            limit=max(1, int(max_contracts or settings.live_option_candle_backfill_max_contracts)),
+            limit=max(
+                1,
+                int(
+                    max_contracts or settings.live_option_candle_backfill_max_contracts
+                ),
+            ),
         )
         return self._backfill_live_contract_gaps(
             contracts=contracts,
             now=current,
             timeframes=timeframes or self._live_backfill_timeframes(),
-            lookback_minutes=int(lookback_minutes or settings.live_option_candle_backfill_lookback_minutes),
-            batch_limit=int(batch_limit or settings.live_option_candle_backfill_batch_limit),
-            delay_seconds=float(settings.live_option_candle_backfill_delay_seconds if delay_seconds is None else delay_seconds),
+            lookback_minutes=int(
+                lookback_minutes
+                or settings.live_option_candle_backfill_lookback_minutes
+            ),
+            batch_limit=int(
+                batch_limit or settings.live_option_candle_backfill_batch_limit
+            ),
+            delay_seconds=float(
+                settings.live_option_candle_backfill_delay_seconds
+                if delay_seconds is None
+                else delay_seconds
+            ),
             reason="automation_live_gap_catchup",
         )
 
@@ -515,16 +650,24 @@ class DataIngestionService:
         reason: str = "on_demand_premium_confirmation",
     ) -> dict[str, Any]:
         if not settings.enable_live_option_candle_gap_backfill:
-            return {"status": "skipped", "reason": "live_option_candle_gap_backfill_disabled"}
+            return {
+                "status": "skipped",
+                "reason": "live_option_candle_gap_backfill_disabled",
+            }
         current = (now or ist_now_naive()).replace(tzinfo=None)
-        payload = self._contract_payload_from_object(contract, seen_at=current, source=reason)
+        payload = self._contract_payload_from_object(
+            contract, seen_at=current, source=reason
+        )
         if not payload.get("tradingsymbol"):
             return {"status": "skipped", "reason": "tradingsymbol_unavailable"}
         return self._backfill_live_contract_gaps(
             contracts=[payload],
             now=current,
             timeframes=timeframes or self._live_backfill_timeframes(),
-            lookback_minutes=int(lookback_minutes or settings.live_option_candle_backfill_lookback_minutes),
+            lookback_minutes=int(
+                lookback_minutes
+                or settings.live_option_candle_backfill_lookback_minutes
+            ),
             batch_limit=1,
             delay_seconds=0.0,
             reason=reason,
@@ -566,27 +709,46 @@ class DataIngestionService:
             strike_window_pct=min(strike_window_pct, 2.0),
             max_contracts_per_symbol=min(max_contracts_per_symbol, 20),
         )
-        return {"status": "ok", "candles": candles, "option_candles": option_candles, "option_snapshots": option_snapshots}
+        return {
+            "status": "ok",
+            "candles": candles,
+            "option_candles": option_candles,
+            "option_snapshots": option_snapshots,
+        }
 
-    def status(self, *, symbols: list[str] | None = None, timeframe: str = "5minute") -> dict[str, Any]:
+    def status(
+        self, *, symbols: list[str] | None = None, timeframe: str = "5minute"
+    ) -> dict[str, Any]:
         symbols = symbols or []
         return {
             "timeframe": timeframe,
-            "total_candles": self.market_data_service.count_candles(timeframe=timeframe),
+            "total_candles": self.market_data_service.count_candles(
+                timeframe=timeframe
+            ),
             "total_option_snapshots": self.option_history_repository.count_snapshots(),
             "symbols": [
                 {
                     "symbol": symbol.upper(),
-                    "candles": self.market_data_service.count_candles(symbol=symbol.upper(), timeframe=timeframe),
-                    "latest_candle": self._format_optional_dt(self.market_data_service.latest_candle_timestamp(symbol.upper(), timeframe)),
-                    "option_snapshots": self.option_history_repository.count_snapshots(symbol.upper()),
+                    "candles": self.market_data_service.count_candles(
+                        symbol=symbol.upper(), timeframe=timeframe
+                    ),
+                    "latest_candle": self._format_optional_dt(
+                        self.market_data_service.latest_candle_timestamp(
+                            symbol.upper(), timeframe
+                        )
+                    ),
+                    "option_snapshots": self.option_history_repository.count_snapshots(
+                        symbol.upper()
+                    ),
                 }
                 for symbol in symbols
             ],
         }
 
     def _targeted_backfill_timeframes(self) -> list[str]:
-        raw = str(settings.targeted_option_candle_backfill_timeframes or "1minute,5minute")
+        raw = str(
+            settings.targeted_option_candle_backfill_timeframes or "1minute,5minute"
+        )
         values = [item.strip() for item in raw.split(",") if item.strip()]
         return values or ["1minute", "5minute"]
 
@@ -608,7 +770,10 @@ class DataIngestionService:
     ) -> dict[str, Any]:
         provider = self.kite_provider_factory()
         market_start, market_close = self._market_day_window(now.date())
-        market_start = datetime.combine(now.date(), self._parse_time(settings.live_option_candle_backfill_session_start_time))
+        market_start = datetime.combine(
+            now.date(),
+            self._parse_time(settings.live_option_candle_backfill_session_start_time),
+        )
         live_end = min(now.replace(second=0, microsecond=0), market_close)
         if live_end < market_start:
             return {"status": "skipped", "reason": "outside_market_window"}
@@ -619,18 +784,33 @@ class DataIngestionService:
         fetched_total = 0
         batch_size = max(1, int(batch_limit or 1))
         delay = max(0.0, float(delay_seconds))
-        max_historical_calls = max(1, int(settings.live_option_candle_backfill_max_historical_calls_per_run))
+        max_historical_calls = max(
+            1, int(settings.live_option_candle_backfill_max_historical_calls_per_run)
+        )
         for idx, contract in enumerate(contracts, start=1):
             token = self._safe_int(contract.get("instrument_token"))
             tradingsymbol = str(contract.get("tradingsymbol") or "").upper()
             if not token and tradingsymbol:
                 if option_instruments is None:
-                    option_instruments = self._instruments(provider, settings.option_exchange)
+                    option_instruments = self._instruments(
+                        provider, settings.option_exchange
+                    )
                 token = self._resolve_option_token(option_instruments, tradingsymbol)
             if not token or not tradingsymbol:
-                results.append({**contract, "status": "skipped", "reason": "instrument_token_unavailable"})
+                results.append(
+                    {
+                        **contract,
+                        "status": "skipped",
+                        "reason": "instrument_token_unavailable",
+                    }
+                )
                 continue
-            contract_result: dict[str, Any] = {**contract, "instrument_token": token, "status": "ok", "timeframes": {}}
+            contract_result: dict[str, Any] = {
+                **contract,
+                "instrument_token": token,
+                "status": "ok",
+                "timeframes": {},
+            }
             for timeframe in timeframes:
                 backfill_window = self._live_gap_window(
                     tradingsymbol=tradingsymbol,
@@ -643,23 +823,46 @@ class DataIngestionService:
                 if not backfill_window.get("needed"):
                     contract_result["timeframes"][timeframe] = backfill_window
                     continue
-                cooldown = self._live_backfill_cooldown(tradingsymbol=tradingsymbol, timeframe=timeframe, now=now, reason=reason)
+                cooldown = self._live_backfill_cooldown(
+                    tradingsymbol=tradingsymbol,
+                    timeframe=timeframe,
+                    now=now,
+                    reason=reason,
+                )
                 if cooldown is not None:
-                    contract_result["timeframes"][timeframe] = {**backfill_window, "status": "skipped", "reason": "recently_attempted", "cooldown_seconds_remaining": cooldown}
+                    contract_result["timeframes"][timeframe] = {
+                        **backfill_window,
+                        "status": "skipped",
+                        "reason": "recently_attempted",
+                        "cooldown_seconds_remaining": cooldown,
+                    }
                     continue
                 if attempted >= max_historical_calls:
-                    contract_result["timeframes"][timeframe] = {**backfill_window, "status": "skipped", "reason": "historical_call_limit_reached", "historical_call_limit": max_historical_calls}
+                    contract_result["timeframes"][timeframe] = {
+                        **backfill_window,
+                        "status": "skipped",
+                        "reason": "historical_call_limit_reached",
+                        "historical_call_limit": max_historical_calls,
+                    }
                     continue
                 try:
                     start = self._parse_optional_datetime(backfill_window.get("from"))
                     end = self._parse_optional_datetime(backfill_window.get("to"))
                     if start is None or end is None or end < start:
-                        contract_result["timeframes"][timeframe] = {**backfill_window, "status": "skipped", "reason": "invalid_backfill_window"}
+                        contract_result["timeframes"][timeframe] = {
+                            **backfill_window,
+                            "status": "skipped",
+                            "reason": "invalid_backfill_window",
+                        }
                         continue
                     attempted += 1
-                    fetched = provider.historical_data(int(token), start, end, timeframe)
+                    fetched = provider.historical_data(
+                        int(token), start, end, timeframe
+                    )
                     candles = [self._kite_candle_to_row(item) for item in fetched]
-                    inserted = self.market_data_service.save_candles(tradingsymbol, timeframe, candles)
+                    inserted = self.market_data_service.save_candles(
+                        tradingsymbol, timeframe, candles
+                    )
                     inserted_total += int(inserted)
                     fetched_total += len(candles)
                     self._live_backfill_last_attempts[(tradingsymbol, timeframe)] = now
@@ -672,7 +875,11 @@ class DataIngestionService:
                 except Exception as exc:
                     self._live_backfill_last_attempts[(tradingsymbol, timeframe)] = now
                     contract_result["status"] = "partial"
-                    contract_result["timeframes"][timeframe] = {**backfill_window, "status": "error", "message": str(exc)}
+                    contract_result["timeframes"][timeframe] = {
+                        **backfill_window,
+                        "status": "error",
+                        "message": str(exc),
+                    }
             results.append(contract_result)
             if delay > 0 and idx % batch_size == 0 and idx < len(contracts):
                 time_module.sleep(delay)
@@ -684,7 +891,9 @@ class DataIngestionService:
             "market_open_on_first_seen": settings.live_option_candle_backfill_market_open_on_first_seen,
             "historical_call_limit": max_historical_calls,
             "contracts_found": len(contracts),
-            "contracts_attempted": len([row for row in results if row.get("status") in {"ok", "partial"}]),
+            "contracts_attempted": len(
+                [row for row in results if row.get("status") in {"ok", "partial"}]
+            ),
             "historical_calls": attempted,
             "fetched": fetched_total,
             "inserted": inserted_total,
@@ -702,20 +911,35 @@ class DataIngestionService:
         lookback_minutes: int,
     ) -> dict[str, Any]:
         minutes = self._timeframe_minutes(timeframe)
-        first_candle, latest = self._contract_candle_bounds(tradingsymbol=tradingsymbol, instrument_token=instrument_token, timeframe=timeframe)
-        earliest_allowed = max(market_start, now - timedelta(minutes=max(1, lookback_minutes)))
-        market_open_first_seen = bool(settings.live_option_candle_backfill_market_open_on_first_seen)
+        first_candle, latest = self._contract_candle_bounds(
+            tradingsymbol=tradingsymbol,
+            instrument_token=instrument_token,
+            timeframe=timeframe,
+        )
+        earliest_allowed = max(
+            market_start, now - timedelta(minutes=max(1, lookback_minutes))
+        )
+        market_open_first_seen = bool(
+            settings.live_option_candle_backfill_market_open_on_first_seen
+        )
         start_policy = "lookback_window"
         if market_open_first_seen and latest is None:
             start = market_start
             start_policy = "market_open_first_seen"
-        elif market_open_first_seen and first_candle is not None and first_candle > market_start + timedelta(minutes=minutes):
+        elif (
+            market_open_first_seen
+            and first_candle is not None
+            and first_candle > market_start + timedelta(minutes=minutes)
+        ):
             start = market_start
             start_policy = "market_open_missing_prefix"
         elif latest is None:
             start = earliest_allowed
         else:
-            start = max(earliest_allowed, latest.replace(second=0, microsecond=0) + timedelta(minutes=minutes))
+            start = max(
+                earliest_allowed,
+                latest.replace(second=0, microsecond=0) + timedelta(minutes=minutes),
+            )
         end = now - timedelta(minutes=minutes)
         end = self._floor_to_timeframe(end, timeframe)
         if end < start:
@@ -724,13 +948,23 @@ class DataIngestionService:
                 "status": "skipped",
                 "reason": "no_missing_closed_candles",
                 "latest_candle": latest.isoformat(sep=" ") if latest else None,
-                "earliest_candle": first_candle.isoformat(sep=" ") if first_candle else None,
+                "earliest_candle": first_candle.isoformat(sep=" ")
+                if first_candle
+                else None,
                 "start_policy": start_policy,
                 "from": start.isoformat(sep=" "),
                 "to": end.isoformat(sep=" "),
             }
-        gap_anchor = market_start if start_policy.startswith("market_open") else (latest or start)
-        gap_seconds = (end - gap_anchor).total_seconds() + (minutes * 60 if latest is None or start_policy.startswith("market_open") else 0)
+        gap_anchor = (
+            market_start
+            if start_policy.startswith("market_open")
+            else (latest or start)
+        )
+        gap_seconds = (end - gap_anchor).total_seconds() + (
+            minutes * 60
+            if latest is None or start_policy.startswith("market_open")
+            else 0
+        )
         if gap_seconds < settings.live_option_candle_backfill_min_gap_seconds:
             return {
                 "needed": False,
@@ -738,7 +972,9 @@ class DataIngestionService:
                 "reason": "gap_below_threshold",
                 "gap_seconds": round(max(0.0, gap_seconds), 3),
                 "latest_candle": latest.isoformat(sep=" ") if latest else None,
-                "earliest_candle": first_candle.isoformat(sep=" ") if first_candle else None,
+                "earliest_candle": first_candle.isoformat(sep=" ")
+                if first_candle
+                else None,
                 "start_policy": start_policy,
                 "from": start.isoformat(sep=" "),
                 "to": end.isoformat(sep=" "),
@@ -747,13 +983,17 @@ class DataIngestionService:
             "needed": True,
             "gap_seconds": round(max(0.0, gap_seconds), 3),
             "latest_candle": latest.isoformat(sep=" ") if latest else None,
-            "earliest_candle": first_candle.isoformat(sep=" ") if first_candle else None,
+            "earliest_candle": first_candle.isoformat(sep=" ")
+            if first_candle
+            else None,
             "start_policy": start_policy,
             "from": start.isoformat(sep=" "),
             "to": end.isoformat(sep=" "),
         }
 
-    def _live_backfill_cooldown(self, *, tradingsymbol: str, timeframe: str, now: datetime, reason: str) -> int | None:
+    def _live_backfill_cooldown(
+        self, *, tradingsymbol: str, timeframe: str, now: datetime, reason: str
+    ) -> int | None:
         last = self._live_backfill_last_attempts.get((tradingsymbol.upper(), timeframe))
         if last is None:
             return None
@@ -761,20 +1001,32 @@ class DataIngestionService:
         cooldown = (
             max(0, int(settings.live_option_candle_backfill_interval_seconds))
             if str(reason) == "automation_live_gap_catchup"
-            else max(0, int(settings.on_demand_premium_candle_backfill_cooldown_seconds))
+            else max(
+                0, int(settings.on_demand_premium_candle_backfill_cooldown_seconds)
+            )
         )
         if elapsed >= cooldown:
             return None
         return int(round(cooldown - elapsed))
 
-    def _latest_contract_candle_timestamp(self, *, tradingsymbol: str, instrument_token: int | None, timeframe: str) -> datetime | None:
-        _, latest = self._contract_candle_bounds(tradingsymbol=tradingsymbol, instrument_token=instrument_token, timeframe=timeframe)
+    def _latest_contract_candle_timestamp(
+        self, *, tradingsymbol: str, instrument_token: int | None, timeframe: str
+    ) -> datetime | None:
+        _, latest = self._contract_candle_bounds(
+            tradingsymbol=tradingsymbol,
+            instrument_token=instrument_token,
+            timeframe=timeframe,
+        )
         return latest
 
-    def _contract_candle_bounds(self, *, tradingsymbol: str, instrument_token: int | None, timeframe: str) -> tuple[datetime | None, datetime | None]:
+    def _contract_candle_bounds(
+        self, *, tradingsymbol: str, instrument_token: int | None, timeframe: str
+    ) -> tuple[datetime | None, datetime | None]:
         symbols = [tradingsymbol.upper()]
         if instrument_token is not None:
-            symbols.append(f"{settings.websocket_candle_storage_prefix}:{int(instrument_token)}".upper())
+            symbols.append(
+                f"{settings.websocket_candle_storage_prefix}:{int(instrument_token)}".upper()
+            )
         session = get_session()
         try:
             first_row = (
@@ -797,12 +1049,21 @@ class DataIngestionService:
         finally:
             session.close()
 
-    def _contract_payload_from_object(self, contract: Any, *, seen_at: datetime, source: str) -> dict[str, Any]:
+    def _contract_payload_from_object(
+        self, contract: Any, *, seen_at: datetime, source: str
+    ) -> dict[str, Any]:
         return {
-            "underlying": str(getattr(contract, "name", None) or getattr(contract, "underlying", None) or "BANKNIFTY").upper(),
+            "underlying": str(
+                getattr(contract, "name", None)
+                or getattr(contract, "underlying", None)
+                or "BANKNIFTY"
+            ).upper(),
             "tradingsymbol": str(getattr(contract, "tradingsymbol", "") or "").upper(),
-            "instrument_token": self._safe_int(getattr(contract, "instrument_token", None)),
-            "option_type": getattr(contract, "option_type", None) or self._option_type_from_symbol(getattr(contract, "tradingsymbol", None)),
+            "instrument_token": self._safe_int(
+                getattr(contract, "instrument_token", None)
+            ),
+            "option_type": getattr(contract, "option_type", None)
+            or self._option_type_from_symbol(getattr(contract, "tradingsymbol", None)),
             "strike": self._safe_float(getattr(contract, "strike", None)),
             "expiry": str(getattr(contract, "expiry", "") or "") or None,
             "first_seen_at": seen_at.isoformat(sep=" "),
@@ -823,7 +1084,9 @@ class DataIngestionService:
         return datetime.combine(day, time.min), datetime.combine(day, time.max)
 
     def _market_day_window(self, day: date) -> tuple[datetime, datetime]:
-        return datetime.combine(day, self._parse_time(settings.market_open_time)), datetime.combine(day, self._parse_time(settings.market_close_time))
+        return datetime.combine(
+            day, self._parse_time(settings.market_open_time)
+        ), datetime.combine(day, self._parse_time(settings.market_close_time))
 
     def _parse_time(self, value: str) -> time:
         hour, minute = value.split(":", 1)
@@ -878,11 +1141,17 @@ class DataIngestionService:
             if current_last is None or seen_at > current_last:
                 existing["last_seen_at"] = seen_at.isoformat(sep=" ")
 
-    def _extract_token_from_rejection(self, row: RejectedOpportunityRecord) -> int | None:
+    def _extract_token_from_rejection(
+        self, row: RejectedOpportunityRecord
+    ) -> int | None:
         factors = self._json(row.factor_scores_json)
         for path in (("contract",), ("rejection_snapshot",)):
             payload = self._nested_dict(factors, *path)
-            token = self._safe_int(payload.get("instrument_token") or payload.get("token")) if payload else None
+            token = (
+                self._safe_int(payload.get("instrument_token") or payload.get("token"))
+                if payload
+                else None
+            )
             if token is not None:
                 return token
         return None
@@ -894,7 +1163,11 @@ class DataIngestionService:
             return token
         factors = self._json(row.factor_scores_json)
         contract = self._nested_dict(factors, "contract")
-        return self._safe_int(contract.get("instrument_token") or contract.get("token")) if contract else None
+        return (
+            self._safe_int(contract.get("instrument_token") or contract.get("token"))
+            if contract
+            else None
+        )
 
     def _extract_token_from_trade(self, row: TradeRecord) -> int | None:
         payload = self._json(row.order_response_json)
@@ -908,7 +1181,11 @@ class DataIngestionService:
                 return token
         factors = self._nested_dict(payload, "signal_factor_scores")
         contract = self._nested_dict(factors, "contract") if factors else {}
-        return self._safe_int(contract.get("instrument_token") or contract.get("token")) if contract else None
+        return (
+            self._safe_int(contract.get("instrument_token") or contract.get("token"))
+            if contract
+            else None
+        )
 
     def _contract_candle_coverage(
         self,
@@ -921,10 +1198,14 @@ class DataIngestionService:
     ) -> dict[str, Any]:
         start = self._floor_to_timeframe(start, timeframe)
         end = end.replace(second=0, microsecond=0)
-        expected = self._expected_candle_count(start=start, end=end, timeframe=timeframe)
+        expected = self._expected_candle_count(
+            start=start, end=end, timeframe=timeframe
+        )
         candle_symbols = [tradingsymbol.upper()]
         if instrument_token is not None:
-            candle_symbols.append(f"{settings.websocket_candle_storage_prefix}:{int(instrument_token)}".upper())
+            candle_symbols.append(
+                f"{settings.websocket_candle_storage_prefix}:{int(instrument_token)}".upper()
+            )
         timestamps: set[datetime] = set()
         latest: datetime | None = None
         session = get_session()
@@ -942,8 +1223,16 @@ class DataIngestionService:
             for symbol, timestamp in rows:
                 normalized_ts = timestamp.replace(second=0, microsecond=0)
                 timestamps.add(normalized_ts)
-                latest = normalized_ts if latest is None or normalized_ts > latest else latest
-                if str(symbol).upper().startswith(f"{settings.websocket_candle_storage_prefix}:".upper()):
+                latest = (
+                    normalized_ts
+                    if latest is None or normalized_ts > latest
+                    else latest
+                )
+                if (
+                    str(symbol)
+                    .upper()
+                    .startswith(f"{settings.websocket_candle_storage_prefix}:".upper())
+                ):
                     websocket_rows += 1
                 else:
                     normal_rows += 1
@@ -952,7 +1241,9 @@ class DataIngestionService:
         actual = len(timestamps)
         missing = max(0, expected - actual)
         coverage_pct = round((actual / expected) * 100, 2) if expected else 0.0
-        quality = self._coverage_quality(expected=expected, actual=actual, coverage_pct=coverage_pct)
+        quality = self._coverage_quality(
+            expected=expected, actual=actual, coverage_pct=coverage_pct
+        )
         return {
             "timeframe": timeframe,
             "coverage_start": start.isoformat(sep=" "),
@@ -981,7 +1272,9 @@ class DataIngestionService:
         counter: defaultdict[str, int] = defaultdict(int)
         for row in rows:
             counter[str(row.get("data_quality") or "unknown")] += 1
-        avg = round(sum(float(row.get("coverage_pct") or 0.0) for row in rows) / len(rows), 2)
+        avg = round(
+            sum(float(row.get("coverage_pct") or 0.0) for row in rows) / len(rows), 2
+        )
         missing = sum(int(row.get("missing_candles") or 0) for row in rows)
         quality = "high_confidence"
         if counter["insufficient_candles"]:
@@ -998,14 +1291,18 @@ class DataIngestionService:
             "data_quality": quality,
         }
 
-    def _coverage_quality(self, *, expected: int, actual: int, coverage_pct: float) -> str:
+    def _coverage_quality(
+        self, *, expected: int, actual: int, coverage_pct: float
+    ) -> str:
         if expected <= 0 or actual <= 0:
             return "insufficient_candles"
         if coverage_pct >= float(settings.min_targeted_option_candle_coverage_pct):
             return "high_confidence"
         return "partial_data"
 
-    def _expected_candle_count(self, *, start: datetime, end: datetime, timeframe: str) -> int:
+    def _expected_candle_count(
+        self, *, start: datetime, end: datetime, timeframe: str
+    ) -> int:
         if end < start:
             return 0
         minutes = max(1, self._timeframe_minutes(timeframe))
@@ -1020,7 +1317,9 @@ class DataIngestionService:
         digits = "".join(ch for ch in str(timeframe or "1minute") if ch.isdigit())
         return max(1, int(digits or "1"))
 
-    def _resolve_option_token(self, option_instruments: list[dict[str, Any]], tradingsymbol: str) -> int | None:
+    def _resolve_option_token(
+        self, option_instruments: list[dict[str, Any]], tradingsymbol: str
+    ) -> int | None:
         target = tradingsymbol.upper()
         for item in option_instruments:
             if str(item.get("tradingsymbol") or "").upper() == target:
@@ -1062,9 +1361,13 @@ class DataIngestionService:
             current = current.get(key)
         return current if isinstance(current, dict) else {}
 
-    def _date_range(self, *, from_date: str | None, to_date: str | None, days: int) -> tuple[datetime, datetime]:
+    def _date_range(
+        self, *, from_date: str | None, to_date: str | None, days: int
+    ) -> tuple[datetime, datetime]:
         to_dt = self._parse_date(to_date) if to_date else ist_now_naive()
-        from_dt = self._parse_date(from_date) if from_date else to_dt - timedelta(days=days)
+        from_dt = (
+            self._parse_date(from_date) if from_date else to_dt - timedelta(days=days)
+        )
         return from_dt, to_dt
 
     def _historical_data_chunked(
@@ -1122,7 +1425,9 @@ class DataIngestionService:
             return ist_now_naive()
         return datetime.fromisoformat(value).replace(tzinfo=None)
 
-    def _find_underlying_token(self, instruments: list[dict[str, Any]], symbol: str) -> int | None:
+    def _find_underlying_token(
+        self, instruments: list[dict[str, Any]], symbol: str
+    ) -> int | None:
         target = self.INDEX_ALIASES.get(symbol, symbol).upper()
         for item in instruments:
             tradingsymbol = str(item.get("tradingsymbol") or "").upper()
@@ -1131,7 +1436,9 @@ class DataIngestionService:
                 return self._safe_int(item.get("instrument_token"))
         return None
 
-    def _spot_price(self, provider: KiteProvider, instruments: list[dict[str, Any]], symbol: str) -> float:
+    def _spot_price(
+        self, provider: KiteProvider, instruments: list[dict[str, Any]], symbol: str
+    ) -> float:
         kite_symbol = self.INDEX_ALIASES.get(symbol, symbol)
         quote_key = f"{settings.default_exchange}:{kite_symbol}"
         try:
@@ -1170,14 +1477,22 @@ class DataIngestionService:
             and str(item.get("instrument_type")) in {"CE", "PE"}
             and abs(float(item.get("strike") or 0) - spot_price) <= max_distance
         ]
-        return sorted(matches, key=lambda item: (str(item.get("expiry") or ""), abs(float(item.get("strike") or 0) - spot_price)))[:limit]
+        return sorted(
+            matches,
+            key=lambda item: (
+                str(item.get("expiry") or ""),
+                abs(float(item.get("strike") or 0) - spot_price),
+            ),
+        )[:limit]
 
     def _quotes(self, provider: KiteProvider, instruments: list[str]) -> dict[str, Any]:
         if self.market_data_coordinator is not None:
             return self.market_data_coordinator.quote(instruments, provider=provider)
         return provider.quote(instruments)
 
-    def _instruments(self, provider: KiteProvider, exchange: str) -> list[dict[str, Any]]:
+    def _instruments(
+        self, provider: KiteProvider, exchange: str
+    ) -> list[dict[str, Any]]:
         if self.market_data_coordinator is not None:
             return self.market_data_coordinator.instruments(exchange, provider=provider)
         return provider.instruments(exchange)
@@ -1256,7 +1571,9 @@ class DataIngestionService:
                 continue
             if not self.market_session_service.is_market_open(timestamp):
                 continue
-            if timestamp + timedelta(minutes=minutes) > completed_through.replace(tzinfo=None):
+            if timestamp + timedelta(minutes=minutes) > completed_through.replace(
+                tzinfo=None
+            ):
                 continue
             try:
                 open_price = float(candle.get("open") or 0.0)
@@ -1265,7 +1582,10 @@ class DataIngestionService:
                 close_price = float(candle.get("close") or 0.0)
             except (TypeError, ValueError):
                 continue
-            if min(open_price, high_price, low_price, close_price) <= 0 or high_price < low_price:
+            if (
+                min(open_price, high_price, low_price, close_price) <= 0
+                or high_price < low_price
+            ):
                 continue
             seen.add(timestamp)
             rows.append(

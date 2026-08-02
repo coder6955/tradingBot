@@ -24,8 +24,22 @@ class MarketDataServiceTests(unittest.TestCase):
     def test_save_candles_and_get_summary(self) -> None:
         service = MarketDataService(session_factory=self.session_factory)
         candles = [
-            {"timestamp": "2024-01-01T09:15:00", "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5, "volume": 1200.0},
-            {"timestamp": "2024-01-01T09:16:00", "open": 100.5, "high": 102.0, "low": 100.0, "close": 101.0, "volume": 1400.0},
+            {
+                "timestamp": "2024-01-01T09:15:00",
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.5,
+                "volume": 1200.0,
+            },
+            {
+                "timestamp": "2024-01-01T09:16:00",
+                "open": 100.5,
+                "high": 102.0,
+                "low": 100.0,
+                "close": 101.0,
+                "volume": 1400.0,
+            },
         ]
 
         saved_count = service.save_candles("NIFTY", "1m", candles)

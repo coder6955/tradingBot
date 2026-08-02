@@ -187,11 +187,17 @@ SETTING_PURPOSES: dict[str, str] = {
 class StrategyVersionRegistry:
     """Source of truth for what each strategy version represented."""
 
-    def ensure_current_version(self, *, human_note: str | None = None, reason_for_change: str | None = None) -> dict[str, Any]:
-        payload = self.current_payload(human_note=human_note, reason_for_change=reason_for_change)
+    def ensure_current_version(
+        self, *, human_note: str | None = None, reason_for_change: str | None = None
+    ) -> dict[str, Any]:
+        payload = self.current_payload(
+            human_note=human_note, reason_for_change=reason_for_change
+        )
         return self.register(payload)
 
-    def current_payload(self, *, human_note: str | None = None, reason_for_change: str | None = None) -> dict[str, Any]:
+    def current_payload(
+        self, *, human_note: str | None = None, reason_for_change: str | None = None
+    ) -> dict[str, Any]:
         config_snapshot = self.current_config_snapshot()
         settings_purpose = self.settings_purpose_snapshot(config_snapshot)
         return {
@@ -212,8 +218,16 @@ class StrategyVersionRegistry:
         version = str(payload.get("version") or settings.strategy_version)
         strategy_name = str(payload.get("strategy_name") or settings.strategy_name)
         now = ist_now_naive()
-        config_snapshot = payload.get("config_snapshot") if isinstance(payload.get("config_snapshot"), dict) else self.current_config_snapshot()
-        settings_purpose = payload.get("settings_purpose") if isinstance(payload.get("settings_purpose"), dict) else self.settings_purpose_snapshot(config_snapshot)
+        config_snapshot = (
+            payload.get("config_snapshot")
+            if isinstance(payload.get("config_snapshot"), dict)
+            else self.current_config_snapshot()
+        )
+        settings_purpose = (
+            payload.get("settings_purpose")
+            if isinstance(payload.get("settings_purpose"), dict)
+            else self.settings_purpose_snapshot(config_snapshot)
+        )
         config_hash = self.config_hash(config_snapshot)
         session = get_session()
         try:
@@ -236,11 +250,19 @@ class StrategyVersionRegistry:
                     reason_for_change=str(payload.get("reason_for_change") or ""),
                     entry_logic_summary=str(payload.get("entry_logic_summary") or ""),
                     exit_logic_summary=str(payload.get("exit_logic_summary") or ""),
-                    stoploss_logic_summary=str(payload.get("stoploss_logic_summary") or ""),
+                    stoploss_logic_summary=str(
+                        payload.get("stoploss_logic_summary") or ""
+                    ),
                     target_logic_summary=str(payload.get("target_logic_summary") or ""),
-                    config_snapshot_json=json.dumps(config_snapshot, default=str, sort_keys=True),
-                    latest_config_snapshot_json=json.dumps(config_snapshot, default=str, sort_keys=True),
-                    settings_purpose_json=json.dumps(settings_purpose, default=str, sort_keys=True),
+                    config_snapshot_json=json.dumps(
+                        config_snapshot, default=str, sort_keys=True
+                    ),
+                    latest_config_snapshot_json=json.dumps(
+                        config_snapshot, default=str, sort_keys=True
+                    ),
+                    settings_purpose_json=json.dumps(
+                        settings_purpose, default=str, sort_keys=True
+                    ),
                     config_hash=config_hash,
                     latest_config_hash=config_hash,
                     config_drift_detected=0,
@@ -248,28 +270,54 @@ class StrategyVersionRegistry:
                 session.add(record)
             else:
                 latest_hash = config_hash
-                drift_detected = bool(record.config_hash and record.config_hash != latest_hash)
+                drift_detected = bool(
+                    record.config_hash and record.config_hash != latest_hash
+                )
                 force_text_update = bool(payload.get("_force_text_update"))
                 record.updated_at = now
                 record.last_seen_at = now
-                record.latest_config_snapshot_json = json.dumps(config_snapshot, default=str, sort_keys=True)
-                record.settings_purpose_json = json.dumps(settings_purpose, default=str, sort_keys=True)
+                record.latest_config_snapshot_json = json.dumps(
+                    config_snapshot, default=str, sort_keys=True
+                )
+                record.settings_purpose_json = json.dumps(
+                    settings_purpose, default=str, sort_keys=True
+                )
                 record.latest_config_hash = latest_hash
-                record.config_drift_detected = 1 if drift_detected or int(record.config_drift_detected or 0) else 0
-                if payload.get("human_note") and (force_text_update or not record.human_note):
+                record.config_drift_detected = (
+                    1 if drift_detected or int(record.config_drift_detected or 0) else 0
+                )
+                if payload.get("human_note") and (
+                    force_text_update or not record.human_note
+                ):
                     record.human_note = str(payload["human_note"])
-                if payload.get("reason_for_change") and (force_text_update or not record.reason_for_change):
+                if payload.get("reason_for_change") and (
+                    force_text_update or not record.reason_for_change
+                ):
                     record.reason_for_change = str(payload["reason_for_change"])
-                for field in ("entry_logic_summary", "exit_logic_summary", "stoploss_logic_summary", "target_logic_summary"):
-                    if payload.get(field) and (force_text_update or not getattr(record, field)):
+                for field in (
+                    "entry_logic_summary",
+                    "exit_logic_summary",
+                    "stoploss_logic_summary",
+                    "target_logic_summary",
+                ):
+                    if payload.get(field) and (
+                        force_text_update or not getattr(record, field)
+                    ):
                         setattr(record, field, str(payload[field]))
             if str(payload.get("status") or "active") == "active":
-                self._retire_other_active_versions(session, strategy_name=strategy_name, version=version, now=now)
+                self._retire_other_active_versions(
+                    session, strategy_name=strategy_name, version=version, now=now
+                )
                 record.status = "active"
                 record.retired_at = None
             session.commit()
             session.refresh(record)
-            return {"status": "ok", "created": created, "config_drift_detected": drift_detected, "version": self.to_dict(record)}
+            return {
+                "status": "ok",
+                "created": created,
+                "config_drift_detected": drift_detected,
+                "version": self.to_dict(record),
+            }
         finally:
             session.close()
 
@@ -283,7 +331,11 @@ class StrategyVersionRegistry:
                 .limit(max(1, int(limit)))
                 .all()
             )
-            return {"status": "ok", "count": len(rows), "versions": [self.to_dict(row) for row in rows]}
+            return {
+                "status": "ok",
+                "count": len(rows),
+                "versions": [self.to_dict(row) for row in rows],
+            }
         finally:
             session.close()
 
@@ -555,13 +607,20 @@ class StrategyVersionRegistry:
             ),
         }
 
-    def settings_purpose_snapshot(self, config_snapshot: dict[str, Any]) -> dict[str, Any]:
+    def settings_purpose_snapshot(
+        self, config_snapshot: dict[str, Any]
+    ) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for category, values in config_snapshot.items():
             if not isinstance(values, dict):
                 continue
             result[category] = {
-                key: {"value": value, "purpose": SETTING_PURPOSES.get(key, "Recorded for reproducibility and version comparison.")}
+                key: {
+                    "value": value,
+                    "purpose": SETTING_PURPOSES.get(
+                        key, "Recorded for reproducibility and version comparison."
+                    ),
+                }
                 for key, value in values.items()
             }
         return result
@@ -582,7 +641,11 @@ class StrategyVersionRegistry:
 
     def exit_logic_summary(self, config_snapshot: dict[str, Any]) -> str:
         exit_rules = config_snapshot.get("exit_rules", {})
-        partial = "partial target-1 booking" if exit_rules.get("enable_partial_booking") else "full target-1 square-off"
+        partial = (
+            "partial target-1 booking"
+            if exit_rules.get("enable_partial_booking")
+            else "full target-1 square-off"
+        )
         return (
             "Long-option exits use the setup-family exit profile and executable sell-side bid/depth pricing, with LTP retained only for diagnostics. "
             "Priority is stop, conditional time, premium high-watermark/ATR trailing, invalidation, then targets; live software exits fail closed without safe executable depth. "
@@ -606,12 +669,18 @@ class StrategyVersionRegistry:
         )
 
     def config_hash(self, config_snapshot: dict[str, Any]) -> str:
-        payload = json.dumps(config_snapshot, default=str, sort_keys=True, separators=(",", ":"))
+        payload = json.dumps(
+            config_snapshot, default=str, sort_keys=True, separators=(",", ":")
+        )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def to_dict(self, record: StrategyVersionRecord) -> dict[str, Any]:
         original_config = self._json(record.config_snapshot_json)
-        latest_config = self._json(record.latest_config_snapshot_json) if record.latest_config_snapshot_json else original_config
+        latest_config = (
+            self._json(record.latest_config_snapshot_json)
+            if record.latest_config_snapshot_json
+            else original_config
+        )
         return {
             "id": record.id,
             "created_at": self._format_dt(record.created_at),
@@ -641,7 +710,9 @@ class StrategyVersionRegistry:
             "settings_purpose": self._json(record.settings_purpose_json),
         }
 
-    def _retire_other_active_versions(self, session: Any, *, strategy_name: str, version: str, now: Any) -> None:
+    def _retire_other_active_versions(
+        self, session: Any, *, strategy_name: str, version: str, now: Any
+    ) -> None:
         rows = (
             session.query(StrategyVersionRecord)
             .filter(

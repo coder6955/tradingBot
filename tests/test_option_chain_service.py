@@ -24,8 +24,36 @@ class OptionChainServiceTests(unittest.TestCase):
         )
         contracts = [
             selected,
-            OptionContract("NIFTY26JUN23900PE", "NFO", 2, "NIFTY", "2099-06-24", 23900, "PE", 65, 80, 50000, 7000, 79, 80),
-            OptionContract("NIFTY26JUN24200CE", "NFO", 3, "NIFTY", "2099-06-24", 24200, "CE", 65, 60, 45000, 6000, 59, 60),
+            OptionContract(
+                "NIFTY26JUN23900PE",
+                "NFO",
+                2,
+                "NIFTY",
+                "2099-06-24",
+                23900,
+                "PE",
+                65,
+                80,
+                50000,
+                7000,
+                79,
+                80,
+            ),
+            OptionContract(
+                "NIFTY26JUN24200CE",
+                "NFO",
+                3,
+                "NIFTY",
+                "2099-06-24",
+                24200,
+                "CE",
+                65,
+                60,
+                45000,
+                6000,
+                59,
+                60,
+            ),
         ]
 
         result = service.analyze(24000, "bullish", "BUY", selected, contracts)

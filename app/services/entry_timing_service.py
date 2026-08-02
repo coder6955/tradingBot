@@ -32,7 +32,11 @@ class EntryTimingService:
         liquidity_score: int,
         trend: str,
     ) -> dict[str, Any]:
-        details = premium_eval.get("details", {}) if isinstance(premium_eval.get("details"), dict) else {}
+        details = (
+            premium_eval.get("details", {})
+            if isinstance(premium_eval.get("details"), dict)
+            else {}
+        )
         current = self._current_premium(contract, prices, details)
         trigger = self._trigger_price(details)
         base = self._base_price(details, current)
@@ -40,14 +44,34 @@ class EntryTimingService:
         entry = current
         stop = float(prices.get("stop_loss") or 0.0)
         target = float(prices.get("target_1") or 0.0)
-        remaining_rr = self._remaining_risk_reward(entry=entry, stop=stop, target=target)
-        target_room_pct = ((target - entry) / max(entry, 0.01)) * 100 if target > 0 and entry > 0 else 0.0
-        distance_to_trigger_pct = ((trigger - current) / max(trigger, 0.01)) * 100 if trigger > 0 and current > 0 else None
-        trigger_chase_pct = ((current - trigger) / max(trigger, 0.01)) * 100 if trigger > 0 and current > trigger else 0.0
-        move_from_base_pct = ((current - base) / max(base, 0.01)) * 100 if base > 0 and current > 0 else 0.0
+        remaining_rr = self._remaining_risk_reward(
+            entry=entry, stop=stop, target=target
+        )
+        target_room_pct = (
+            ((target - entry) / max(entry, 0.01)) * 100
+            if target > 0 and entry > 0
+            else 0.0
+        )
+        distance_to_trigger_pct = (
+            ((trigger - current) / max(trigger, 0.01)) * 100
+            if trigger > 0 and current > 0
+            else None
+        )
+        trigger_chase_pct = (
+            ((current - trigger) / max(trigger, 0.01)) * 100
+            if trigger > 0 and current > trigger
+            else 0.0
+        )
+        move_from_base_pct = (
+            ((current - base) / max(base, 0.01)) * 100
+            if base > 0 and current > 0
+            else 0.0
+        )
         room_to_level_pct = self._room_to_level_pct(price_action)
         expected_move_coverage = self._expected_move_coverage(banknifty_eval)
-        opening_range_status = self._nested(banknifty_eval, "details", "openingRangeStatus")
+        opening_range_status = self._nested(
+            banknifty_eval, "details", "openingRangeStatus"
+        )
         top_bank_alignment = self._nested(banknifty_eval, "details", "topBankAlignment")
 
         blockers = self._safety_blockers(
@@ -62,8 +86,16 @@ class EntryTimingService:
             stop=stop,
         )
         breakout = bool(details.get("breakout")) or (trigger > 0 and current >= trigger)
-        opening_state = str(opening_range_status.get("status") or "") if isinstance(opening_range_status, dict) else ""
-        price_details = price_action.get("details", {}) if isinstance(price_action.get("details"), dict) else {}
+        opening_state = (
+            str(opening_range_status.get("status") or "")
+            if isinstance(opening_range_status, dict)
+            else ""
+        )
+        price_details = (
+            price_action.get("details", {})
+            if isinstance(price_action.get("details"), dict)
+            else {}
+        )
         breakout_accepted = breakout and (
             bool(details.get("breakout_accepted"))
             or bool(price_details.get("breakout_accepted"))
@@ -91,10 +123,15 @@ class EntryTimingService:
 
         near_trigger = (
             distance_to_trigger_pct is not None
-            and 0 <= distance_to_trigger_pct <= settings.entry_armed_distance_to_trigger_pct
+            and 0
+            <= distance_to_trigger_pct
+            <= settings.entry_armed_distance_to_trigger_pct
         )
         setup_forming = self._setup_forming(banknifty_eval, price_action, trend)
-        premium_participating = bool(details.get("participation_confirmed")) or float(details.get("premium_change_pct") or 0.0) > 0
+        premium_participating = (
+            bool(details.get("participation_confirmed"))
+            or float(details.get("premium_change_pct") or 0.0) > 0
+        )
 
         if blockers:
             state = self.NO_TRADE
@@ -127,12 +164,16 @@ class EntryTimingService:
             "entry_timing_reason": "; ".join(dict.fromkeys(reasons)),
             "entry_trigger_price": round(trigger, 2) if trigger > 0 else None,
             "current_premium": round(current, 2) if current > 0 else None,
-            "premium_distance_to_trigger_pct": round(distance_to_trigger_pct, 3) if distance_to_trigger_pct is not None else None,
+            "premium_distance_to_trigger_pct": round(distance_to_trigger_pct, 3)
+            if distance_to_trigger_pct is not None
+            else None,
             "premium_move_from_base_pct": round(move_from_base_pct, 3),
             "chase_risk": "high" if should_reject_as_late else "normal",
             "remaining_risk_reward": round(remaining_rr, 3),
             "target1_room_pct": round(target_room_pct, 3),
-            "entry_valid_until": (ist_now_naive() + timedelta(seconds=valid_seconds)).isoformat(sep=" "),
+            "entry_valid_until": (
+                ist_now_naive() + timedelta(seconds=valid_seconds)
+            ).isoformat(sep=" "),
             "entry_should_wait": should_wait,
             "entry_should_reject_as_late": should_reject_as_late,
             "breakout": breakout,
@@ -147,8 +188,19 @@ class EntryTimingService:
             "opportunity_warnings": list(opportunity["warnings"]),
         }
 
-    def _current_premium(self, contract: OptionContract, prices: dict[str, float], details: dict[str, Any]) -> float:
-        for value in (contract.ask, contract.last_price, prices.get("entry_price"), details.get("last_close"), details.get("last_price")):
+    def _current_premium(
+        self,
+        contract: OptionContract,
+        prices: dict[str, float],
+        details: dict[str, Any],
+    ) -> float:
+        for value in (
+            contract.ask,
+            contract.last_price,
+            prices.get("entry_price"),
+            details.get("last_close"),
+            details.get("last_price"),
+        ):
             try:
                 current = float(value or 0.0)
                 if current > 0:
@@ -187,10 +239,14 @@ class EntryTimingService:
         except (TypeError, ValueError):
             pass
         if contract.bid > 0 and contract.ask > 0 and contract.last_price > 0:
-            return ((contract.ask - contract.bid) / max(contract.last_price, 0.01)) * 100
+            return (
+                (contract.ask - contract.bid) / max(contract.last_price, 0.01)
+            ) * 100
         return 100.0
 
-    def _remaining_risk_reward(self, *, entry: float, stop: float, target: float) -> float:
+    def _remaining_risk_reward(
+        self, *, entry: float, stop: float, target: float
+    ) -> float:
         risk = entry - stop
         reward = target - entry
         if risk <= 0 or reward <= 0:
@@ -245,15 +301,23 @@ class EntryTimingService:
             reasons.append("reward_compressed")
         if target_room_pct < settings.min_target1_room_pct:
             reasons.append("insufficient_target_room_after_entry")
-        if expected_move_coverage is not None and expected_move_coverage < settings.min_entry_expected_move_coverage:
+        if (
+            expected_move_coverage is not None
+            and expected_move_coverage < settings.min_entry_expected_move_coverage
+        ):
             reasons.append("expected_move_coverage_weak")
-        if room_to_level_pct is not None and room_to_level_pct < settings.min_entry_room_to_level_pct:
+        if (
+            room_to_level_pct is not None
+            and room_to_level_pct < settings.min_entry_room_to_level_pct
+        ):
             reasons.append("nearest_level_room_too_small")
         if spread_pct > settings.max_bid_ask_spread_pct:
             reasons.append("spread_widened_after_breakout")
         return list(dict.fromkeys(reasons))
 
-    def _setup_forming(self, banknifty_eval: dict[str, Any], price_action: dict[str, Any], trend: str) -> bool:
+    def _setup_forming(
+        self, banknifty_eval: dict[str, Any], price_action: dict[str, Any], trend: str
+    ) -> bool:
         bank_score = int(banknifty_eval.get("score") or 0)
         price_score = int(price_action.get("score") or 0)
         return bool(trend) and bank_score >= 50 and price_score >= 50
@@ -271,7 +335,11 @@ class EntryTimingService:
         return None
 
     def _room_to_level_pct(self, price_action: dict[str, Any]) -> float | None:
-        details = price_action.get("details", {}) if isinstance(price_action.get("details"), dict) else {}
+        details = (
+            price_action.get("details", {})
+            if isinstance(price_action.get("details"), dict)
+            else {}
+        )
         try:
             value = float(details.get("room_to_level_pct") or 0.0)
             return value if value > 0 else None

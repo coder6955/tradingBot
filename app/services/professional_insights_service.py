@@ -8,10 +8,23 @@ from typing import Any, Iterable
 from sqlalchemy import func
 
 from app.config import settings
-from app.services.database import Candle, OpportunityRecord, OptionQuoteSnapshot, RejectedOpportunityRecord, TradeRecord, get_session
+from app.services.database import (
+    Candle,
+    OpportunityRecord,
+    OptionQuoteSnapshot,
+    RejectedOpportunityRecord,
+    TradeRecord,
+    get_session,
+)
 from app.services.execution_realism_service import ExecutionRealismService
 from app.services.time_utils import ist_today
-from app.services.trading_metrics import LOSS_OUTCOMES, WIN_OUTCOMES, max_drawdown, score_bucket, time_bucket
+from app.services.trading_metrics import (
+    LOSS_OUTCOMES,
+    WIN_OUTCOMES,
+    max_drawdown,
+    score_bucket,
+    time_bucket,
+)
 
 
 class ProfessionalInsightsService:
@@ -22,39 +35,87 @@ class ProfessionalInsightsService:
     """
 
     REJECTION_REASON_CATEGORIES = {
-        "premium_candles_stale_or_missing": ("premium_candles_stale_or_missing", "premium candles stale", "previous-day option candles"),
-        "insufficient_current_session_premium_candles": ("insufficient_current_session_premium_candles",),
+        "premium_candles_stale_or_missing": (
+            "premium_candles_stale_or_missing",
+            "premium candles stale",
+            "previous-day option candles",
+        ),
+        "insufficient_current_session_premium_candles": (
+            "insufficient_current_session_premium_candles",
+        ),
         "option_premium_confirmation_score_below_threshold": (
             "option premium confirmation score is below threshold",
             "option_premium_confirmation_score_below_threshold",
         ),
-        "top_banks_mixed": ("top banks are mixed", "not enough top banks", "hdfc and icici are opposite"),
-        "insufficient_room_to_level": ("insufficient room", "too little room", "nearest support/resistance leaves too little room"),
-        "expected_move_too_small": ("expected move is smaller", "expected_move_coverage_weak"),
-        "day_type_score_below_threshold": ("day type score is below", "day type filter failed"),
+        "top_banks_mixed": (
+            "top banks are mixed",
+            "not enough top banks",
+            "hdfc and icici are opposite",
+        ),
+        "insufficient_room_to_level": (
+            "insufficient room",
+            "too little room",
+            "nearest support/resistance leaves too little room",
+        ),
+        "expected_move_too_small": (
+            "expected move is smaller",
+            "expected_move_coverage_weak",
+        ),
+        "day_type_score_below_threshold": (
+            "day type score is below",
+            "day type filter failed",
+        ),
         "entry_timing_price_inputs_missing": ("entry_timing_price_inputs_missing",),
         "market_closed": ("market_closed", "market closed", "outside market hours"),
-        "data_stale": ("data is stale", "quote is stale", "quotes are stale", "tick_stale"),
-        "quote_invalid": ("selected_option_quote_invalid", "quote invalid", "quote_unavailable", "invalid quote"),
+        "data_stale": (
+            "data is stale",
+            "quote is stale",
+            "quotes are stale",
+            "tick_stale",
+        ),
+        "quote_invalid": (
+            "selected_option_quote_invalid",
+            "quote invalid",
+            "quote_unavailable",
+            "invalid quote",
+        ),
     }
 
-    def analyze(self, *, symbol: str | None = "BANKNIFTY", limit: int = 1000) -> dict[str, Any]:
+    def analyze(
+        self, *, symbol: str | None = "BANKNIFTY", limit: int = 1000
+    ) -> dict[str, Any]:
         opportunities, rejections, trades = self._load(symbol=symbol, limit=limit)
         eligible_rejections = self._learning_eligible_rejections(rejections)
         return {
             "status": "ok",
             "symbol": symbol.upper() if symbol else "ALL",
             "limit": limit,
-            "rejection_learning_filter": self._rejection_learning_filter_summary(rejections),
-            "accepted_vs_rejected": self._accepted_vs_rejected(opportunities, eligible_rejections),
-            "rejected_opportunity_quality": self.rejected_opportunity_quality_report(symbol=symbol, limit=limit),
-            "time_bucket_edge": self._time_bucket_edge(opportunities, eligible_rejections, trades),
-            "expiry_dte_segmentation": self._dte_segmentation(opportunities, eligible_rejections, trades),
-            "factor_attribution": self._factor_attribution(opportunities, eligible_rejections),
+            "rejection_learning_filter": self._rejection_learning_filter_summary(
+                rejections
+            ),
+            "accepted_vs_rejected": self._accepted_vs_rejected(
+                opportunities, eligible_rejections
+            ),
+            "rejected_opportunity_quality": self.rejected_opportunity_quality_report(
+                symbol=symbol, limit=limit
+            ),
+            "time_bucket_edge": self._time_bucket_edge(
+                opportunities, eligible_rejections, trades
+            ),
+            "expiry_dte_segmentation": self._dte_segmentation(
+                opportunities, eligible_rejections, trades
+            ),
+            "factor_attribution": self._factor_attribution(
+                opportunities, eligible_rejections
+            ),
             "live_execution_quality": self._live_execution_quality(trades),
             "exit_policy_analytics": self._exit_policy_analytics(trades, opportunities),
-            "no_trade_regime_detection": self._no_trade_regime_detection(eligible_rejections),
-            "strategy_versions": self._strategy_versions(opportunities, eligible_rejections),
+            "no_trade_regime_detection": self._no_trade_regime_detection(
+                eligible_rejections
+            ),
+            "strategy_versions": self._strategy_versions(
+                opportunities, eligible_rejections
+            ),
             "shadow_mode_comparison": self._shadow_mode_comparison(trades),
             "notes": [
                 "These reports are evidence dashboards only; they do not change scanner logic.",
@@ -63,11 +124,17 @@ class ProfessionalInsightsService:
             ],
         }
 
-    def research_engine_report(self, *, symbol: str | None = "BANKNIFTY", limit: int = 2000) -> dict[str, Any]:
+    def research_engine_report(
+        self, *, symbol: str | None = "BANKNIFTY", limit: int = 2000
+    ) -> dict[str, Any]:
         opportunities, rejections, trades = self._load(symbol=symbol, limit=limit)
         eligible_rejections = self._learning_eligible_rejections(rejections)
-        closed_opportunities = [row for row in opportunities if str(row.status or "").lower() == "closed"]
-        closed_trades = [row for row in trades if str(row.status or "").lower() == "closed"]
+        closed_opportunities = [
+            row for row in opportunities if str(row.status or "").lower() == "closed"
+        ]
+        closed_trades = [
+            row for row in trades if str(row.status or "").lower() == "closed"
+        ]
         reviewed_rejections = [row for row in eligible_rejections if row.later_outcome]
         accepted_rows = closed_trades or closed_opportunities
         return {
@@ -83,20 +150,44 @@ class ProfessionalInsightsService:
                 "learning_eligible_rejections": len(eligible_rejections),
                 "reviewed_rejections_with_later_outcome": len(reviewed_rejections),
             },
-            "filter_rejection_quality": self._filter_rejection_quality(eligible_rejections),
-            "gate_effectiveness": self.gate_effectiveness_report(symbol=symbol, limit=limit),
-            "accepted_trade_loss_impact": self._accepted_loss_impact(closed_trades, closed_opportunities),
+            "filter_rejection_quality": self._filter_rejection_quality(
+                eligible_rejections
+            ),
+            "gate_effectiveness": self.gate_effectiveness_report(
+                symbol=symbol, limit=limit
+            ),
+            "accepted_trade_loss_impact": self._accepted_loss_impact(
+                closed_trades, closed_opportunities
+            ),
             "mfe_mae": self._mfe_mae_summary(closed_trades),
             "segment_expectancy": {
-                "setup_family": self._segment_report(accepted_rows, reviewed_rejections, self._setup_family),
-                "weekday": self._segment_report(accepted_rows, reviewed_rejections, self._weekday_bucket),
-                "time_block": self._segment_report(accepted_rows, reviewed_rejections, lambda row: time_bucket(getattr(row, "created_at", None))),
-                "expiry_proximity": self._segment_report(accepted_rows, reviewed_rejections, self._dte_bucket),
-                "iv_regime": self._segment_report(accepted_rows, reviewed_rejections, self._iv_regime),
-                "trend_regime": self._segment_report(accepted_rows, reviewed_rejections, self._trend_regime),
+                "setup_family": self._segment_report(
+                    accepted_rows, reviewed_rejections, self._setup_family
+                ),
+                "weekday": self._segment_report(
+                    accepted_rows, reviewed_rejections, self._weekday_bucket
+                ),
+                "time_block": self._segment_report(
+                    accepted_rows,
+                    reviewed_rejections,
+                    lambda row: time_bucket(getattr(row, "created_at", None)),
+                ),
+                "expiry_proximity": self._segment_report(
+                    accepted_rows, reviewed_rejections, self._dte_bucket
+                ),
+                "iv_regime": self._segment_report(
+                    accepted_rows, reviewed_rejections, self._iv_regime
+                ),
+                "trend_regime": self._segment_report(
+                    accepted_rows, reviewed_rejections, self._trend_regime
+                ),
             },
-            "setup_family_ranking": self._setup_family_ranking(accepted_rows, reviewed_rejections),
-            "research_readiness": self._research_readiness(closed_trades, closed_opportunities, reviewed_rejections),
+            "setup_family_ranking": self._setup_family_ranking(
+                accepted_rows, reviewed_rejections
+            ),
+            "research_readiness": self._research_readiness(
+                closed_trades, closed_opportunities, reviewed_rejections
+            ),
             "notes": [
                 "This is a read-only research report; it does not alter scanner gates, scores, or orders.",
                 "Rejected-trade quality depends on /opportunities/rejections/evaluate-open or the automatic rejected-outcome evaluator having populated later_outcome.",
@@ -115,15 +206,33 @@ class ProfessionalInsightsService:
         mode: str = "all",
     ) -> dict[str, Any]:
         opportunities, rejections, trades = self._load(symbol=symbol, limit=limit)
-        opportunities = self._filter_threshold_rows(opportunities, start_date=start_date, end_date=end_date, setup_family=setup_family)
-        rejections = self._filter_threshold_rows(rejections, start_date=start_date, end_date=end_date, setup_family=setup_family)
-        trades = self._filter_threshold_rows(trades, start_date=start_date, end_date=end_date, setup_family=setup_family)
+        opportunities = self._filter_threshold_rows(
+            opportunities,
+            start_date=start_date,
+            end_date=end_date,
+            setup_family=setup_family,
+        )
+        rejections = self._filter_threshold_rows(
+            rejections,
+            start_date=start_date,
+            end_date=end_date,
+            setup_family=setup_family,
+        )
+        trades = self._filter_threshold_rows(
+            trades, start_date=start_date, end_date=end_date, setup_family=setup_family
+        )
         trades = self._filter_trades_by_mode(trades, mode)
         eligible_rejections = self._learning_eligible_rejections(rejections)
         reviewed_rejections = [row for row in eligible_rejections if row.later_outcome]
-        accepted_rows: list[Any] = [row for row in trades if str(row.status or "").lower() == "closed"]
+        accepted_rows: list[Any] = [
+            row for row in trades if str(row.status or "").lower() == "closed"
+        ]
         if not accepted_rows:
-            accepted_rows = [row for row in opportunities if str(row.status or "").lower() == "closed"]
+            accepted_rows = [
+                row
+                for row in opportunities
+                if str(row.status or "").lower() == "closed"
+            ]
         decision_rows: list[Any] = list(opportunities) + list(eligible_rejections)
         return {
             "status": "ok",
@@ -136,16 +245,30 @@ class ProfessionalInsightsService:
                 "mode": mode,
             },
             "threshold_inventory": self._threshold_inventory(),
-            "data_support": self._threshold_data_support(opportunities, rejections, trades),
-            "score_threshold_validation": self._score_threshold_validation(decision_rows, accepted_rows, reviewed_rejections),
-            "rejection_threshold_validation": self._rejection_threshold_validation(eligible_rejections),
-            "setup_family_threshold_validation": self._setup_family_threshold_validation(accepted_rows, eligible_rejections),
-            "time_and_regime_validation": self._time_and_regime_validation(accepted_rows, reviewed_rejections),
+            "data_support": self._threshold_data_support(
+                opportunities, rejections, trades
+            ),
+            "score_threshold_validation": self._score_threshold_validation(
+                decision_rows, accepted_rows, reviewed_rejections
+            ),
+            "rejection_threshold_validation": self._rejection_threshold_validation(
+                eligible_rejections
+            ),
+            "setup_family_threshold_validation": self._setup_family_threshold_validation(
+                accepted_rows, eligible_rejections
+            ),
+            "time_and_regime_validation": self._time_and_regime_validation(
+                accepted_rows, reviewed_rejections
+            ),
             "threshold_sensitivity": {
-                "minimum_score": self._score_sensitivity(decision_rows, accepted_rows, reviewed_rejections),
+                "minimum_score": self._score_sensitivity(
+                    decision_rows, accepted_rows, reviewed_rejections
+                ),
             },
             "verdicts": self._threshold_verdicts(accepted_rows, eligible_rejections),
-            "not_measurable_yet": self._threshold_not_measurable_yet(opportunities, rejections, trades),
+            "not_measurable_yet": self._threshold_not_measurable_yet(
+                opportunities, rejections, trades
+            ),
             "notes": [
                 "This report is read-only; it does not change strategy thresholds, entries, exits, or order placement.",
                 "Rejected-trade validation depends on later_outcome/later_exit_price being populated by rejected-outcome evaluation.",
@@ -153,17 +276,37 @@ class ProfessionalInsightsService:
             ],
         }
 
-    def execution_realism_report(self, *, symbol: str | None = "BANKNIFTY", limit: int = 1000) -> dict[str, Any]:
+    def execution_realism_report(
+        self, *, symbol: str | None = "BANKNIFTY", limit: int = 1000
+    ) -> dict[str, Any]:
         _, _, trades = self._load(symbol=symbol, limit=limit)
         closed = [row for row in trades if str(row.status or "").lower() == "closed"]
         paper = [row for row in closed if str(row.mode or "").lower() == "paper"]
         live = [row for row in closed if str(row.mode or "").lower() == "live"]
-        detailed = [row for row in closed if self._json(row.order_response_json).get("execution_realism")]
-        charges = [float(row.charges or 0.0) for row in closed if row.charges is not None]
-        slippage = [float(row.slippage_cost or 0.0) for row in closed if row.slippage_cost is not None]
-        spread = [float(row.spread_cost or 0.0) for row in closed if row.spread_cost is not None]
-        gross = [float(row.gross_pnl or 0.0) for row in closed if row.gross_pnl is not None]
-        net = [value for row in closed if (value := self._trade_net_pnl(row)) is not None]
+        detailed = [
+            row
+            for row in closed
+            if self._json(row.order_response_json).get("execution_realism")
+        ]
+        charges = [
+            float(row.charges or 0.0) for row in closed if row.charges is not None
+        ]
+        slippage = [
+            float(row.slippage_cost or 0.0)
+            for row in closed
+            if row.slippage_cost is not None
+        ]
+        spread = [
+            float(row.spread_cost or 0.0)
+            for row in closed
+            if row.spread_cost is not None
+        ]
+        gross = [
+            float(row.gross_pnl or 0.0) for row in closed if row.gross_pnl is not None
+        ]
+        net = [
+            value for row in closed if (value := self._trade_net_pnl(row)) is not None
+        ]
         examples = []
         for row in detailed[:10]:
             response = self._json(row.order_response_json)
@@ -196,8 +339,12 @@ class ProfessionalInsightsService:
                 "charges": round(sum(charges), 2),
                 "slippage_cost": round(sum(slippage), 2),
                 "spread_cost": round(sum(spread), 2),
-                "gross_to_net_drag": round(sum(gross) - sum(net), 2) if gross and net else 0.0,
-                "avg_charges_per_trade": round(sum(charges) / len(charges), 2) if charges else 0.0,
+                "gross_to_net_drag": round(sum(gross) - sum(net), 2)
+                if gross and net
+                else 0.0,
+                "avg_charges_per_trade": round(sum(charges) / len(charges), 2)
+                if charges
+                else 0.0,
             },
             "mfe_mae": self._mfe_mae_summary(closed),
             "examples": examples,
@@ -208,21 +355,51 @@ class ProfessionalInsightsService:
             ],
         }
 
-    def daily_banknifty_summary(self, *, summary_date: date | None = None) -> dict[str, Any]:
+    def daily_banknifty_summary(
+        self, *, summary_date: date | None = None
+    ) -> dict[str, Any]:
         day = summary_date or ist_today()
         opportunities, rejections, trades = self._load_day(symbol="BANKNIFTY", day=day)
         eligible_rejections = self._learning_eligible_rejections(rejections)
-        paper_trades = [trade for trade in trades if str(trade.mode or "").lower() == "paper"]
-        closed_paper = [trade for trade in paper_trades if str(trade.status or "").lower() == "closed"]
-        open_paper = [trade for trade in paper_trades if str(trade.status or "").lower() != "closed"]
+        paper_trades = [
+            trade for trade in trades if str(trade.mode or "").lower() == "paper"
+        ]
+        closed_paper = [
+            trade
+            for trade in paper_trades
+            if str(trade.status or "").lower() == "closed"
+        ]
+        open_paper = [
+            trade
+            for trade in paper_trades
+            if str(trade.status or "").lower() != "closed"
+        ]
         winning_trades = [trade for trade in closed_paper if self._trade_is_win(trade)]
         losing_trades = [trade for trade in closed_paper if self._trade_is_loss(trade)]
-        gross_values = [float(trade.gross_pnl) for trade in closed_paper if trade.gross_pnl is not None]
-        net_values = [value for trade in closed_paper if (value := self._trade_net_pnl(trade)) is not None]
-        win_values = [value for trade in winning_trades if (value := self._trade_net_pnl(trade)) is not None]
-        loss_values = [value for trade in losing_trades if (value := self._trade_net_pnl(trade)) is not None]
+        gross_values = [
+            float(trade.gross_pnl)
+            for trade in closed_paper
+            if trade.gross_pnl is not None
+        ]
+        net_values = [
+            value
+            for trade in closed_paper
+            if (value := self._trade_net_pnl(trade)) is not None
+        ]
+        win_values = [
+            value
+            for trade in winning_trades
+            if (value := self._trade_net_pnl(trade)) is not None
+        ]
+        loss_values = [
+            value
+            for trade in losing_trades
+            if (value := self._trade_net_pnl(trade)) is not None
+        ]
         reason_counts = self._grouped_rejection_reason_counts(rejections)
-        eligible_reason_counts = self._grouped_rejection_reason_counts(eligible_rejections)
+        eligible_reason_counts = self._grouped_rejection_reason_counts(
+            eligible_rejections
+        )
         low_sample = len(closed_paper) < 30
         data_health_warnings = self._daily_data_health_warnings(
             paper_trades=paper_trades,
@@ -241,18 +418,30 @@ class ProfessionalInsightsService:
             "open_trades": len(open_paper),
             "gross_pnl": round(sum(gross_values), 2) if gross_values else None,
             "net_pnl": round(sum(net_values), 2) if net_values else None,
-            "average_win": round(sum(win_values) / len(win_values), 2) if win_values else None,
-            "average_loss": round(abs(sum(loss_values)) / len(loss_values), 2) if loss_values else None,
+            "average_win": round(sum(win_values) / len(win_values), 2)
+            if win_values
+            else None,
+            "average_loss": round(abs(sum(loss_values)) / len(loss_values), 2)
+            if loss_values
+            else None,
             "total_rejected_opportunities": len(rejections),
             "learning_eligible_rejections": len(eligible_rejections),
             "learning_excluded_rejections": len(rejections) - len(eligible_rejections),
             "learning_exclusion_reasons": dict(
-                Counter(str(row.learning_exclusion_reason or "unknown") for row in rejections if not bool(row.learning_eligible)).most_common(10)
+                Counter(
+                    str(row.learning_exclusion_reason or "unknown")
+                    for row in rejections
+                    if not bool(row.learning_eligible)
+                ).most_common(10)
             ),
             "rejection_reasons_count": reason_counts,
             "learning_eligible_rejection_reasons_count": eligible_reason_counts,
-            "rejected_opportunity_quality": self._rejected_quality_summary(eligible_rejections),
-            "gate_effectiveness_top": self._gate_effectiveness_rows(eligible_rejections)[:10],
+            "rejected_opportunity_quality": self._rejected_quality_summary(
+                eligible_rejections
+            ),
+            "gate_effectiveness_top": self._gate_effectiveness_rows(
+                eligible_rejections
+            )[:10],
             "top_5_rejection_reasons": [
                 {"reason": reason, "count": count}
                 for reason, count in Counter(reason_counts).most_common(5)
@@ -270,10 +459,18 @@ class ProfessionalInsightsService:
             },
         }
 
-    def daily_review(self, *, symbol: str | None = "BANKNIFTY", review_date: date | None = None, limit: int = 1000) -> dict[str, Any]:
+    def daily_review(
+        self,
+        *,
+        symbol: str | None = "BANKNIFTY",
+        review_date: date | None = None,
+        limit: int = 1000,
+    ) -> dict[str, Any]:
         day = review_date or ist_today()
         opportunities, rejections, trades = self._load(symbol=symbol, limit=limit)
-        opportunities = [row for row in opportunities if self._same_day(row.created_at, day)]
+        opportunities = [
+            row for row in opportunities if self._same_day(row.created_at, day)
+        ]
         rejections = [row for row in rejections if self._same_day(row.created_at, day)]
         eligible_rejections = self._learning_eligible_rejections(rejections)
         trades = [row for row in trades if self._same_day(row.created_at, day)]
@@ -285,24 +482,45 @@ class ProfessionalInsightsService:
                 "accepted_opportunities": len(opportunities),
                 "rejected_setups": len(rejections),
                 "learning_eligible_rejections": len(eligible_rejections),
-                "learning_excluded_rejections": len(rejections) - len(eligible_rejections),
+                "learning_excluded_rejections": len(rejections)
+                - len(eligible_rejections),
                 "trades": len(trades),
-                "closed_trades": len([trade for trade in trades if trade.status == "closed"]),
+                "closed_trades": len(
+                    [trade for trade in trades if trade.status == "closed"]
+                ),
             },
             "accepted_performance": self._opportunity_summary(opportunities),
             "trade_performance": self._trade_summary(trades),
-            "top_rejection_gates": dict(Counter(str(row.primary_gate or "unknown") for row in eligible_rejections).most_common(20)),
-            "top_rejection_reasons": dict(self._reason_counter(eligible_rejections).most_common(25)),
-            "rejected_opportunity_quality": self._rejected_quality_summary(eligible_rejections),
-            "gate_effectiveness_top": self._gate_effectiveness_rows(eligible_rejections)[:15],
-            "learning_exclusion_reasons": dict(
-                Counter(str(row.learning_exclusion_reason or "unknown") for row in rejections if not bool(row.learning_eligible)).most_common(15)
+            "top_rejection_gates": dict(
+                Counter(
+                    str(row.primary_gate or "unknown") for row in eligible_rejections
+                ).most_common(20)
             ),
-            "exit_outcomes": dict(Counter(str(row.outcome or "open") for row in trades).most_common()),
+            "top_rejection_reasons": dict(
+                self._reason_counter(eligible_rejections).most_common(25)
+            ),
+            "rejected_opportunity_quality": self._rejected_quality_summary(
+                eligible_rejections
+            ),
+            "gate_effectiveness_top": self._gate_effectiveness_rows(
+                eligible_rejections
+            )[:15],
+            "learning_exclusion_reasons": dict(
+                Counter(
+                    str(row.learning_exclusion_reason or "unknown")
+                    for row in rejections
+                    if not bool(row.learning_eligible)
+                ).most_common(15)
+            ),
+            "exit_outcomes": dict(
+                Counter(str(row.outcome or "open") for row in trades).most_common()
+            ),
             "timeline": self._timeline(opportunities, rejections, trades, limit=100),
         }
 
-    def rejected_opportunity_quality_report(self, *, symbol: str | None = "BANKNIFTY", limit: int = 3000) -> dict[str, Any]:
+    def rejected_opportunity_quality_report(
+        self, *, symbol: str | None = "BANKNIFTY", limit: int = 3000
+    ) -> dict[str, Any]:
         _, rejections, _ = self._load(symbol=symbol, limit=limit)
         eligible = self._learning_eligible_rejections(rejections)
         return {
@@ -311,9 +529,15 @@ class ProfessionalInsightsService:
             "limit": limit,
             "summary": self._rejected_quality_summary(eligible),
             "gate_effectiveness": self._gate_effectiveness_rows(eligible),
-            "top_missed_winner_gates": self._top_gates(eligible, outcome_group="missed_winner"),
-            "top_saved_loser_gates": self._top_gates(eligible, outcome_group="saved_loser"),
-            "top_unresolved_gates": self._top_gates(eligible, outcome_group="unresolved"),
+            "top_missed_winner_gates": self._top_gates(
+                eligible, outcome_group="missed_winner"
+            ),
+            "top_saved_loser_gates": self._top_gates(
+                eligible, outcome_group="saved_loser"
+            ),
+            "top_unresolved_gates": self._top_gates(
+                eligible, outcome_group="unresolved"
+            ),
             "notes": [
                 "Missed winners are rejected rows whose later_outcome hit a target.",
                 "Saved losers are rejected rows whose later_outcome hit stop loss.",
@@ -345,9 +569,15 @@ class ProfessionalInsightsService:
             }
         opportunities, rejections, trades = self._load(symbol=symbol, limit=limit)
         eligible = self._learning_eligible_rejections(rejections)
-        accepted_rows: list[Any] = [row for row in trades if str(row.status or "").lower() == "closed"]
+        accepted_rows: list[Any] = [
+            row for row in trades if str(row.status or "").lower() == "closed"
+        ]
         if not accepted_rows:
-            accepted_rows = [row for row in opportunities if str(row.status or "").lower() == "closed"]
+            accepted_rows = [
+                row
+                for row in opportunities
+                if str(row.status or "").lower() == "closed"
+            ]
         result = {
             "status": "ok",
             "symbol": symbol.upper() if symbol else "ALL",
@@ -362,7 +592,9 @@ class ProfessionalInsightsService:
             result["gates"] = result["gates"][: max(1, int(top_n))]
         return result
 
-    def trade_journal(self, *, symbol: str | None = "BANKNIFTY", limit: int = 200) -> dict[str, Any]:
+    def trade_journal(
+        self, *, symbol: str | None = "BANKNIFTY", limit: int = 200
+    ) -> dict[str, Any]:
         opportunities, rejections, trades = self._load(symbol=symbol, limit=limit)
         return {
             "status": "ok",
@@ -379,18 +611,29 @@ class ProfessionalInsightsService:
             option_query = session.query(OptionQuoteSnapshot)
             if symbol_value:
                 candle_query = candle_query.filter(Candle.symbol == symbol_value)
-                option_query = option_query.filter(OptionQuoteSnapshot.underlying == symbol_value)
+                option_query = option_query.filter(
+                    OptionQuoteSnapshot.underlying == symbol_value
+                )
             candle_count = candle_query.count()
             option_count = option_query.count()
             latest_candle = candle_query.order_by(Candle.timestamp.desc()).first()
-            latest_option = option_query.order_by(OptionQuoteSnapshot.timestamp.desc()).first()
+            latest_option = option_query.order_by(
+                OptionQuoteSnapshot.timestamp.desc()
+            ).first()
             candle_timeframes = {
                 str(row[0]): int(row[1])
-                for row in candle_query.with_entities(Candle.timeframe, func.count(Candle.id)).group_by(Candle.timeframe).all()
+                for row in candle_query.with_entities(
+                    Candle.timeframe, func.count(Candle.id)
+                )
+                .group_by(Candle.timeframe)
+                .all()
             }
             option_dates = {
                 str(row[0]): int(row[1])
-                for row in option_query.with_entities(func.date(OptionQuoteSnapshot.timestamp), func.count(OptionQuoteSnapshot.id))
+                for row in option_query.with_entities(
+                    func.date(OptionQuoteSnapshot.timestamp),
+                    func.count(OptionQuoteSnapshot.id),
+                )
                 .group_by(func.date(OptionQuoteSnapshot.timestamp))
                 .order_by(func.date(OptionQuoteSnapshot.timestamp).desc())
                 .limit(10)
@@ -401,18 +644,24 @@ class ProfessionalInsightsService:
                 "symbol": symbol_value or "ALL",
                 "candles": {
                     "rows": candle_count,
-                    "latest_timestamp": self._dt(latest_candle.timestamp if latest_candle else None),
+                    "latest_timestamp": self._dt(
+                        latest_candle.timestamp if latest_candle else None
+                    ),
                     "timeframes": candle_timeframes,
                 },
                 "option_snapshots": {
                     "rows": option_count,
-                    "latest_timestamp": self._dt(latest_option.timestamp if latest_option else None),
+                    "latest_timestamp": self._dt(
+                        latest_option.timestamp if latest_option else None
+                    ),
                     "recent_session_counts": option_dates,
                 },
                 "readiness": {
                     "has_underlying_candles": candle_count > 0,
                     "has_option_snapshots": option_count > 0,
-                    "warning": None if candle_count and option_count else "Data collection sample is still incomplete.",
+                    "warning": None
+                    if candle_count and option_count
+                    else "Data collection sample is still incomplete.",
                 },
             }
         finally:
@@ -420,25 +669,43 @@ class ProfessionalInsightsService:
 
     def _load(
         self, *, symbol: str | None, limit: int
-    ) -> tuple[list[OpportunityRecord], list[RejectedOpportunityRecord], list[TradeRecord]]:
+    ) -> tuple[
+        list[OpportunityRecord], list[RejectedOpportunityRecord], list[TradeRecord]
+    ]:
         session = get_session()
         try:
-            opportunity_query = session.query(OpportunityRecord).order_by(OpportunityRecord.id.desc())
-            rejection_query = session.query(RejectedOpportunityRecord).order_by(RejectedOpportunityRecord.id.desc())
+            opportunity_query = session.query(OpportunityRecord).order_by(
+                OpportunityRecord.id.desc()
+            )
+            rejection_query = session.query(RejectedOpportunityRecord).order_by(
+                RejectedOpportunityRecord.id.desc()
+            )
             trade_query = session.query(TradeRecord).order_by(TradeRecord.id.desc())
             if symbol:
                 symbol_value = symbol.upper()
-                opportunity_query = opportunity_query.filter(OpportunityRecord.symbol == symbol_value)
-                rejection_query = rejection_query.filter(RejectedOpportunityRecord.symbol == symbol_value)
+                opportunity_query = opportunity_query.filter(
+                    OpportunityRecord.symbol == symbol_value
+                )
+                rejection_query = rejection_query.filter(
+                    RejectedOpportunityRecord.symbol == symbol_value
+                )
                 trade_query = trade_query.filter(TradeRecord.symbol == symbol_value)
-            return opportunity_query.limit(limit).all(), rejection_query.limit(limit).all(), trade_query.limit(limit).all()
+            return (
+                opportunity_query.limit(limit).all(),
+                rejection_query.limit(limit).all(),
+                trade_query.limit(limit).all(),
+            )
         finally:
             session.close()
 
-    def _load_rejections(self, *, symbol: str | None, limit: int) -> list[RejectedOpportunityRecord]:
+    def _load_rejections(
+        self, *, symbol: str | None, limit: int
+    ) -> list[RejectedOpportunityRecord]:
         session = get_session()
         try:
-            query = session.query(RejectedOpportunityRecord).order_by(RejectedOpportunityRecord.id.desc())
+            query = session.query(RejectedOpportunityRecord).order_by(
+                RejectedOpportunityRecord.id.desc()
+            )
             if symbol:
                 query = query.filter(RejectedOpportunityRecord.symbol == symbol.upper())
             return query.limit(limit).all()
@@ -447,7 +714,9 @@ class ProfessionalInsightsService:
 
     def _load_day(
         self, *, symbol: str, day: date
-    ) -> tuple[list[OpportunityRecord], list[RejectedOpportunityRecord], list[TradeRecord]]:
+    ) -> tuple[
+        list[OpportunityRecord], list[RejectedOpportunityRecord], list[TradeRecord]
+    ]:
         start = datetime.combine(day, datetime.min.time())
         end = datetime.combine(day, datetime.max.time())
         session = get_session()
@@ -480,37 +749,67 @@ class ProfessionalInsightsService:
         finally:
             session.close()
 
-    def _learning_eligible_rejections(self, rows: list[RejectedOpportunityRecord]) -> list[RejectedOpportunityRecord]:
+    def _learning_eligible_rejections(
+        self, rows: list[RejectedOpportunityRecord]
+    ) -> list[RejectedOpportunityRecord]:
         return [row for row in rows if bool(getattr(row, "learning_eligible", 0))]
 
-    def _independent_rejections(self, rows: list[RejectedOpportunityRecord]) -> list[RejectedOpportunityRecord]:
+    def _independent_rejections(
+        self, rows: list[RejectedOpportunityRecord]
+    ) -> list[RejectedOpportunityRecord]:
         independent: dict[str, RejectedOpportunityRecord] = {}
         for row in rows:
             key = str(getattr(row, "episode_key", None) or f"legacy-row:{row.id}")
             independent.setdefault(key, row)
         return list(independent.values())
 
-    def _rejection_learning_filter_summary(self, rows: list[RejectedOpportunityRecord]) -> dict[str, Any]:
+    def _rejection_learning_filter_summary(
+        self, rows: list[RejectedOpportunityRecord]
+    ) -> dict[str, Any]:
         eligible = self._learning_eligible_rejections(rows)
-        excluded = [row for row in rows if not bool(getattr(row, "learning_eligible", 0))]
+        excluded = [
+            row for row in rows if not bool(getattr(row, "learning_eligible", 0))
+        ]
         return {
             "total_rejections": len(rows),
             "learning_eligible": len(eligible),
             "learning_excluded": len(excluded),
-            "contexts": dict(Counter(str(row.rejection_context or "unknown") for row in rows).most_common()),
-            "sources": dict(Counter(str(row.rejection_source or "unknown") for row in rows).most_common()),
-            "market_sessions": dict(Counter(str(row.market_session or "unknown") for row in rows).most_common()),
-            "exclusion_reasons": dict(Counter(str(row.learning_exclusion_reason or "unknown") for row in excluded).most_common(20)),
+            "contexts": dict(
+                Counter(
+                    str(row.rejection_context or "unknown") for row in rows
+                ).most_common()
+            ),
+            "sources": dict(
+                Counter(
+                    str(row.rejection_source or "unknown") for row in rows
+                ).most_common()
+            ),
+            "market_sessions": dict(
+                Counter(
+                    str(row.market_session or "unknown") for row in rows
+                ).most_common()
+            ),
+            "exclusion_reasons": dict(
+                Counter(
+                    str(row.learning_exclusion_reason or "unknown") for row in excluded
+                ).most_common(20)
+            ),
         }
 
     def _accepted_vs_rejected(
-        self, opportunities: list[OpportunityRecord], rejections: list[RejectedOpportunityRecord]
+        self,
+        opportunities: list[OpportunityRecord],
+        rejections: list[RejectedOpportunityRecord],
     ) -> dict[str, Any]:
         rejections = self._independent_rejections(rejections)
         closed = [row for row in opportunities if row.status == "closed"]
         rejected_reviewed = [row for row in rejections if row.later_outcome]
-        missed_winners = [row for row in rejected_reviewed if self._is_win(row.later_outcome)]
-        saved_losers = [row for row in rejected_reviewed if self._is_loss(row.later_outcome)]
+        missed_winners = [
+            row for row in rejected_reviewed if self._is_win(row.later_outcome)
+        ]
+        saved_losers = [
+            row for row in rejected_reviewed if self._is_loss(row.later_outcome)
+        ]
         return {
             "accepted": self._opportunity_summary(closed),
             "rejected": {
@@ -518,14 +817,27 @@ class ProfessionalInsightsService:
                 "reviewed_later": len(rejected_reviewed),
                 "missed_winners": len(missed_winners),
                 "saved_losers": len(saved_losers),
-                "missed_winner_rate_pct": round((len(missed_winners) / len(rejected_reviewed)) * 100, 2) if rejected_reviewed else 0.0,
-                "top_gates_on_missed_winners": dict(Counter(str(row.primary_gate or "unknown") for row in missed_winners).most_common(15)),
+                "missed_winner_rate_pct": round(
+                    (len(missed_winners) / len(rejected_reviewed)) * 100, 2
+                )
+                if rejected_reviewed
+                else 0.0,
+                "top_gates_on_missed_winners": dict(
+                    Counter(
+                        str(row.primary_gate or "unknown") for row in missed_winners
+                    ).most_common(15)
+                ),
             },
             "balance": {
-                "accept_rate_pct": round((len(opportunities) / (len(opportunities) + len(rejections))) * 100, 2)
+                "accept_rate_pct": round(
+                    (len(opportunities) / (len(opportunities) + len(rejections))) * 100,
+                    2,
+                )
                 if opportunities or rejections
                 else 0.0,
-                "interpretation": self._filtering_interpretation(opportunities, rejected_reviewed),
+                "interpretation": self._filtering_interpretation(
+                    opportunities, rejected_reviewed
+                ),
             },
         }
 
@@ -536,9 +848,15 @@ class ProfessionalInsightsService:
         trades: list[TradeRecord],
     ) -> dict[str, Any]:
         return {
-            "accepted_opportunities": self._group_summary(opportunities, lambda row: time_bucket(row.created_at), "opportunity"),
-            "executed_trades": self._group_summary(trades, lambda row: time_bucket(row.created_at), "trade"),
-            "rejected_later_outcomes": self._group_summary(rejections, lambda row: time_bucket(row.created_at), "rejection"),
+            "accepted_opportunities": self._group_summary(
+                opportunities, lambda row: time_bucket(row.created_at), "opportunity"
+            ),
+            "executed_trades": self._group_summary(
+                trades, lambda row: time_bucket(row.created_at), "trade"
+            ),
+            "rejected_later_outcomes": self._group_summary(
+                rejections, lambda row: time_bucket(row.created_at), "rejection"
+            ),
         }
 
     def _dte_segmentation(
@@ -548,13 +866,19 @@ class ProfessionalInsightsService:
         trades: list[TradeRecord],
     ) -> dict[str, Any]:
         return {
-            "accepted_opportunities": self._group_summary(opportunities, self._dte_bucket, "opportunity"),
+            "accepted_opportunities": self._group_summary(
+                opportunities, self._dte_bucket, "opportunity"
+            ),
             "executed_trades": self._group_summary(trades, self._dte_bucket, "trade"),
-            "rejected_later_outcomes": self._group_summary(rejections, self._dte_bucket, "rejection"),
+            "rejected_later_outcomes": self._group_summary(
+                rejections, self._dte_bucket, "rejection"
+            ),
         }
 
     def _factor_attribution(
-        self, opportunities: list[OpportunityRecord], rejections: list[RejectedOpportunityRecord]
+        self,
+        opportunities: list[OpportunityRecord],
+        rejections: list[RejectedOpportunityRecord],
     ) -> dict[str, Any]:
         rows: dict[str, list[tuple[str, float, str | None]]] = defaultdict(list)
         for opportunity in opportunities:
@@ -571,9 +895,15 @@ class ProfessionalInsightsService:
                 rows[label].append(("rejected", move, outcome))
         result: dict[str, Any] = {}
         for label, samples in sorted(rows.items()):
-            result[label] = self._summary_from_values([sample[1] for sample in samples], [sample[2] for sample in samples])
-            result[label]["accepted_count"] = len([sample for sample in samples if sample[0] == "accepted"])
-            result[label]["rejected_count"] = len([sample for sample in samples if sample[0] == "rejected"])
+            result[label] = self._summary_from_values(
+                [sample[1] for sample in samples], [sample[2] for sample in samples]
+            )
+            result[label]["accepted_count"] = len(
+                [sample for sample in samples if sample[0] == "accepted"]
+            )
+            result[label]["rejected_count"] = len(
+                [sample for sample in samples if sample[0] == "rejected"]
+            )
         return result
 
     def _live_execution_quality(self, trades: list[TradeRecord]) -> dict[str, Any]:
@@ -585,32 +915,78 @@ class ProfessionalInsightsService:
         for trade in live:
             statuses.update([str(trade.status or "unknown")])
             price_sources.update([str(trade.price_source or "unknown")])
-            if float(trade.entry_price or 0.0) > 0 and float(trade.average_price or 0.0) > 0:
-                deviations.append(((float(trade.average_price or 0.0) - float(trade.entry_price or 0.0)) / float(trade.entry_price or 1.0)) * 100)
+            if (
+                float(trade.entry_price or 0.0) > 0
+                and float(trade.average_price or 0.0) > 0
+            ):
+                deviations.append(
+                    (
+                        (
+                            float(trade.average_price or 0.0)
+                            - float(trade.entry_price or 0.0)
+                        )
+                        / float(trade.entry_price or 1.0)
+                    )
+                    * 100
+                )
             if trade.status in {"closing", "exit_failed", "reconciliation_mismatch"}:
                 stuck.append(self._trade_event(trade))
         return {
             "live_trades": len(live),
             "statuses": dict(statuses.most_common()),
             "price_sources": dict(price_sources.most_common()),
-            "avg_entry_deviation_pct": round(sum(deviations) / len(deviations), 3) if deviations else 0.0,
-            "max_abs_entry_deviation_pct": round(max(abs(value) for value in deviations), 3) if deviations else 0.0,
+            "avg_entry_deviation_pct": round(sum(deviations) / len(deviations), 3)
+            if deviations
+            else 0.0,
+            "max_abs_entry_deviation_pct": round(
+                max(abs(value) for value in deviations), 3
+            )
+            if deviations
+            else 0.0,
             "stuck_or_alert_trades": stuck[:20],
         }
 
-    def _exit_policy_analytics(self, trades: list[TradeRecord], opportunities: list[OpportunityRecord]) -> dict[str, Any]:
+    def _exit_policy_analytics(
+        self, trades: list[TradeRecord], opportunities: list[OpportunityRecord]
+    ) -> dict[str, Any]:
         closed_trades = [trade for trade in trades if trade.status == "closed"]
         closed_opportunities = [row for row in opportunities if row.status == "closed"]
         return {
-            "trade_outcomes": dict(Counter(str(trade.outcome or "unknown") for trade in closed_trades).most_common()),
-            "opportunity_outcomes": dict(Counter(str(row.outcome or "unknown") for row in closed_opportunities).most_common()),
-            "partial_booking_rows": len([trade for trade in trades if trade.partial_exit_json]),
-            "trailing_stop_rows": len([trade for trade in trades if str(trade.outcome or "").lower() == "trailing_stop"]),
-            "time_stop_rows": len([trade for trade in trades if str(trade.outcome or "").lower() == "time_stop"]),
-            "avg_time_to_confirm_exit_minutes": self._avg_exit_confirmation_minutes(closed_trades),
+            "trade_outcomes": dict(
+                Counter(
+                    str(trade.outcome or "unknown") for trade in closed_trades
+                ).most_common()
+            ),
+            "opportunity_outcomes": dict(
+                Counter(
+                    str(row.outcome or "unknown") for row in closed_opportunities
+                ).most_common()
+            ),
+            "partial_booking_rows": len(
+                [trade for trade in trades if trade.partial_exit_json]
+            ),
+            "trailing_stop_rows": len(
+                [
+                    trade
+                    for trade in trades
+                    if str(trade.outcome or "").lower() == "trailing_stop"
+                ]
+            ),
+            "time_stop_rows": len(
+                [
+                    trade
+                    for trade in trades
+                    if str(trade.outcome or "").lower() == "time_stop"
+                ]
+            ),
+            "avg_time_to_confirm_exit_minutes": self._avg_exit_confirmation_minutes(
+                closed_trades
+            ),
         }
 
-    def _no_trade_regime_detection(self, rejections: list[RejectedOpportunityRecord]) -> dict[str, Any]:
+    def _no_trade_regime_detection(
+        self, rejections: list[RejectedOpportunityRecord]
+    ) -> dict[str, Any]:
         reviewed = [row for row in rejections if row.later_outcome]
         by_gate: dict[str, list[RejectedOpportunityRecord]] = defaultdict(list)
         by_reason: dict[str, list[RejectedOpportunityRecord]] = defaultdict(list)
@@ -622,25 +998,41 @@ class ProfessionalInsightsService:
             "reviewed_rejections": len(reviewed),
             "primary_gate_quality": self._later_group_quality(by_gate),
             "reason_quality": self._later_group_quality(by_reason),
-            "top_unreviewed_gates": dict(Counter(str(row.primary_gate or "unknown") for row in rejections if not row.later_outcome).most_common(15)),
+            "top_unreviewed_gates": dict(
+                Counter(
+                    str(row.primary_gate or "unknown")
+                    for row in rejections
+                    if not row.later_outcome
+                ).most_common(15)
+            ),
         }
 
     def _strategy_versions(
-        self, opportunities: list[OpportunityRecord], rejections: list[RejectedOpportunityRecord]
+        self,
+        opportunities: list[OpportunityRecord],
+        rejections: list[RejectedOpportunityRecord],
     ) -> dict[str, Any]:
         versions: Counter[str] = Counter()
         for row in opportunities:
-            versions.update([self._strategy_version(self._json(row.factor_scores_json))])
+            versions.update(
+                [self._strategy_version(self._json(row.factor_scores_json))]
+            )
         for row in rejections:
-            versions.update([self._strategy_version(self._json(row.factor_scores_json))])
+            versions.update(
+                [self._strategy_version(self._json(row.factor_scores_json))]
+            )
         return {
             "versions": dict(versions.most_common()),
-            "warning": None if len(versions) <= 1 else "Multiple strategy versions are mixed in this sample; compare them separately.",
+            "warning": None
+            if len(versions) <= 1
+            else "Multiple strategy versions are mixed in this sample; compare them separately.",
         }
 
     def _shadow_mode_comparison(self, trades: list[TradeRecord]) -> dict[str, Any]:
         shadow = [trade for trade in trades if self._is_shadow_trade(trade)]
-        paper = [trade for trade in trades if trade.mode == "paper" and trade not in shadow]
+        paper = [
+            trade for trade in trades if trade.mode == "paper" and trade not in shadow
+        ]
         live = [trade for trade in trades if trade.mode == "live"]
         return {
             "shadow_sample": len(shadow),
@@ -663,14 +1055,21 @@ class ProfessionalInsightsService:
         events = [self._opportunity_event(row) for row in opportunities]
         events.extend(self._rejection_event(row) for row in rejections)
         events.extend(self._trade_event(row) for row in trades)
-        return sorted(events, key=lambda item: str(item.get("timestamp") or ""), reverse=True)[:limit]
+        return sorted(
+            events, key=lambda item: str(item.get("timestamp") or ""), reverse=True
+        )[:limit]
 
     def _opportunity_summary(self, rows: list[OpportunityRecord]) -> dict[str, Any]:
-        return self._summary_from_values([float(row.pnl or 0.0) for row in rows], [row.outcome for row in rows])
+        return self._summary_from_values(
+            [float(row.pnl or 0.0) for row in rows], [row.outcome for row in rows]
+        )
 
     def _trade_summary(self, rows: list[TradeRecord]) -> dict[str, Any]:
         summary = self._summary_from_values(
-            [float(row.net_pnl if row.net_pnl is not None else row.pnl or 0.0) for row in rows],
+            [
+                float(row.net_pnl if row.net_pnl is not None else row.pnl or 0.0)
+                for row in rows
+            ],
             [row.outcome for row in rows],
         )
         summary["mfe_mae"] = self._mfe_mae_summary(rows)
@@ -678,63 +1077,473 @@ class ProfessionalInsightsService:
 
     def _threshold_inventory(self) -> list[dict[str, Any]]:
         items = [
-            ("min_signal_score", "entry", "blocks entry below minimum score", True, "scanner_service.py", "ScannerService", "generic"),
-            ("min_market_regime_score", "entry", "blocks weak market-regime score", True, "scanner_service.py", "ScannerService", "generic"),
-            ("min_price_action_score", "entry", "blocks weak price-action score", True, "scanner_service.py", "ScannerService", "generic"),
-            ("min_option_chain_score", "entry", "blocks weak option-chain score", True, "scanner_service.py", "ScannerService", "generic"),
-            ("min_option_liquidity_score", "option_selection", "blocks low option-liquidity score", True, "trade_setup_service.py", "TradeSetupService.risk_checks", "generic"),
-            ("max_bid_ask_spread_pct", "option_selection", "rejects wide bid/ask spread", True, "trade_setup_service.py", "TradeSetupService.risk_checks", "generic"),
-            ("min_option_volume", "option_selection", "rejects low option volume", True, "trade_setup_service.py", "TradeSetupService.risk_checks", "generic"),
-            ("min_option_oi", "option_selection", "rejects low option open interest", True, "trade_setup_service.py", "TradeSetupService.risk_checks", "generic"),
-            ("min_option_buy_premium", "option_selection", "rejects very low option premium", True, "trade_setup_service.py", "TradeSetupService.risk_checks", "generic"),
-            ("min_option_quality_score", "option_selection", "blocks poor Greeks/quality score", True, "option_quality_service.py", "OptionQualityService", "generic"),
-            ("min_option_buy_delta", "option_selection", "option buying delta lower bound", True, "option_quality_service.py", "OptionQualityService", "generic"),
-            ("max_option_buy_delta", "option_selection", "option buying delta upper bound", True, "option_quality_service.py", "OptionQualityService", "generic"),
-            ("max_option_buy_theta_pct", "option_selection", "rejects excessive theta decay", True, "option_quality_service.py", "OptionQualityService", "generic"),
-            ("min_option_buy_iv", "option_selection", "option IV lower bound", True, "option_quality_service.py", "OptionQualityService", "generic"),
-            ("max_option_buy_iv", "option_selection", "option IV upper bound", True, "option_quality_service.py", "OptionQualityService", "generic"),
-            ("min_risk_reward", "risk", "blocks poor risk-reward setup", True, "scanner_service.py", "ScannerService", "generic"),
-            ("max_risk_per_trade_pct", "risk", "position sizing risk cap", True, "trade_setup_service.py", "TradeSetupService.position_size", "generic"),
-            ("max_option_premium_pct", "risk", "budget cap for live option premium", True, "trade_setup_service.py", "TradeSetupService.risk_checks", "generic"),
-            ("max_daily_loss_pct", "risk", "daily loss guard", True, "risk_service.py", "RiskService", "generic"),
-            ("max_trades_per_day", "risk", "daily trade-count guard", True, "risk_service.py", "RiskService", "generic"),
-            ("max_stop_losses_per_day", "risk", "daily stop-loss guard", True, "risk_service.py", "RiskService", "generic"),
-            ("max_open_trades", "risk", "open trade limit", True, "risk_service.py", "RiskService", "generic"),
-            ("min_option_premium_confirmation_score", "entry", "premium confirmation hard gate", True, "option_premium_confirmation_service.py", "OptionPremiumConfirmationService", "generic"),
-            ("option_premium_lookback_candles", "entry", "premium confirmation lookback", True, "option_premium_confirmation_service.py", "OptionPremiumConfirmationService", "generic"),
-            ("max_premium_confirmation_candle_age_seconds", "data_quality", "premium candle freshness gate", True, "option_premium_confirmation_service.py", "OptionPremiumConfirmationService", "generic"),
-            ("option_quote_premium_mismatch_tolerance_pct", "data_quality", "quote/candle mismatch gate", True, "scanner_service.py", "ScannerService", "generic"),
-            ("min_day_type_score", "entry", "day-type filter threshold", True, "day_type_service.py", "DayTypeService", "generic"),
-            ("opening_range_minutes", "entry", "opening range classification window", True, "day_type_service.py", "DayTypeService", "generic"),
-            ("min_banknifty_regime_score", "entry", "Bank Nifty regime hard gate", True, "banknifty_regime_filter_service.py", "BankNiftyRegimeFilterService", "banknifty"),
-            ("banknifty_significant_gap_pct", "entry", "gap day context threshold", True, "banknifty_regime_filter_service.py", "BankNiftyRegimeFilterService", "banknifty"),
-            ("banknifty_compression_day_range_pct", "entry", "range compression threshold", True, "banknifty_regime_filter_service.py", "BankNiftyRegimeFilterService", "banknifty"),
-            ("banknifty_late_trade_cutoff_time", "entry", "late-day decay period start", True, "banknifty_regime_filter_service.py", "BankNiftyRegimeFilterService", "banknifty"),
-            ("banknifty_late_trade_min_premium_score", "entry", "late-day premium quality requirement", True, "banknifty_regime_filter_service.py", "BankNiftyRegimeFilterService", "banknifty"),
-            ("banknifty_expiry_min_premium_score", "entry", "expiry-day premium quality requirement", True, "banknifty_regime_filter_service.py", "BankNiftyRegimeFilterService", "banknifty"),
-            ("banknifty_top_bank_min_alignment", "entry", "top-bank alignment threshold", True, "banknifty_intelligence_service.py", "BankNiftyIntelligenceService", "banknifty"),
-            ("banknifty_top_bank_min_direction_count", "entry", "minimum aligned top-bank count", True, "banknifty_intelligence_service.py", "BankNiftyIntelligenceService", "banknifty"),
-            ("banknifty_expected_move_min_coverage", "entry", "expected move coverage threshold", True, "banknifty_intelligence_service.py", "BankNiftyIntelligenceService", "banknifty"),
-            ("min_volatility_edge_score", "entry", "volatility-edge score threshold", True, "volatility_edge_service.py", "VolatilityEdgeService", "banknifty"),
-            ("vol_edge_min_expected_move_coverage", "entry", "IV/ATR expected move coverage", True, "volatility_edge_service.py", "VolatilityEdgeService", "banknifty"),
-            ("vol_edge_max_iv_to_rv_ratio_for_buy", "entry", "overpriced IV vs realized-vol guard", True, "volatility_edge_service.py", "VolatilityEdgeService", "banknifty"),
-            ("max_entry_chase_pct", "entry_timing", "rejects chasing far above trigger", True, "entry_timing_service.py", "EntryTimingService", "generic"),
-            ("max_premium_move_from_base_pct", "entry_timing", "rejects overextended premium", True, "entry_timing_service.py", "EntryTimingService", "generic"),
-            ("min_remaining_risk_reward", "entry_timing", "blocks compressed post-breakout RR", True, "entry_timing_service.py", "EntryTimingService", "generic"),
-            ("min_target1_room_pct", "entry_timing", "requires target-1 room after entry", True, "entry_timing_service.py", "EntryTimingService", "generic"),
-            ("entry_armed_distance_to_trigger_pct", "entry_timing", "classifies setup as armed near trigger", True, "entry_timing_service.py", "EntryTimingService", "generic"),
-            ("min_entry_expected_move_coverage", "entry_timing", "entry timing expected move guard", True, "entry_timing_service.py", "EntryTimingService", "generic"),
-            ("min_entry_room_to_level_pct", "entry_timing", "entry timing room-to-level guard", True, "entry_timing_service.py", "EntryTimingService", "generic"),
-            ("option_time_stop_minutes", "exit", "time-stop duration", True, "trade_exit_service.py", "TradeExitService", "generic"),
-            ("option_time_stop_min_move_pct", "exit", "time-stop minimum progress", True, "trade_exit_service.py", "TradeExitService", "generic"),
-            ("option_trailing_stop_lock_pct", "exit", "trailing stop lock after target reach", True, "trade_exit_service.py", "TradeExitService", "generic"),
-            ("exit_open_trades_before_close_minutes", "exit", "near-close square-off window", True, "trade_exit_service.py", "TradeExitService", "generic"),
+            (
+                "min_signal_score",
+                "entry",
+                "blocks entry below minimum score",
+                True,
+                "scanner_service.py",
+                "ScannerService",
+                "generic",
+            ),
+            (
+                "min_market_regime_score",
+                "entry",
+                "blocks weak market-regime score",
+                True,
+                "scanner_service.py",
+                "ScannerService",
+                "generic",
+            ),
+            (
+                "min_price_action_score",
+                "entry",
+                "blocks weak price-action score",
+                True,
+                "scanner_service.py",
+                "ScannerService",
+                "generic",
+            ),
+            (
+                "min_option_chain_score",
+                "entry",
+                "blocks weak option-chain score",
+                True,
+                "scanner_service.py",
+                "ScannerService",
+                "generic",
+            ),
+            (
+                "min_option_liquidity_score",
+                "option_selection",
+                "blocks low option-liquidity score",
+                True,
+                "trade_setup_service.py",
+                "TradeSetupService.risk_checks",
+                "generic",
+            ),
+            (
+                "max_bid_ask_spread_pct",
+                "option_selection",
+                "rejects wide bid/ask spread",
+                True,
+                "trade_setup_service.py",
+                "TradeSetupService.risk_checks",
+                "generic",
+            ),
+            (
+                "min_option_volume",
+                "option_selection",
+                "rejects low option volume",
+                True,
+                "trade_setup_service.py",
+                "TradeSetupService.risk_checks",
+                "generic",
+            ),
+            (
+                "min_option_oi",
+                "option_selection",
+                "rejects low option open interest",
+                True,
+                "trade_setup_service.py",
+                "TradeSetupService.risk_checks",
+                "generic",
+            ),
+            (
+                "min_option_buy_premium",
+                "option_selection",
+                "rejects very low option premium",
+                True,
+                "trade_setup_service.py",
+                "TradeSetupService.risk_checks",
+                "generic",
+            ),
+            (
+                "min_option_quality_score",
+                "option_selection",
+                "blocks poor Greeks/quality score",
+                True,
+                "option_quality_service.py",
+                "OptionQualityService",
+                "generic",
+            ),
+            (
+                "min_option_buy_delta",
+                "option_selection",
+                "option buying delta lower bound",
+                True,
+                "option_quality_service.py",
+                "OptionQualityService",
+                "generic",
+            ),
+            (
+                "max_option_buy_delta",
+                "option_selection",
+                "option buying delta upper bound",
+                True,
+                "option_quality_service.py",
+                "OptionQualityService",
+                "generic",
+            ),
+            (
+                "max_option_buy_theta_pct",
+                "option_selection",
+                "rejects excessive theta decay",
+                True,
+                "option_quality_service.py",
+                "OptionQualityService",
+                "generic",
+            ),
+            (
+                "min_option_buy_iv",
+                "option_selection",
+                "option IV lower bound",
+                True,
+                "option_quality_service.py",
+                "OptionQualityService",
+                "generic",
+            ),
+            (
+                "max_option_buy_iv",
+                "option_selection",
+                "option IV upper bound",
+                True,
+                "option_quality_service.py",
+                "OptionQualityService",
+                "generic",
+            ),
+            (
+                "min_risk_reward",
+                "risk",
+                "blocks poor risk-reward setup",
+                True,
+                "scanner_service.py",
+                "ScannerService",
+                "generic",
+            ),
+            (
+                "max_risk_per_trade_pct",
+                "risk",
+                "position sizing risk cap",
+                True,
+                "trade_setup_service.py",
+                "TradeSetupService.position_size",
+                "generic",
+            ),
+            (
+                "max_option_premium_pct",
+                "risk",
+                "budget cap for live option premium",
+                True,
+                "trade_setup_service.py",
+                "TradeSetupService.risk_checks",
+                "generic",
+            ),
+            (
+                "max_daily_loss_pct",
+                "risk",
+                "daily loss guard",
+                True,
+                "risk_service.py",
+                "RiskService",
+                "generic",
+            ),
+            (
+                "max_trades_per_day",
+                "risk",
+                "daily trade-count guard",
+                True,
+                "risk_service.py",
+                "RiskService",
+                "generic",
+            ),
+            (
+                "max_stop_losses_per_day",
+                "risk",
+                "daily stop-loss guard",
+                True,
+                "risk_service.py",
+                "RiskService",
+                "generic",
+            ),
+            (
+                "max_open_trades",
+                "risk",
+                "open trade limit",
+                True,
+                "risk_service.py",
+                "RiskService",
+                "generic",
+            ),
+            (
+                "min_option_premium_confirmation_score",
+                "entry",
+                "premium confirmation hard gate",
+                True,
+                "option_premium_confirmation_service.py",
+                "OptionPremiumConfirmationService",
+                "generic",
+            ),
+            (
+                "option_premium_lookback_candles",
+                "entry",
+                "premium confirmation lookback",
+                True,
+                "option_premium_confirmation_service.py",
+                "OptionPremiumConfirmationService",
+                "generic",
+            ),
+            (
+                "max_premium_confirmation_candle_age_seconds",
+                "data_quality",
+                "premium candle freshness gate",
+                True,
+                "option_premium_confirmation_service.py",
+                "OptionPremiumConfirmationService",
+                "generic",
+            ),
+            (
+                "option_quote_premium_mismatch_tolerance_pct",
+                "data_quality",
+                "quote/candle mismatch gate",
+                True,
+                "scanner_service.py",
+                "ScannerService",
+                "generic",
+            ),
+            (
+                "min_day_type_score",
+                "entry",
+                "day-type filter threshold",
+                True,
+                "day_type_service.py",
+                "DayTypeService",
+                "generic",
+            ),
+            (
+                "opening_range_minutes",
+                "entry",
+                "opening range classification window",
+                True,
+                "day_type_service.py",
+                "DayTypeService",
+                "generic",
+            ),
+            (
+                "min_banknifty_regime_score",
+                "entry",
+                "Bank Nifty regime hard gate",
+                True,
+                "banknifty_regime_filter_service.py",
+                "BankNiftyRegimeFilterService",
+                "banknifty",
+            ),
+            (
+                "banknifty_significant_gap_pct",
+                "entry",
+                "gap day context threshold",
+                True,
+                "banknifty_regime_filter_service.py",
+                "BankNiftyRegimeFilterService",
+                "banknifty",
+            ),
+            (
+                "banknifty_compression_day_range_pct",
+                "entry",
+                "range compression threshold",
+                True,
+                "banknifty_regime_filter_service.py",
+                "BankNiftyRegimeFilterService",
+                "banknifty",
+            ),
+            (
+                "banknifty_late_trade_cutoff_time",
+                "entry",
+                "late-day decay period start",
+                True,
+                "banknifty_regime_filter_service.py",
+                "BankNiftyRegimeFilterService",
+                "banknifty",
+            ),
+            (
+                "banknifty_late_trade_min_premium_score",
+                "entry",
+                "late-day premium quality requirement",
+                True,
+                "banknifty_regime_filter_service.py",
+                "BankNiftyRegimeFilterService",
+                "banknifty",
+            ),
+            (
+                "banknifty_expiry_min_premium_score",
+                "entry",
+                "expiry-day premium quality requirement",
+                True,
+                "banknifty_regime_filter_service.py",
+                "BankNiftyRegimeFilterService",
+                "banknifty",
+            ),
+            (
+                "banknifty_top_bank_min_alignment",
+                "entry",
+                "top-bank alignment threshold",
+                True,
+                "banknifty_intelligence_service.py",
+                "BankNiftyIntelligenceService",
+                "banknifty",
+            ),
+            (
+                "banknifty_top_bank_min_direction_count",
+                "entry",
+                "minimum aligned top-bank count",
+                True,
+                "banknifty_intelligence_service.py",
+                "BankNiftyIntelligenceService",
+                "banknifty",
+            ),
+            (
+                "banknifty_expected_move_min_coverage",
+                "entry",
+                "expected move coverage threshold",
+                True,
+                "banknifty_intelligence_service.py",
+                "BankNiftyIntelligenceService",
+                "banknifty",
+            ),
+            (
+                "min_volatility_edge_score",
+                "entry",
+                "volatility-edge score threshold",
+                True,
+                "volatility_edge_service.py",
+                "VolatilityEdgeService",
+                "banknifty",
+            ),
+            (
+                "vol_edge_min_expected_move_coverage",
+                "entry",
+                "IV/ATR expected move coverage",
+                True,
+                "volatility_edge_service.py",
+                "VolatilityEdgeService",
+                "banknifty",
+            ),
+            (
+                "vol_edge_max_iv_to_rv_ratio_for_buy",
+                "entry",
+                "overpriced IV vs realized-vol guard",
+                True,
+                "volatility_edge_service.py",
+                "VolatilityEdgeService",
+                "banknifty",
+            ),
+            (
+                "max_entry_chase_pct",
+                "entry_timing",
+                "rejects chasing far above trigger",
+                True,
+                "entry_timing_service.py",
+                "EntryTimingService",
+                "generic",
+            ),
+            (
+                "max_premium_move_from_base_pct",
+                "entry_timing",
+                "rejects overextended premium",
+                True,
+                "entry_timing_service.py",
+                "EntryTimingService",
+                "generic",
+            ),
+            (
+                "min_remaining_risk_reward",
+                "entry_timing",
+                "blocks compressed post-breakout RR",
+                True,
+                "entry_timing_service.py",
+                "EntryTimingService",
+                "generic",
+            ),
+            (
+                "min_target1_room_pct",
+                "entry_timing",
+                "requires target-1 room after entry",
+                True,
+                "entry_timing_service.py",
+                "EntryTimingService",
+                "generic",
+            ),
+            (
+                "entry_armed_distance_to_trigger_pct",
+                "entry_timing",
+                "classifies setup as armed near trigger",
+                True,
+                "entry_timing_service.py",
+                "EntryTimingService",
+                "generic",
+            ),
+            (
+                "min_entry_expected_move_coverage",
+                "entry_timing",
+                "entry timing expected move guard",
+                True,
+                "entry_timing_service.py",
+                "EntryTimingService",
+                "generic",
+            ),
+            (
+                "min_entry_room_to_level_pct",
+                "entry_timing",
+                "entry timing room-to-level guard",
+                True,
+                "entry_timing_service.py",
+                "EntryTimingService",
+                "generic",
+            ),
+            (
+                "option_time_stop_minutes",
+                "exit",
+                "time-stop duration",
+                True,
+                "trade_exit_service.py",
+                "TradeExitService",
+                "generic",
+            ),
+            (
+                "option_time_stop_min_move_pct",
+                "exit",
+                "time-stop minimum progress",
+                True,
+                "trade_exit_service.py",
+                "TradeExitService",
+                "generic",
+            ),
+            (
+                "option_trailing_stop_lock_pct",
+                "exit",
+                "trailing stop lock after target reach",
+                True,
+                "trade_exit_service.py",
+                "TradeExitService",
+                "generic",
+            ),
+            (
+                "exit_open_trades_before_close_minutes",
+                "exit",
+                "near-close square-off window",
+                True,
+                "trade_exit_service.py",
+                "TradeExitService",
+                "generic",
+            ),
         ]
         inventory = []
         for name, category, decision, tracked, file_name, function_name, scope in items:
             inventory.append(
                 {
-                    "file_path": f"app/services/{file_name}" if file_name != "scanner_service.py" else "app/services/scanner_service.py",
+                    "file_path": f"app/services/{file_name}"
+                    if file_name != "scanner_service.py"
+                    else "app/services/scanner_service.py",
                     "class_or_function": function_name,
                     "threshold_name": name,
                     "current_value": getattr(settings, name, None),
@@ -795,19 +1604,50 @@ class ProfessionalInsightsService:
     ) -> dict[str, Any]:
         return {
             "accepted_vs_rejected": bool(opportunities or rejections),
-            "score_at_decision_time": any(getattr(row, "score", None) is not None for row in [*opportunities, *rejections]),
-            "setup_family": any(self._setup_family(row) != "unknown_setup" for row in [*opportunities, *rejections, *trades]),
+            "score_at_decision_time": any(
+                getattr(row, "score", None) is not None
+                for row in [*opportunities, *rejections]
+            ),
+            "setup_family": any(
+                self._setup_family(row) != "unknown_setup"
+                for row in [*opportunities, *rejections, *trades]
+            ),
             "rejection_reason": any(row.reasons_json for row in rejections),
-            "entry_reason": any(self._row_factor_scores(row) for row in [*opportunities, *trades]),
+            "entry_reason": any(
+                self._row_factor_scores(row) for row in [*opportunities, *trades]
+            ),
             "exit_reason": any(row.outcome for row in trades),
-            "time_bucket": any(row.created_at for row in [*opportunities, *rejections, *trades]),
-            "expiry_bucket": any(getattr(row, "expiry", None) for row in [*opportunities, *rejections]),
-            "trend_or_regime_bucket": any(self._trend_regime(row) != "unknown_trend_regime" for row in [*opportunities, *rejections, *trades]),
-            "spread_volume_oi": any(self._has_option_quality_payload(row) for row in [*opportunities, *rejections]),
-            "premium_confirmation_state": any(self._nested(self._row_factor_scores(row), "option_premium_confirmation") for row in [*opportunities, *rejections, *trades]),
-            "risk_reward": any(float(getattr(row, "risk_reward", 0.0) or 0.0) > 0 for row in opportunities),
-            "realized_pnl": any(self._accepted_value(row) != 0 for row in [*opportunities, *trades]),
-            "mfe_mae": any(row.mfe_points is not None or row.mae_points is not None for row in trades),
+            "time_bucket": any(
+                row.created_at for row in [*opportunities, *rejections, *trades]
+            ),
+            "expiry_bucket": any(
+                getattr(row, "expiry", None) for row in [*opportunities, *rejections]
+            ),
+            "trend_or_regime_bucket": any(
+                self._trend_regime(row) != "unknown_trend_regime"
+                for row in [*opportunities, *rejections, *trades]
+            ),
+            "spread_volume_oi": any(
+                self._has_option_quality_payload(row)
+                for row in [*opportunities, *rejections]
+            ),
+            "premium_confirmation_state": any(
+                self._nested(
+                    self._row_factor_scores(row), "option_premium_confirmation"
+                )
+                for row in [*opportunities, *rejections, *trades]
+            ),
+            "risk_reward": any(
+                float(getattr(row, "risk_reward", 0.0) or 0.0) > 0
+                for row in opportunities
+            ),
+            "realized_pnl": any(
+                self._accepted_value(row) != 0 for row in [*opportunities, *trades]
+            ),
+            "mfe_mae": any(
+                row.mfe_points is not None or row.mae_points is not None
+                for row in trades
+            ),
             "net_pnl_after_costs": any(row.net_pnl is not None for row in trades),
         }
 
@@ -820,26 +1660,48 @@ class ProfessionalInsightsService:
         min_score = float(settings.min_signal_score)
         buckets = {
             "below_threshold": lambda score: score < max(0.0, min_score - 5),
-            "just_below_threshold": lambda score: max(0.0, min_score - 5) <= score < min_score,
+            "just_below_threshold": lambda score: (
+                max(0.0, min_score - 5) <= score < min_score
+            ),
             "just_above_threshold": lambda score: min_score <= score < min_score + 5,
             "high_score": lambda score: min_score + 5 <= score < min_score + 15,
             "very_high_score": lambda score: score >= min_score + 15,
         }
         report: dict[str, Any] = {}
         for label, predicate in buckets.items():
-            decisions = [row for row in decision_rows if predicate(self._row_score(row))]
+            decisions = [
+                row for row in decision_rows if predicate(self._row_score(row))
+            ]
             accepted = [row for row in accepted_rows if predicate(self._row_score(row))]
-            rejected = [row for row in reviewed_rejections if predicate(self._row_score(row))]
-            values = [self._accepted_value(row) for row in accepted] + [self._rejected_move_value(row) for row in rejected]
-            outcomes = [getattr(row, "outcome", None) for row in accepted] + [row.later_outcome for row in rejected]
+            rejected = [
+                row for row in reviewed_rejections if predicate(self._row_score(row))
+            ]
+            values = [self._accepted_value(row) for row in accepted] + [
+                self._rejected_move_value(row) for row in rejected
+            ]
+            outcomes = [getattr(row, "outcome", None) for row in accepted] + [
+                row.later_outcome for row in rejected
+            ]
             report[label] = {
                 "score_range": self._score_bucket_range(label, min_score),
                 "total_opportunities": len(decisions),
-                "accepted_count": len([row for row in decisions if isinstance(row, OpportunityRecord)]),
-                "rejected_count": len([row for row in decisions if isinstance(row, RejectedOpportunityRecord)]),
+                "accepted_count": len(
+                    [row for row in decisions if isinstance(row, OpportunityRecord)]
+                ),
+                "rejected_count": len(
+                    [
+                        row
+                        for row in decisions
+                        if isinstance(row, RejectedOpportunityRecord)
+                    ]
+                ),
                 **self._summary_from_values(values, outcomes),
-                "mfe_mae": self._mfe_mae_summary([row for row in accepted if isinstance(row, TradeRecord)]),
-                "verdict": self._verdict_from_summary(len(values), self._summary_from_values(values, outcomes)),
+                "mfe_mae": self._mfe_mae_summary(
+                    [row for row in accepted if isinstance(row, TradeRecord)]
+                ),
+                "verdict": self._verdict_from_summary(
+                    len(values), self._summary_from_values(values, outcomes)
+                ),
             }
         return {
             "current_min_signal_score": settings.min_signal_score,
@@ -856,10 +1718,14 @@ class ProfessionalInsightsService:
         }
         return ranges.get(label, "unknown")
 
-    def _rejection_threshold_validation(self, rejections: list[RejectedOpportunityRecord]) -> dict[str, Any]:
+    def _rejection_threshold_validation(
+        self, rejections: list[RejectedOpportunityRecord]
+    ) -> dict[str, Any]:
         groups: dict[str, list[RejectedOpportunityRecord]] = defaultdict(list)
         for row in rejections:
-            labels = self._json_list(row.reasons_json) or [str(row.primary_gate or "unknown_gate")]
+            labels = self._json_list(row.reasons_json) or [
+                str(row.primary_gate or "unknown_gate")
+            ]
             for label in labels:
                 groups[self._clean_label(label)].append(row)
         rows = []
@@ -868,8 +1734,13 @@ class ProfessionalInsightsService:
             missed = [row for row in reviewed if self._is_win(row.later_outcome)]
             saved = [row for row in reviewed if self._is_loss(row.later_outcome)]
             missed_pnl = sum(max(0.0, self._rejected_move_value(row)) for row in missed)
-            saved_pnl = abs(sum(min(0.0, self._rejected_move_value(row)) for row in saved))
-            summary = self._summary_from_values([self._rejected_move_value(row) for row in reviewed], [row.later_outcome for row in reviewed])
+            saved_pnl = abs(
+                sum(min(0.0, self._rejected_move_value(row)) for row in saved)
+            )
+            summary = self._summary_from_values(
+                [self._rejected_move_value(row) for row in reviewed],
+                [row.later_outcome for row in reviewed],
+            )
             rows.append(
                 {
                     "gate_or_reason": label,
@@ -880,75 +1751,144 @@ class ProfessionalInsightsService:
                     "estimated_pnl_missed": round(missed_pnl, 2),
                     "estimated_pnl_saved": round(saved_pnl, 2),
                     "summary_if_rejected_had_been_taken": summary,
-                    "usefulness": self._filter_usefulness(len(reviewed), len(missed), len(saved), missed_pnl, saved_pnl),
+                    "usefulness": self._filter_usefulness(
+                        len(reviewed), len(missed), len(saved), missed_pnl, saved_pnl
+                    ),
                 }
             )
         return {
-            "rows": sorted(rows, key=lambda row: (-int(row["rejected_count"]), str(row["gate_or_reason"]))),
+            "rows": sorted(
+                rows,
+                key=lambda row: (
+                    -int(row["rejected_count"]),
+                    str(row["gate_or_reason"]),
+                ),
+            ),
             "note": "P&L saved/missed is a proxy unless later_exit_price is populated for rejected rows.",
         }
 
-    def _setup_family_threshold_validation(self, accepted_rows: list[Any], rejections: list[RejectedOpportunityRecord]) -> dict[str, Any]:
-        keys = sorted({self._setup_family(row) for row in [*accepted_rows, *rejections]})
+    def _setup_family_threshold_validation(
+        self, accepted_rows: list[Any], rejections: list[RejectedOpportunityRecord]
+    ) -> dict[str, Any]:
+        keys = sorted(
+            {self._setup_family(row) for row in [*accepted_rows, *rejections]}
+        )
         report: dict[str, Any] = {}
         for key in keys:
             accepted = [row for row in accepted_rows if self._setup_family(row) == key]
             rejected = [row for row in rejections if self._setup_family(row) == key]
             reviewed = [row for row in rejected if row.later_outcome]
-            values = [self._accepted_value(row) for row in accepted] + [self._rejected_move_value(row) for row in reviewed]
-            outcomes = [getattr(row, "outcome", None) for row in accepted] + [row.later_outcome for row in reviewed]
+            values = [self._accepted_value(row) for row in accepted] + [
+                self._rejected_move_value(row) for row in reviewed
+            ]
+            outcomes = [getattr(row, "outcome", None) for row in accepted] + [
+                row.later_outcome for row in reviewed
+            ]
             report[key] = {
                 "total_opportunities": len(accepted) + len(rejected),
                 "accepted_trades": len(accepted),
                 "rejected_opportunities": len(rejected),
                 **self._summary_from_values(values, outcomes),
-                "mfe_mae": self._mfe_mae_summary([row for row in accepted if isinstance(row, TradeRecord)]),
-                "best_score_range": self._best_group(accepted, lambda row: score_bucket(self._row_score(row))),
-                "worst_score_range": self._worst_group(accepted, lambda row: score_bucket(self._row_score(row))),
-                "best_time_window": self._best_group(accepted, lambda row: time_bucket(getattr(row, "created_at", None))),
-                "worst_time_window": self._worst_group(accepted, lambda row: time_bucket(getattr(row, "created_at", None))),
-                "expiry_day": self._summary_for_rows([row for row in accepted if self._dte_bucket(row) == "expiry_day"]),
-                "non_expiry": self._summary_for_rows([row for row in accepted if self._dte_bucket(row) != "expiry_day"]),
+                "mfe_mae": self._mfe_mae_summary(
+                    [row for row in accepted if isinstance(row, TradeRecord)]
+                ),
+                "best_score_range": self._best_group(
+                    accepted, lambda row: score_bucket(self._row_score(row))
+                ),
+                "worst_score_range": self._worst_group(
+                    accepted, lambda row: score_bucket(self._row_score(row))
+                ),
+                "best_time_window": self._best_group(
+                    accepted, lambda row: time_bucket(getattr(row, "created_at", None))
+                ),
+                "worst_time_window": self._worst_group(
+                    accepted, lambda row: time_bucket(getattr(row, "created_at", None))
+                ),
+                "expiry_day": self._summary_for_rows(
+                    [row for row in accepted if self._dte_bucket(row) == "expiry_day"]
+                ),
+                "non_expiry": self._summary_for_rows(
+                    [row for row in accepted if self._dte_bucket(row) != "expiry_day"]
+                ),
                 "strictness_verdict": self._strictness_verdict(accepted, reviewed),
             }
         return report
 
-    def _time_and_regime_validation(self, accepted_rows: list[Any], reviewed_rejections: list[RejectedOpportunityRecord]) -> dict[str, Any]:
+    def _time_and_regime_validation(
+        self,
+        accepted_rows: list[Any],
+        reviewed_rejections: list[RejectedOpportunityRecord],
+    ) -> dict[str, Any]:
         return {
-            "time_buckets": self._segment_report(accepted_rows, reviewed_rejections, lambda row: time_bucket(getattr(row, "created_at", None))),
-            "opening_windows": self._segment_report(accepted_rows, reviewed_rejections, self._opening_window_bucket),
-            "expiry": self._segment_report(accepted_rows, reviewed_rejections, self._dte_bucket),
-            "trend_regime": self._segment_report(accepted_rows, reviewed_rejections, self._trend_regime),
-            "iv_regime": self._segment_report(accepted_rows, reviewed_rejections, self._iv_regime),
+            "time_buckets": self._segment_report(
+                accepted_rows,
+                reviewed_rejections,
+                lambda row: time_bucket(getattr(row, "created_at", None)),
+            ),
+            "opening_windows": self._segment_report(
+                accepted_rows, reviewed_rejections, self._opening_window_bucket
+            ),
+            "expiry": self._segment_report(
+                accepted_rows, reviewed_rejections, self._dte_bucket
+            ),
+            "trend_regime": self._segment_report(
+                accepted_rows, reviewed_rejections, self._trend_regime
+            ),
+            "iv_regime": self._segment_report(
+                accepted_rows, reviewed_rejections, self._iv_regime
+            ),
         }
 
-    def _score_sensitivity(self, decision_rows: list[Any], accepted_rows: list[Any], reviewed_rejections: list[RejectedOpportunityRecord]) -> list[dict[str, Any]]:
+    def _score_sensitivity(
+        self,
+        decision_rows: list[Any],
+        accepted_rows: list[Any],
+        reviewed_rejections: list[RejectedOpportunityRecord],
+    ) -> list[dict[str, Any]]:
         candidates = [60, 65, 70, 75, 80, 85, int(settings.min_signal_score)]
         rows = []
         for candidate in sorted(set(candidates)):
-            accepted = [row for row in accepted_rows if self._row_score(row) >= candidate]
-            rejected = [row for row in reviewed_rejections if self._row_score(row) >= candidate]
-            values = [self._accepted_value(row) for row in accepted] + [self._rejected_move_value(row) for row in rejected]
-            outcomes = [getattr(row, "outcome", None) for row in accepted] + [row.later_outcome for row in rejected]
+            accepted = [
+                row for row in accepted_rows if self._row_score(row) >= candidate
+            ]
+            rejected = [
+                row for row in reviewed_rejections if self._row_score(row) >= candidate
+            ]
+            values = [self._accepted_value(row) for row in accepted] + [
+                self._rejected_move_value(row) for row in rejected
+            ]
+            outcomes = [getattr(row, "outcome", None) for row in accepted] + [
+                row.later_outcome for row in rejected
+            ]
             summary = self._summary_from_values(values, outcomes)
             rows.append(
                 {
                     "candidate_min_score": candidate,
                     "current_live_value": candidate == int(settings.min_signal_score),
-                    "decision_rows_at_or_above": len([row for row in decision_rows if self._row_score(row) >= candidate]),
+                    "decision_rows_at_or_above": len(
+                        [
+                            row
+                            for row in decision_rows
+                            if self._row_score(row) >= candidate
+                        ]
+                    ),
                     "trade_count": summary["trades"],
                     "win_rate_pct": summary["win_rate_pct"],
                     "net_expectancy": summary["expectancy"],
                     "profit_factor": summary["profit_factor"],
                     "drawdown": summary["max_drawdown"],
-                    "average_trade_quality": self._average_score([*accepted, *rejected]),
+                    "average_trade_quality": self._average_score(
+                        [*accepted, *rejected]
+                    ),
                     "sample_enough": summary["trades"] >= 30,
                     "verdict": self._verdict_from_summary(summary["trades"], summary),
                 }
             )
         return rows
 
-    def _threshold_verdicts(self, accepted_rows: list[Any], rejections: list[RejectedOpportunityRecord]) -> list[dict[str, Any]]:
+    def _threshold_verdicts(
+        self, accepted_rows: list[Any], rejections: list[RejectedOpportunityRecord]
+    ) -> list[dict[str, Any]]:
         score_summary = self._summary_for_rows(accepted_rows)
         rejected_reviewed = [row for row in rejections if row.later_outcome]
         return [
@@ -956,15 +1896,21 @@ class ProfessionalInsightsService:
                 "threshold_name": "min_signal_score",
                 "current_value": settings.min_signal_score,
                 "sample_size": score_summary["trades"],
-                "verdict": self._verdict_from_summary(score_summary["trades"], score_summary),
+                "verdict": self._verdict_from_summary(
+                    score_summary["trades"], score_summary
+                ),
                 "reason": "Based on closed accepted trades and reviewed rejected setups around score buckets.",
-                "recommended_action": "monitor longer" if score_summary["trades"] < 30 else "keep unchanged until sensitivity shows stable improvement",
+                "recommended_action": "monitor longer"
+                if score_summary["trades"] < 30
+                else "keep unchanged until sensitivity shows stable improvement",
             },
             {
                 "threshold_name": "rejection_gates",
                 "current_value": "multiple",
                 "sample_size": len(rejected_reviewed),
-                "verdict": "NOT_ENOUGH_DATA" if len(rejected_reviewed) < 30 else "INCONCLUSIVE",
+                "verdict": "NOT_ENOUGH_DATA"
+                if len(rejected_reviewed) < 30
+                else "INCONCLUSIVE",
                 "reason": "Needs rejected-opportunity later outcomes before filters can be proven useful or harmful.",
                 "recommended_action": "run rejected-outcome evaluation after sessions",
             },
@@ -977,32 +1923,68 @@ class ProfessionalInsightsService:
         trades: list[TradeRecord],
     ) -> list[dict[str, str]]:
         missing = []
-        if not any(self._has_option_quality_payload(row) for row in [*opportunities, *rejections]):
-            missing.append({"threshold_area": "spread_volume_oi", "reason": "option quality/liquidity payload missing in older factor JSON rows"})
+        if not any(
+            self._has_option_quality_payload(row)
+            for row in [*opportunities, *rejections]
+        ):
+            missing.append(
+                {
+                    "threshold_area": "spread_volume_oi",
+                    "reason": "option quality/liquidity payload missing in older factor JSON rows",
+                }
+            )
         if not any(row.later_outcome for row in rejections):
-            missing.append({"threshold_area": "rejected_trade_later_outcome", "reason": "rejected opportunities need later_outcome before filter usefulness can be validated"})
+            missing.append(
+                {
+                    "threshold_area": "rejected_trade_later_outcome",
+                    "reason": "rejected opportunities need later_outcome before filter usefulness can be validated",
+                }
+            )
         if not any(row.mfe_points is not None for row in trades):
-            missing.append({"threshold_area": "mfe_mae", "reason": "older trades predate first-class MFE/MAE tracking"})
+            missing.append(
+                {
+                    "threshold_area": "mfe_mae",
+                    "reason": "older trades predate first-class MFE/MAE tracking",
+                }
+            )
         return missing
 
     def _mfe_mae_summary(self, rows: list[TradeRecord]) -> dict[str, Any]:
-        tracked = [row for row in rows if row.mfe_points is not None or row.mae_points is not None]
+        tracked = [
+            row
+            for row in rows
+            if row.mfe_points is not None or row.mae_points is not None
+        ]
         mfe_points = [float(row.mfe_points or 0.0) for row in tracked]
         mae_points = [float(row.mae_points or 0.0) for row in tracked]
         mfe_pct = [float(row.mfe_percent or 0.0) for row in tracked]
         mae_pct = [float(row.mae_percent or 0.0) for row in tracked]
-        captured = [value for row in tracked if (value := self._captured_mfe_percent(row)) is not None]
+        captured = [
+            value
+            for row in tracked
+            if (value := self._captured_mfe_percent(row)) is not None
+        ]
         by_setup: dict[str, list[TradeRecord]] = defaultdict(list)
         for row in tracked:
             by_setup[self._setup_family(row)].append(row)
         return {
             "tracked_trades": len(tracked),
             "missing_trades": len(rows) - len(tracked),
-            "avg_mfe_points": round(sum(mfe_points) / len(mfe_points), 3) if mfe_points else 0.0,
-            "avg_mae_points": round(sum(mae_points) / len(mae_points), 3) if mae_points else 0.0,
-            "avg_mfe_percent": round(sum(mfe_pct) / len(mfe_pct), 3) if mfe_pct else 0.0,
-            "avg_mae_percent": round(sum(mae_pct) / len(mae_pct), 3) if mae_pct else 0.0,
-            "avg_captured_mfe_percent": round(sum(captured) / len(captured), 3) if captured else 0.0,
+            "avg_mfe_points": round(sum(mfe_points) / len(mfe_points), 3)
+            if mfe_points
+            else 0.0,
+            "avg_mae_points": round(sum(mae_points) / len(mae_points), 3)
+            if mae_points
+            else 0.0,
+            "avg_mfe_percent": round(sum(mfe_pct) / len(mfe_pct), 3)
+            if mfe_pct
+            else 0.0,
+            "avg_mae_percent": round(sum(mae_pct) / len(mae_pct), 3)
+            if mae_pct
+            else 0.0,
+            "avg_captured_mfe_percent": round(sum(captured) / len(captured), 3)
+            if captured
+            else 0.0,
             "by_setup_family": {
                 key: self._mfe_mae_group_summary(items)
                 for key, items in sorted(by_setup.items())
@@ -1010,12 +1992,26 @@ class ProfessionalInsightsService:
         }
 
     def _mfe_mae_group_summary(self, rows: list[TradeRecord]) -> dict[str, Any]:
-        captured = [value for row in rows if (value := self._captured_mfe_percent(row)) is not None]
+        captured = [
+            value
+            for row in rows
+            if (value := self._captured_mfe_percent(row)) is not None
+        ]
         return {
             "trades": len(rows),
-            "avg_mfe_percent": round(sum(float(row.mfe_percent or 0.0) for row in rows) / len(rows), 3) if rows else 0.0,
-            "avg_mae_percent": round(sum(float(row.mae_percent or 0.0) for row in rows) / len(rows), 3) if rows else 0.0,
-            "avg_captured_mfe_percent": round(sum(captured) / len(captured), 3) if captured else 0.0,
+            "avg_mfe_percent": round(
+                sum(float(row.mfe_percent or 0.0) for row in rows) / len(rows), 3
+            )
+            if rows
+            else 0.0,
+            "avg_mae_percent": round(
+                sum(float(row.mae_percent or 0.0) for row in rows) / len(rows), 3
+            )
+            if rows
+            else 0.0,
+            "avg_captured_mfe_percent": round(sum(captured) / len(captured), 3)
+            if captured
+            else 0.0,
         }
 
     def _captured_mfe_percent(self, row: TradeRecord) -> float | None:
@@ -1053,13 +2049,17 @@ class ProfessionalInsightsService:
             result.append(row)
         return result
 
-    def _filter_trades_by_mode(self, trades: list[TradeRecord], mode: str) -> list[TradeRecord]:
+    def _filter_trades_by_mode(
+        self, trades: list[TradeRecord], mode: str
+    ) -> list[TradeRecord]:
         normalized = str(mode or "all").lower()
         if normalized in {"all", ""}:
             return trades
         if normalized == "shadow":
             return [trade for trade in trades if self._is_shadow_trade(trade)]
-        return [trade for trade in trades if str(trade.mode or "").lower() == normalized]
+        return [
+            trade for trade in trades if str(trade.mode or "").lower() == normalized
+        ]
 
     def _row_score(self, row: Any) -> float:
         score = getattr(row, "score", None)
@@ -1085,14 +2085,23 @@ class ProfessionalInsightsService:
     def _worst_group(self, rows: list[Any], key_fn: Any) -> dict[str, Any] | None:
         return self._rank_group(rows, key_fn, reverse=False)
 
-    def _rank_group(self, rows: list[Any], key_fn: Any, *, reverse: bool) -> dict[str, Any] | None:
+    def _rank_group(
+        self, rows: list[Any], key_fn: Any, *, reverse: bool
+    ) -> dict[str, Any] | None:
         groups: dict[str, list[Any]] = defaultdict(list)
         for row in rows:
             groups[str(key_fn(row))].append(row)
         ranked = []
         for key, items in groups.items():
             summary = self._summary_for_rows(items)
-            ranked.append((float(summary["expectancy"]), float(summary["win_rate_pct"]), key, summary))
+            ranked.append(
+                (
+                    float(summary["expectancy"]),
+                    float(summary["win_rate_pct"]),
+                    key,
+                    summary,
+                )
+            )
         if not ranked:
             return None
         ranked.sort(reverse=reverse)
@@ -1119,10 +2128,16 @@ class ProfessionalInsightsService:
             return "LIKELY_HARMFUL"
         return "INCONCLUSIVE"
 
-    def _strictness_verdict(self, accepted: list[Any], reviewed_rejections: list[RejectedOpportunityRecord]) -> str:
+    def _strictness_verdict(
+        self, accepted: list[Any], reviewed_rejections: list[RejectedOpportunityRecord]
+    ) -> str:
         accepted_summary = self._summary_for_rows(accepted)
-        missed = len([row for row in reviewed_rejections if self._is_win(row.later_outcome)])
-        saved = len([row for row in reviewed_rejections if self._is_loss(row.later_outcome)])
+        missed = len(
+            [row for row in reviewed_rejections if self._is_win(row.later_outcome)]
+        )
+        saved = len(
+            [row for row in reviewed_rejections if self._is_loss(row.later_outcome)]
+        )
         sample = int(accepted_summary["trades"]) + len(reviewed_rejections)
         if sample < 30:
             return "NOT_ENOUGH_DATA"
@@ -1174,10 +2189,15 @@ class ProfessionalInsightsService:
         factors = self._row_factor_scores(row)
         contract = factors.get("contract") if isinstance(factors, dict) else None
         if isinstance(contract, dict):
-            return any(contract.get(key) is not None for key in ("bid", "ask", "volume", "open_interest"))
+            return any(
+                contract.get(key) is not None
+                for key in ("bid", "ask", "volume", "open_interest")
+            )
         return False
 
-    def _group_summary(self, rows: Iterable[Any], key_fn: Any, row_type: str) -> dict[str, Any]:
+    def _group_summary(
+        self, rows: Iterable[Any], key_fn: Any, row_type: str
+    ) -> dict[str, Any]:
         groups: dict[str, list[Any]] = defaultdict(list)
         for row in rows:
             groups[str(key_fn(row))].append(row)
@@ -1194,19 +2214,27 @@ class ProfessionalInsightsService:
                 result[key] = self._opportunity_summary(items)
         return result
 
-    def _filter_rejection_quality(self, rejections: list[RejectedOpportunityRecord]) -> dict[str, Any]:
+    def _filter_rejection_quality(
+        self, rejections: list[RejectedOpportunityRecord]
+    ) -> dict[str, Any]:
         by_filter: dict[str, list[RejectedOpportunityRecord]] = defaultdict(list)
         for row in rejections:
-            reasons = self._json_list(row.reasons_json) or [str(row.primary_gate or "unknown_filter")]
+            reasons = self._json_list(row.reasons_json) or [
+                str(row.primary_gate or "unknown_filter")
+            ]
             for reason in reasons:
                 by_filter[self._clean_label(reason)].append(row)
         rows: list[dict[str, Any]] = []
         for label, items in by_filter.items():
             reviewed = [row for row in items if row.later_outcome]
-            missed_winners = [row for row in reviewed if self._is_win(row.later_outcome)]
+            missed_winners = [
+                row for row in reviewed if self._is_win(row.later_outcome)
+            ]
             saved_losers = [row for row in reviewed if self._is_loss(row.later_outcome)]
             values = [self._rejected_move_value(row) for row in reviewed]
-            summary = self._summary_from_values(values, [row.later_outcome for row in reviewed])
+            summary = self._summary_from_values(
+                values, [row.later_outcome for row in reviewed]
+            )
             rows.append(
                 {
                     "filter_name": label,
@@ -1214,26 +2242,48 @@ class ProfessionalInsightsService:
                     "reviewed_count": len(reviewed),
                     "later_winner_count": len(missed_winners),
                     "later_loser_count": len(saved_losers),
-                    "missed_winner_rate_pct": round((len(missed_winners) / len(reviewed)) * 100, 2) if reviewed else 0.0,
-                    "saved_loser_rate_pct": round((len(saved_losers) / len(reviewed)) * 100, 2) if reviewed else 0.0,
+                    "missed_winner_rate_pct": round(
+                        (len(missed_winners) / len(reviewed)) * 100, 2
+                    )
+                    if reviewed
+                    else 0.0,
+                    "saved_loser_rate_pct": round(
+                        (len(saved_losers) / len(reviewed)) * 100, 2
+                    )
+                    if reviewed
+                    else 0.0,
                     "rejected_expectancy_proxy": summary["expectancy"],
                     "rejected_profit_factor_proxy": summary["profit_factor"],
                     "examples": [self._rejection_event(row) for row in reviewed[:3]],
                 }
             )
-        rows = sorted(rows, key=lambda item: (-int(item["rejected_count"]), -float(item["missed_winner_rate_pct"]), str(item["filter_name"])))
+        rows = sorted(
+            rows,
+            key=lambda item: (
+                -int(item["rejected_count"]),
+                -float(item["missed_winner_rate_pct"]),
+                str(item["filter_name"]),
+            ),
+        )
         return {
             "filters": rows,
             "top_rejecting_filters": rows[:10],
             "possible_overfilters": [
-                row for row in rows if int(row["reviewed_count"]) >= 3 and float(row["missed_winner_rate_pct"]) >= 40.0
+                row
+                for row in rows
+                if int(row["reviewed_count"]) >= 3
+                and float(row["missed_winner_rate_pct"]) >= 40.0
             ][:10],
             "needs_more_outcome_review": [
-                row for row in rows if int(row["rejected_count"]) >= 5 and int(row["reviewed_count"]) < 3
+                row
+                for row in rows
+                if int(row["rejected_count"]) >= 5 and int(row["reviewed_count"]) < 3
             ][:10],
         }
 
-    def _rejected_quality_summary(self, rejections: list[RejectedOpportunityRecord]) -> dict[str, Any]:
+    def _rejected_quality_summary(
+        self, rejections: list[RejectedOpportunityRecord]
+    ) -> dict[str, Any]:
         observation_count = len(rejections)
         rejections = self._independent_rejections(rejections)
         reviewed = [row for row in rejections if row.later_outcome]
@@ -1241,7 +2291,11 @@ class ProfessionalInsightsService:
         saved = [row for row in reviewed if self._is_loss(row.later_outcome)]
         ambiguous = [row for row in reviewed if self._is_ambiguous(row)]
         unresolved = [row for row in rejections if not row.later_outcome]
-        outcome_minutes = [float(row.later_outcome_minutes) for row in reviewed if row.later_outcome_minutes is not None]
+        outcome_minutes = [
+            float(row.later_outcome_minutes)
+            for row in reviewed
+            if row.later_outcome_minutes is not None
+        ]
         return {
             "total_rejected": len(rejections),
             "observation_count": observation_count,
@@ -1251,28 +2305,58 @@ class ProfessionalInsightsService:
             "missed_winners": len(missed),
             "saved_losers": len(saved),
             "ambiguous": len(ambiguous),
-            "review_coverage_pct": round((len(reviewed) / len(rejections)) * 100, 2) if rejections else 0.0,
-            "missed_winner_rate_pct": round((len(missed) / len(reviewed)) * 100, 2) if reviewed else 0.0,
-            "saved_loser_rate_pct": round((len(saved) / len(reviewed)) * 100, 2) if reviewed else 0.0,
-            "ambiguous_rate_pct": round((len(ambiguous) / len(reviewed)) * 100, 2) if reviewed else 0.0,
-            "avg_minutes_to_outcome": round(sum(outcome_minutes) / len(outcome_minutes), 2) if outcome_minutes else None,
-            "outcomes": dict(Counter(str(row.later_outcome or "unresolved") for row in rejections).most_common()),
-            "sources": dict(Counter(str(row.later_outcome_source or "unknown") for row in reviewed).most_common()),
-            "timeframes": dict(Counter(str(row.later_outcome_timeframe or "unknown") for row in reviewed).most_common()),
+            "review_coverage_pct": round((len(reviewed) / len(rejections)) * 100, 2)
+            if rejections
+            else 0.0,
+            "missed_winner_rate_pct": round((len(missed) / len(reviewed)) * 100, 2)
+            if reviewed
+            else 0.0,
+            "saved_loser_rate_pct": round((len(saved) / len(reviewed)) * 100, 2)
+            if reviewed
+            else 0.0,
+            "ambiguous_rate_pct": round((len(ambiguous) / len(reviewed)) * 100, 2)
+            if reviewed
+            else 0.0,
+            "avg_minutes_to_outcome": round(
+                sum(outcome_minutes) / len(outcome_minutes), 2
+            )
+            if outcome_minutes
+            else None,
+            "outcomes": dict(
+                Counter(
+                    str(row.later_outcome or "unresolved") for row in rejections
+                ).most_common()
+            ),
+            "sources": dict(
+                Counter(
+                    str(row.later_outcome_source or "unknown") for row in reviewed
+                ).most_common()
+            ),
+            "timeframes": dict(
+                Counter(
+                    str(row.later_outcome_timeframe or "unknown") for row in reviewed
+                ).most_common()
+            ),
         }
 
-    def _gate_effectiveness_rows(self, rejections: list[RejectedOpportunityRecord]) -> list[dict[str, Any]]:
+    def _gate_effectiveness_rows(
+        self, rejections: list[RejectedOpportunityRecord]
+    ) -> list[dict[str, Any]]:
         groups: dict[str, list[RejectedOpportunityRecord]] = defaultdict(list)
         for row in rejections:
             labels = [str(row.primary_gate or "unknown_gate")]
             labels.extend(self._json_list(row.reasons_json))
-            for label in list(dict.fromkeys(self._clean_label(item) for item in labels if item)):
+            for label in list(
+                dict.fromkeys(self._clean_label(item) for item in labels if item)
+            ):
                 groups[label].append(row)
         rows: list[dict[str, Any]] = []
         for gate, items in groups.items():
             independent_by_episode: dict[str, RejectedOpportunityRecord] = {}
             for row in items:
-                episode_key = str(getattr(row, "episode_key", None) or f"legacy-row:{row.id}")
+                episode_key = str(
+                    getattr(row, "episode_key", None) or f"legacy-row:{row.id}"
+                )
                 independent_by_episode.setdefault(episode_key, row)
             independent = list(independent_by_episode.values())
             reviewed = [row for row in independent if row.later_outcome]
@@ -1280,10 +2364,38 @@ class ProfessionalInsightsService:
             saved = [row for row in reviewed if self._is_loss(row.later_outcome)]
             ambiguous = [row for row in reviewed if self._is_ambiguous(row)]
             unresolved = [row for row in independent if not row.later_outcome]
-            moves = [self._rejected_move_value(row) for row in reviewed if not self._is_ambiguous(row)]
-            minutes = [float(row.later_outcome_minutes) for row in reviewed if row.later_outcome_minutes is not None]
-            primary_count = len([row for row in independent if self._clean_label(str(row.primary_gate or "unknown_gate")) == gate])
-            isolated_count = len([row for row in independent if len(set(self._clean_label(item) for item in self._json_list(row.reasons_json) if item)) <= 1])
+            moves = [
+                self._rejected_move_value(row)
+                for row in reviewed
+                if not self._is_ambiguous(row)
+            ]
+            minutes = [
+                float(row.later_outcome_minutes)
+                for row in reviewed
+                if row.later_outcome_minutes is not None
+            ]
+            primary_count = len(
+                [
+                    row
+                    for row in independent
+                    if self._clean_label(str(row.primary_gate or "unknown_gate"))
+                    == gate
+                ]
+            )
+            isolated_count = len(
+                [
+                    row
+                    for row in independent
+                    if len(
+                        set(
+                            self._clean_label(item)
+                            for item in self._json_list(row.reasons_json)
+                            if item
+                        )
+                    )
+                    <= 1
+                ]
+            )
             rows.append(
                 {
                     "gate_or_reason": gate,
@@ -1299,14 +2411,36 @@ class ProfessionalInsightsService:
                     "saved_losers": len(saved),
                     "ambiguous": len(ambiguous),
                     "unresolved": len(unresolved),
-                    "missed_winner_rate_pct": round((len(missed) / len(reviewed)) * 100, 2) if reviewed else 0.0,
-                    "saved_loser_rate_pct": round((len(saved) / len(reviewed)) * 100, 2) if reviewed else 0.0,
-                    "unresolved_rate_pct": round((len(unresolved) / len(independent)) * 100, 2) if independent else 0.0,
-                    "ambiguous_rate_pct": round((len(ambiguous) / len(reviewed)) * 100, 2) if reviewed else 0.0,
-                    "avg_move_after_rejection": round(sum(moves) / len(moves), 2) if moves else 0.0,
-                    "avg_minutes_to_outcome": round(sum(minutes) / len(minutes), 2) if minutes else None,
-                    "evidence_quality": self._gate_evidence_quality(len(independent), len(reviewed), len(ambiguous)),
-                    "interpretation": self._gate_effectiveness_interpretation(len(reviewed), len(missed), len(saved), len(ambiguous)),
+                    "missed_winner_rate_pct": round(
+                        (len(missed) / len(reviewed)) * 100, 2
+                    )
+                    if reviewed
+                    else 0.0,
+                    "saved_loser_rate_pct": round((len(saved) / len(reviewed)) * 100, 2)
+                    if reviewed
+                    else 0.0,
+                    "unresolved_rate_pct": round(
+                        (len(unresolved) / len(independent)) * 100, 2
+                    )
+                    if independent
+                    else 0.0,
+                    "ambiguous_rate_pct": round(
+                        (len(ambiguous) / len(reviewed)) * 100, 2
+                    )
+                    if reviewed
+                    else 0.0,
+                    "avg_move_after_rejection": round(sum(moves) / len(moves), 2)
+                    if moves
+                    else 0.0,
+                    "avg_minutes_to_outcome": round(sum(minutes) / len(minutes), 2)
+                    if minutes
+                    else None,
+                    "evidence_quality": self._gate_evidence_quality(
+                        len(independent), len(reviewed), len(ambiguous)
+                    ),
+                    "interpretation": self._gate_effectiveness_interpretation(
+                        len(reviewed), len(missed), len(saved), len(ambiguous)
+                    ),
                     "causal_claim": "not_established_observational_episode_evidence_only",
                 }
             )
@@ -1320,7 +2454,9 @@ class ProfessionalInsightsService:
             ),
         )
 
-    def _top_gates(self, rejections: list[RejectedOpportunityRecord], *, outcome_group: str) -> dict[str, int]:
+    def _top_gates(
+        self, rejections: list[RejectedOpportunityRecord], *, outcome_group: str
+    ) -> dict[str, int]:
         if outcome_group == "missed_winner":
             rows = [row for row in rejections if self._is_win(row.later_outcome)]
         elif outcome_group == "saved_loser":
@@ -1329,20 +2465,32 @@ class ProfessionalInsightsService:
             rows = [row for row in rejections if not row.later_outcome]
         else:
             rows = []
-        return dict(Counter(str(row.primary_gate or "unknown") for row in rows).most_common(15))
+        return dict(
+            Counter(str(row.primary_gate or "unknown") for row in rows).most_common(15)
+        )
 
-    def _accepted_rejected_comparison(self, accepted_rows: list[Any], rejections: list[RejectedOpportunityRecord]) -> dict[str, Any]:
-        reviewed = [row for row in rejections if row.later_outcome and not self._is_ambiguous(row)]
+    def _accepted_rejected_comparison(
+        self, accepted_rows: list[Any], rejections: list[RejectedOpportunityRecord]
+    ) -> dict[str, Any]:
+        reviewed = [
+            row
+            for row in rejections
+            if row.later_outcome and not self._is_ambiguous(row)
+        ]
         accepted = self._summary_for_rows(accepted_rows)
         rejected_values = [self._rejected_move_value(row) for row in reviewed]
-        rejected = self._summary_from_values(rejected_values, [row.later_outcome for row in reviewed])
+        rejected = self._summary_from_values(
+            rejected_values, [row.later_outcome for row in reviewed]
+        )
         return {
             "accepted_closed_count": accepted.get("trades", 0),
             "rejected_reviewed_count": len(reviewed),
             "accepted_expectancy": accepted.get("expectancy"),
             "rejected_if_taken_expectancy": rejected.get("expectancy"),
             "rejected_win_rate_pct": rejected.get("win_rate_pct"),
-            "interpretation": self._accepted_rejected_interpretation(accepted, rejected),
+            "interpretation": self._accepted_rejected_interpretation(
+                accepted, rejected
+            ),
         }
 
     def _gate_evidence_quality(self, total: int, reviewed: int, ambiguous: int) -> str:
@@ -1354,7 +2502,9 @@ class ProfessionalInsightsService:
             return "PARTIAL_REVIEW"
         return "USABLE"
 
-    def _gate_effectiveness_interpretation(self, reviewed: int, missed: int, saved: int, ambiguous: int) -> str:
+    def _gate_effectiveness_interpretation(
+        self, reviewed: int, missed: int, saved: int, ambiguous: int
+    ) -> str:
         if reviewed < 5:
             return "needs_more_review"
         if ambiguous / max(reviewed, 1) > 0.25:
@@ -1367,7 +2517,9 @@ class ProfessionalInsightsService:
             return "possible_overfilter"
         return "mixed_or_inconclusive"
 
-    def _accepted_rejected_interpretation(self, accepted: dict[str, Any], rejected: dict[str, Any]) -> str:
+    def _accepted_rejected_interpretation(
+        self, accepted: dict[str, Any], rejected: dict[str, Any]
+    ) -> str:
         accepted_expectancy = float(accepted.get("expectancy") or 0.0)
         rejected_expectancy = float(rejected.get("expectancy") or 0.0)
         rejected_trades = int(rejected.get("trades") or 0)
@@ -1385,19 +2537,31 @@ class ProfessionalInsightsService:
         opportunities: list[OpportunityRecord],
     ) -> dict[str, Any]:
         rows: list[Any] = trades or opportunities
-        losers = [row for row in rows if self._accepted_value(row) < 0 or self._is_loss(getattr(row, "outcome", None))]
+        losers = [
+            row
+            for row in rows
+            if self._accepted_value(row) < 0
+            or self._is_loss(getattr(row, "outcome", None))
+        ]
         worst = sorted(losers, key=self._accepted_value)[:10]
         by_reason = self._segment_accepted(rows, self._loss_driver)
         return {
             "accepted_count": len(rows),
             "losing_count": len(losers),
-            "losing_rate_pct": round((len(losers) / len(rows)) * 100, 2) if rows else 0.0,
+            "losing_rate_pct": round((len(losers) / len(rows)) * 100, 2)
+            if rows
+            else 0.0,
             "total_loss": round(sum(self._accepted_value(row) for row in losers), 2),
             "worst_accepted_trades": [self._accepted_event(row) for row in worst],
             "loss_impact_by_driver": by_reason,
         }
 
-    def _segment_report(self, accepted_rows: list[Any], rejected_rows: list[RejectedOpportunityRecord], key_fn: Any) -> dict[str, Any]:
+    def _segment_report(
+        self,
+        accepted_rows: list[Any],
+        rejected_rows: list[RejectedOpportunityRecord],
+        key_fn: Any,
+    ) -> dict[str, Any]:
         accepted_groups: dict[str, list[Any]] = defaultdict(list)
         rejected_groups: dict[str, list[RejectedOpportunityRecord]] = defaultdict(list)
         for row in accepted_rows:
@@ -1411,17 +2575,29 @@ class ProfessionalInsightsService:
             rejected = rejected_groups.get(key, [])
             accepted_values = [self._accepted_value(row) for row in accepted]
             rejected_values = [self._rejected_move_value(row) for row in rejected]
-            rejected_winners = len([row for row in rejected if self._is_win(row.later_outcome)])
+            rejected_winners = len(
+                [row for row in rejected if self._is_win(row.later_outcome)]
+            )
             report[key] = {
-                "accepted": self._summary_from_values(accepted_values, [getattr(row, "outcome", None) for row in accepted]),
-                "rejected": self._summary_from_values(rejected_values, [row.later_outcome for row in rejected]),
+                "accepted": self._summary_from_values(
+                    accepted_values, [getattr(row, "outcome", None) for row in accepted]
+                ),
+                "rejected": self._summary_from_values(
+                    rejected_values, [row.later_outcome for row in rejected]
+                ),
                 "rejected_count": len(rejected),
                 "rejected_later_winner_count": rejected_winners,
-                "missed_winner_rate_pct": round((rejected_winners / len(rejected)) * 100, 2) if rejected else 0.0,
+                "missed_winner_rate_pct": round(
+                    (rejected_winners / len(rejected)) * 100, 2
+                )
+                if rejected
+                else 0.0,
             }
         return report
 
-    def _setup_family_ranking(self, accepted_rows: list[Any], rejected_rows: list[RejectedOpportunityRecord]) -> list[dict[str, Any]]:
+    def _setup_family_ranking(
+        self, accepted_rows: list[Any], rejected_rows: list[RejectedOpportunityRecord]
+    ) -> list[dict[str, Any]]:
         report = self._segment_report(accepted_rows, rejected_rows, self._setup_family)
         rows = [
             {
@@ -1436,14 +2612,24 @@ class ProfessionalInsightsService:
             }
             for key, value in report.items()
         ]
-        return sorted(rows, key=lambda row: (float(row["accepted_expectancy"]), float(row["accepted_win_rate_pct"])), reverse=True)
+        return sorted(
+            rows,
+            key=lambda row: (
+                float(row["accepted_expectancy"]),
+                float(row["accepted_win_rate_pct"]),
+            ),
+            reverse=True,
+        )
 
     def _segment_accepted(self, rows: list[Any], key_fn: Any) -> dict[str, Any]:
         groups: dict[str, list[Any]] = defaultdict(list)
         for row in rows:
             groups[str(key_fn(row))].append(row)
         return {
-            key: self._summary_from_values([self._accepted_value(row) for row in items], [getattr(row, "outcome", None) for row in items])
+            key: self._summary_from_values(
+                [self._accepted_value(row) for row in items],
+                [getattr(row, "outcome", None) for row in items],
+            )
             for key, items in sorted(groups.items())
         }
 
@@ -1457,9 +2643,13 @@ class ProfessionalInsightsService:
         reviewed_count = len(reviewed_rejections)
         warnings: list[str] = []
         if accepted_count < 30:
-            warnings.append("Need at least 30 closed accepted paper/live-shadow trades before changing strategy thresholds.")
+            warnings.append(
+                "Need at least 30 closed accepted paper/live-shadow trades before changing strategy thresholds."
+            )
         if reviewed_count < 30:
-            warnings.append("Need at least 30 reviewed rejected setups before judging whether filters are over-rejecting winners.")
+            warnings.append(
+                "Need at least 30 reviewed rejected setups before judging whether filters are over-rejecting winners."
+            )
         return {
             "accepted_sample": accepted_count,
             "reviewed_rejection_sample": reviewed_count,
@@ -1469,7 +2659,9 @@ class ProfessionalInsightsService:
             "warnings": warnings,
         }
 
-    def _summary_from_values(self, values: list[float], outcomes: list[str | None]) -> dict[str, Any]:
+    def _summary_from_values(
+        self, values: list[float], outcomes: list[str | None]
+    ) -> dict[str, Any]:
         wins: list[float] = []
         losses: list[float] = []
         unclassified = 0
@@ -1488,16 +2680,22 @@ class ProfessionalInsightsService:
             "wins": len(wins),
             "losses": len(losses),
             "open_or_unclassified": unclassified,
-            "win_rate_pct": round((len(wins) / classified) * 100, 2) if classified else 0.0,
+            "win_rate_pct": round((len(wins) / classified) * 100, 2)
+            if classified
+            else 0.0,
             "average_win": round(gross_win / len(wins), 2) if wins else 0.0,
             "average_loss": round(gross_loss / len(losses), 2) if losses else 0.0,
-            "expectancy": round((sum(wins) + sum(losses)) / classified, 2) if classified else 0.0,
+            "expectancy": round((sum(wins) + sum(losses)) / classified, 2)
+            if classified
+            else 0.0,
             "profit_factor": round(gross_win / gross_loss, 2) if gross_loss else None,
             "max_drawdown": round(max_drawdown(values), 2),
             "total_pnl": round(sum(values), 2),
         }
 
-    def _grouped_rejection_reason_counts(self, rows: list[RejectedOpportunityRecord]) -> dict[str, int]:
+    def _grouped_rejection_reason_counts(
+        self, rows: list[RejectedOpportunityRecord]
+    ) -> dict[str, int]:
         counts = {category: 0 for category in self.REJECTION_REASON_CATEGORIES}
         for row in rows:
             for reason in self._json_list(row.reasons_json):
@@ -1523,8 +2721,12 @@ class ProfessionalInsightsService:
     ) -> list[str]:
         warnings: list[str] = []
         if not paper_trades and not opportunities and not rejections:
-            warnings.append("No Bank Nifty paper/live-shadow evidence was stored for this date.")
-        if reason_counts.get("premium_candles_stale_or_missing", 0) or reason_counts.get("insufficient_current_session_premium_candles", 0):
+            warnings.append(
+                "No Bank Nifty paper/live-shadow evidence was stored for this date."
+            )
+        if reason_counts.get(
+            "premium_candles_stale_or_missing", 0
+        ) or reason_counts.get("insufficient_current_session_premium_candles", 0):
             warnings.append("Premium confirmation candles were stale or missing.")
         if reason_counts.get("quote_invalid", 0):
             warnings.append("Invalid or unavailable option quotes were seen.")
@@ -1538,14 +2740,23 @@ class ProfessionalInsightsService:
                 return float(row.net_pnl)
             if row.pnl is not None:
                 return float(row.pnl)
-            return self._price_move_pnl(row.entry_price, row.exit_price, row.placed_quantity or row.filled_quantity or 1, row.side)
+            return self._price_move_pnl(
+                row.entry_price,
+                row.exit_price,
+                row.placed_quantity or row.filled_quantity or 1,
+                row.side,
+            )
         if isinstance(row, OpportunityRecord):
             if row.pnl is not None:
                 return float(row.pnl)
-            return self._price_move_pnl(row.entry_price, row.exit_price, row.quantity or 1, row.side)
+            return self._price_move_pnl(
+                row.entry_price, row.exit_price, row.quantity or 1, row.side
+            )
         return 0.0
 
-    def _price_move_pnl(self, entry: Any, exit_price: Any, quantity: Any, side: Any) -> float:
+    def _price_move_pnl(
+        self, entry: Any, exit_price: Any, quantity: Any, side: Any
+    ) -> float:
         try:
             entry_value = float(entry or 0.0)
             exit_value = float(exit_price or 0.0)
@@ -1570,7 +2781,9 @@ class ProfessionalInsightsService:
             "exit_price": getattr(row, "exit_price", None),
             "mfe_percent": getattr(row, "mfe_percent", None),
             "mae_percent": getattr(row, "mae_percent", None),
-            "captured_mfe_percent": self._captured_mfe_percent(row) if isinstance(row, TradeRecord) else None,
+            "captured_mfe_percent": self._captured_mfe_percent(row)
+            if isinstance(row, TradeRecord)
+            else None,
             "net_or_proxy_pnl": self._accepted_value(row),
             "setup_family": self._setup_family(row),
             "time_block": time_bucket(getattr(row, "created_at", None)),
@@ -1588,7 +2801,11 @@ class ProfessionalInsightsService:
             for key in ("setup_family_name", "setup_type"):
                 if factors.get(key):
                     return str(factors.get(key)).lower()
-            metadata = factors.get("strategy_metadata", {}) if isinstance(factors.get("strategy_metadata"), dict) else {}
+            metadata = (
+                factors.get("strategy_metadata", {})
+                if isinstance(factors.get("strategy_metadata"), dict)
+                else {}
+            )
             for key in ("setup_family_name", "setup_type"):
                 if metadata.get(key):
                     return str(metadata.get(key)).lower()
@@ -1597,10 +2814,25 @@ class ProfessionalInsightsService:
             for key in ("setup_family_name", "setup_type"):
                 if response.get(key):
                     return str(response.get(key)).lower()
-            return str(row.action or self._option_type_from_symbol(row.tradingsymbol) or "unknown_setup").lower()
+            return str(
+                row.action
+                or self._option_type_from_symbol(row.tradingsymbol)
+                or "unknown_setup"
+            ).lower()
         if isinstance(row, OpportunityRecord):
-            return str(factors.get("setup_type") or self._nested(factors, "strategy_metadata", "setup_type") or row.action or self._option_type_from_symbol(row.tradingsymbol) or "unknown_setup").lower()
-        return str(factors.get("setup_type") or getattr(row, "action", None) or self._option_type_from_symbol(getattr(row, "tradingsymbol", None)) or "unknown_setup").lower()
+            return str(
+                factors.get("setup_type")
+                or self._nested(factors, "strategy_metadata", "setup_type")
+                or row.action
+                or self._option_type_from_symbol(row.tradingsymbol)
+                or "unknown_setup"
+            ).lower()
+        return str(
+            factors.get("setup_type")
+            or getattr(row, "action", None)
+            or self._option_type_from_symbol(getattr(row, "tradingsymbol", None))
+            or "unknown_setup"
+        ).lower()
 
     def _row_factor_scores(self, row: Any) -> dict[str, Any]:
         if isinstance(row, TradeRecord):
@@ -1625,8 +2857,16 @@ class ProfessionalInsightsService:
 
     def _iv_regime(self, row: Any) -> str:
         factors = self._json(getattr(row, "factor_scores_json", None))
-        volatility = factors.get("volatility_edge", {}) if isinstance(factors.get("volatility_edge"), dict) else {}
-        details = volatility.get("details", {}) if isinstance(volatility.get("details"), dict) else {}
+        volatility = (
+            factors.get("volatility_edge", {})
+            if isinstance(factors.get("volatility_edge"), dict)
+            else {}
+        )
+        details = (
+            volatility.get("details", {})
+            if isinstance(volatility.get("details"), dict)
+            else {}
+        )
         classification = str(volatility.get("classification") or "").lower()
         edge = str(volatility.get("volatility_edge_for_option_buying") or "").lower()
         main_risk = str(volatility.get("main_risk") or "").lower()
@@ -1651,10 +2891,24 @@ class ProfessionalInsightsService:
 
     def _trend_regime(self, row: Any) -> str:
         factors = self._json(getattr(row, "factor_scores_json", None))
-        day_type = factors.get("day_type", {}) if isinstance(factors.get("day_type"), dict) else {}
-        day_details = day_type.get("details", {}) if isinstance(day_type.get("details"), dict) else {}
-        bank = factors.get("banknifty_intelligence", {}) if isinstance(factors.get("banknifty_intelligence"), dict) else {}
-        bank_details = bank.get("details", {}) if isinstance(bank.get("details"), dict) else {}
+        day_type = (
+            factors.get("day_type", {})
+            if isinstance(factors.get("day_type"), dict)
+            else {}
+        )
+        day_details = (
+            day_type.get("details", {})
+            if isinstance(day_type.get("details"), dict)
+            else {}
+        )
+        bank = (
+            factors.get("banknifty_intelligence", {})
+            if isinstance(factors.get("banknifty_intelligence"), dict)
+            else {}
+        )
+        bank_details = (
+            bank.get("details", {}) if isinstance(bank.get("details"), dict) else {}
+        )
         regime = (
             day_details.get("day_type")
             or bank_details.get("dayType")
@@ -1675,7 +2929,12 @@ class ProfessionalInsightsService:
         if outcome:
             return outcome
         factors = self._json(getattr(row, "factor_scores_json", None))
-        for key in ("entry_timing", "banknifty_regime_filter", "volatility_edge", "option_premium_confirmation"):
+        for key in (
+            "entry_timing",
+            "banknifty_regime_filter",
+            "volatility_edge",
+            "option_premium_confirmation",
+        ):
             value = factors.get(key)
             if isinstance(value, dict):
                 reasons = value.get("reasons") or value.get("hard_reasons") or []
@@ -1692,7 +2951,13 @@ class ProfessionalInsightsService:
         return None
 
     def _clean_label(self, value: str) -> str:
-        return str(value or "unknown").strip().lower().replace(" ", "_").replace("-", "_")[:120]
+        return (
+            str(value or "unknown")
+            .strip()
+            .lower()
+            .replace(" ", "_")
+            .replace("-", "_")[:120]
+        )
 
     def _nested(self, payload: dict[str, Any], *keys: str) -> Any:
         current: Any = payload
@@ -1719,37 +2984,72 @@ class ProfessionalInsightsService:
         outcome = str(trade.outcome or "").lower()
         return outcome in LOSS_OUTCOMES or (pnl is not None and pnl < 0)
 
-    def _factor_labels(self, factors: dict[str, Any], *, accepted: bool, row: Any) -> list[str]:
-        labels = [f"decision:{'accepted' if accepted else 'rejected'}", f"score:{score_bucket(getattr(row, 'score', 0))}"]
-        metadata = factors.get("strategy_metadata", {}) if isinstance(factors.get("strategy_metadata"), dict) else {}
-        labels.append(f"strategy_version:{metadata.get('strategy_version') or 'unknown'}")
-        premium = factors.get("option_premium_confirmation", {}) if isinstance(factors.get("option_premium_confirmation"), dict) else {}
+    def _factor_labels(
+        self, factors: dict[str, Any], *, accepted: bool, row: Any
+    ) -> list[str]:
+        labels = [
+            f"decision:{'accepted' if accepted else 'rejected'}",
+            f"score:{score_bucket(getattr(row, 'score', 0))}",
+        ]
+        metadata = (
+            factors.get("strategy_metadata", {})
+            if isinstance(factors.get("strategy_metadata"), dict)
+            else {}
+        )
+        labels.append(
+            f"strategy_version:{metadata.get('strategy_version') or 'unknown'}"
+        )
+        premium = (
+            factors.get("option_premium_confirmation", {})
+            if isinstance(factors.get("option_premium_confirmation"), dict)
+            else {}
+        )
         if premium:
-            labels.append(f"premium_source:{premium.get('source') or premium.get('premium_candle_source') or 'unknown'}")
+            labels.append(
+                f"premium_source:{premium.get('source') or premium.get('premium_candle_source') or 'unknown'}"
+            )
             labels.append(f"premium_passed:{bool(premium.get('passed'))}")
-        day_type = factors.get("day_type", {}) if isinstance(factors.get("day_type"), dict) else {}
+        day_type = (
+            factors.get("day_type", {})
+            if isinstance(factors.get("day_type"), dict)
+            else {}
+        )
         if day_type:
-            labels.append(f"day_type:{day_type.get('day_type') or day_type.get('classification') or 'unknown'}")
+            labels.append(
+                f"day_type:{day_type.get('day_type') or day_type.get('classification') or 'unknown'}"
+            )
         if not accepted:
-            labels.append(f"rejection_gate:{getattr(row, 'primary_gate', None) or 'unknown'}")
+            labels.append(
+                f"rejection_gate:{getattr(row, 'primary_gate', None) or 'unknown'}"
+            )
         return labels
 
-    def _later_group_quality(self, groups: dict[str, list[RejectedOpportunityRecord]]) -> dict[str, Any]:
+    def _later_group_quality(
+        self, groups: dict[str, list[RejectedOpportunityRecord]]
+    ) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, rows in sorted(groups.items()):
-            missed_winners = len([row for row in rows if self._is_win(row.later_outcome)])
-            saved_losers = len([row for row in rows if self._is_loss(row.later_outcome)])
+            missed_winners = len(
+                [row for row in rows if self._is_win(row.later_outcome)]
+            )
+            saved_losers = len(
+                [row for row in rows if self._is_loss(row.later_outcome)]
+            )
             result[key] = {
                 "reviewed": len(rows),
                 "missed_winners": missed_winners,
                 "saved_losers": saved_losers,
-                "missed_winner_rate_pct": round((missed_winners / len(rows)) * 100, 2) if rows else 0.0,
+                "missed_winner_rate_pct": round((missed_winners / len(rows)) * 100, 2)
+                if rows
+                else 0.0,
             }
         return result
 
     def _rejected_move_value(self, row: RejectedOpportunityRecord) -> float:
         factors = self._json(row.factor_scores_json)
-        prices = factors.get("prices", {}) if isinstance(factors.get("prices"), dict) else {}
+        prices = (
+            factors.get("prices", {}) if isinstance(factors.get("prices"), dict) else {}
+        )
         entry = float(prices.get("entry_price") or 0.0)
         exit_price = float(row.later_exit_price or 0.0)
         if entry <= 0 or exit_price <= 0:
@@ -1761,10 +3061,17 @@ class ProfessionalInsightsService:
         multiplier = 1 if str(row.side or "BUY").upper() == "BUY" else -1
         return round((exit_price - entry) * multiplier, 2)
 
-    def _filtering_interpretation(self, opportunities: list[OpportunityRecord], reviewed_rejections: list[RejectedOpportunityRecord]) -> str:
-        accepted_summary = self._opportunity_summary([row for row in opportunities if row.status == "closed"])
+    def _filtering_interpretation(
+        self,
+        opportunities: list[OpportunityRecord],
+        reviewed_rejections: list[RejectedOpportunityRecord],
+    ) -> str:
+        accepted_summary = self._opportunity_summary(
+            [row for row in opportunities if row.status == "closed"]
+        )
         missed_winner_rate = (
-            len([row for row in reviewed_rejections if self._is_win(row.later_outcome)]) / len(reviewed_rejections)
+            len([row for row in reviewed_rejections if self._is_win(row.later_outcome)])
+            / len(reviewed_rejections)
             if reviewed_rejections
             else 0
         )
@@ -1796,15 +3103,31 @@ class ProfessionalInsightsService:
         values: list[float] = []
         for trade in trades:
             if trade.exit_requested_at and trade.exit_confirmed_at:
-                values.append(max(0.0, (trade.exit_confirmed_at - trade.exit_requested_at).total_seconds() / 60))
+                values.append(
+                    max(
+                        0.0,
+                        (
+                            trade.exit_confirmed_at - trade.exit_requested_at
+                        ).total_seconds()
+                        / 60,
+                    )
+                )
         return round(sum(values) / len(values), 2) if values else 0.0
 
     def _is_shadow_trade(self, trade: TradeRecord) -> bool:
         payload = self._json(trade.order_response_json)
-        return bool(payload.get("shadow_for_live") or payload.get("live_shadow") or "shadow" in str(trade.notes or "").lower())
+        return bool(
+            payload.get("shadow_for_live")
+            or payload.get("live_shadow")
+            or "shadow" in str(trade.notes or "").lower()
+        )
 
     def _strategy_version(self, factors: dict[str, Any]) -> str:
-        metadata = factors.get("strategy_metadata", {}) if isinstance(factors.get("strategy_metadata"), dict) else {}
+        metadata = (
+            factors.get("strategy_metadata", {})
+            if isinstance(factors.get("strategy_metadata"), dict)
+            else {}
+        )
         return str(metadata.get("strategy_version") or "unknown")
 
     def _opportunity_event(self, row: OpportunityRecord) -> dict[str, Any]:
@@ -1884,16 +3207,26 @@ class ProfessionalInsightsService:
         normalized = str(outcome or "").lower()
         if normalized.startswith("ambiguous_"):
             return False
-        return normalized in WIN_OUTCOMES or "target" in normalized or normalized.startswith("would_have_hit_target")
+        return (
+            normalized in WIN_OUTCOMES
+            or "target" in normalized
+            or normalized.startswith("would_have_hit_target")
+        )
 
     def _is_loss(self, outcome: str | None) -> bool:
         normalized = str(outcome or "").lower()
         if normalized.startswith("ambiguous_"):
             return False
-        return normalized in LOSS_OUTCOMES or "stop" in normalized or normalized.startswith("would_have_hit_stop")
+        return (
+            normalized in LOSS_OUTCOMES
+            or "stop" in normalized
+            or normalized.startswith("would_have_hit_stop")
+        )
 
     def _is_ambiguous(self, row_or_outcome: Any) -> bool:
-        if hasattr(row_or_outcome, "later_outcome_ambiguous") and bool(getattr(row_or_outcome, "later_outcome_ambiguous")):
+        if hasattr(row_or_outcome, "later_outcome_ambiguous") and bool(
+            getattr(row_or_outcome, "later_outcome_ambiguous")
+        ):
             return True
         outcome = getattr(row_or_outcome, "later_outcome", row_or_outcome)
         return str(outcome or "").lower().startswith("ambiguous_")

@@ -18,7 +18,12 @@ class OptionChainService:
     ) -> Dict[str, Any]:
         reasons: List[str] = []
         if not contracts:
-            return {"score": 0, "passed": False, "reasons": ["option chain contracts are unavailable"], "details": {}}
+            return {
+                "score": 0,
+                "passed": False,
+                "reasons": ["option chain contracts are unavailable"],
+                "details": {},
+            }
 
         calls = [contract for contract in contracts if contract.option_type == "CE"]
         puts = [contract for contract in contracts if contract.option_type == "PE"]
@@ -31,8 +36,28 @@ class OptionChainService:
         pcr_oi = put_oi / call_oi if oi_complete else None
         pcr_volume = put_volume / call_volume if volume_complete else None
 
-        support = self._max_oi_strike([contract for contract in puts if contract.strike <= spot_price and contract.open_interest > 0]) if oi_complete else 0.0
-        resistance = self._max_oi_strike([contract for contract in calls if contract.strike >= spot_price and contract.open_interest > 0]) if oi_complete else 0.0
+        support = (
+            self._max_oi_strike(
+                [
+                    contract
+                    for contract in puts
+                    if contract.strike <= spot_price and contract.open_interest > 0
+                ]
+            )
+            if oi_complete
+            else 0.0
+        )
+        resistance = (
+            self._max_oi_strike(
+                [
+                    contract
+                    for contract in calls
+                    if contract.strike >= spot_price and contract.open_interest > 0
+                ]
+            )
+            if oi_complete
+            else 0.0
+        )
         max_pain = self._max_pain(contracts) if oi_complete else None
         bullish = trend.lower() == "bullish"
         score = 0
@@ -125,17 +150,25 @@ class OptionChainService:
             pain = 0.0
             for contract in contracts:
                 if contract.option_type == "CE":
-                    pain += max(0.0, settlement - contract.strike) * contract.open_interest
+                    pain += (
+                        max(0.0, settlement - contract.strike) * contract.open_interest
+                    )
                 else:
-                    pain += max(0.0, contract.strike - settlement) * contract.open_interest
+                    pain += (
+                        max(0.0, contract.strike - settlement) * contract.open_interest
+                    )
             pain_by_strike[settlement] = pain
         return min(pain_by_strike, key=pain_by_strike.get)
 
-    def _selected_contract_is_sensible(self, spot_price: float, bullish: bool, side: str, selected: OptionContract) -> bool:
+    def _selected_contract_is_sensible(
+        self, spot_price: float, bullish: bool, side: str, selected: OptionContract
+    ) -> bool:
         if side.upper() == "SELL":
             if bullish:
                 return selected.option_type == "PE" and selected.strike <= spot_price
             return selected.option_type == "CE" and selected.strike >= spot_price
         if bullish:
-            return selected.option_type == "CE" and selected.strike <= spot_price * 1.005
+            return (
+                selected.option_type == "CE" and selected.strike <= spot_price * 1.005
+            )
         return selected.option_type == "PE" and selected.strike >= spot_price * 0.995

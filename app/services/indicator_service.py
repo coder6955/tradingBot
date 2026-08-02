@@ -17,7 +17,9 @@ def compute_ema(values: Sequence[float], period: int) -> List[float]:
         if previous_ema is None:
             previous_ema = float(value)
         else:
-            previous_ema = (float(value) * multiplier) + (previous_ema * (1 - multiplier))
+            previous_ema = (float(value) * multiplier) + (
+                previous_ema * (1 - multiplier)
+            )
         ema_values.append(previous_ema)
     return ema_values
 
@@ -29,7 +31,9 @@ def compute_rsi(values: Sequence[float], period: int = 14) -> List[float]:
     if not values:
         return []
 
-    changes = [float(values[idx]) - float(values[idx - 1]) for idx in range(1, len(values))]
+    changes = [
+        float(values[idx]) - float(values[idx - 1]) for idx in range(1, len(values))
+    ]
     gains = [max(change, 0.0) for change in changes]
     losses = [abs(min(change, 0.0)) for change in changes]
 
@@ -57,7 +61,9 @@ def compute_rsi(values: Sequence[float], period: int = 14) -> List[float]:
     return rsi_values
 
 
-def compute_macd(values: Sequence[float], fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[List[float], List[float]]:
+def compute_macd(
+    values: Sequence[float], fast: int = 12, slow: int = 26, signal: int = 9
+) -> Tuple[List[float], List[float]]:
     """Compute MACD line and signal line."""
     ema_fast = compute_ema(values, fast)
     ema_slow = compute_ema(values, slow)
@@ -66,7 +72,9 @@ def compute_macd(values: Sequence[float], fast: int = 12, slow: int = 26, signal
     return macd, signal_line
 
 
-def compute_bollinger_bands(values: Sequence[float], period: int = 20) -> Tuple[List[float], List[float], List[float]]:
+def compute_bollinger_bands(
+    values: Sequence[float], period: int = 20
+) -> Tuple[List[float], List[float], List[float]]:
     """Compute Bollinger Bands."""
     if period <= 0:
         raise ValueError("period must be positive")
@@ -78,12 +86,12 @@ def compute_bollinger_bands(values: Sequence[float], period: int = 20) -> Tuple[
     lower: List[float] = []
 
     for idx in range(len(values)):
-        window = values[max(0, idx - period + 1): idx + 1]
+        window = values[max(0, idx - period + 1) : idx + 1]
         if not window:
             continue
         mean = sum(window) / len(window)
         variance = sum((item - mean) ** 2 for item in window) / len(window)
-        std_dev = variance ** 0.5
+        std_dev = variance**0.5
         upper.append(mean + (2 * std_dev))
         middle.append(mean)
         lower.append(mean - (2 * std_dev))
@@ -91,7 +99,13 @@ def compute_bollinger_bands(values: Sequence[float], period: int = 20) -> Tuple[
     return upper, middle, lower
 
 
-def compute_supertrend(highs: Sequence[float], lows: Sequence[float], closes: Sequence[float], period: int = 7, multiplier: float = 3.0) -> List[float]:
+def compute_supertrend(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    period: int = 7,
+    multiplier: float = 3.0,
+) -> List[float]:
     """Compute a simplistic SuperTrend series using ATR-like bands."""
     if not highs or not lows or not closes:
         return []
@@ -102,6 +116,10 @@ def compute_supertrend(highs: Sequence[float], lows: Sequence[float], closes: Se
     for idx in range(len(closes)):
         hl = float(highs[idx]) - float(lows[idx])
         prev_close = float(closes[idx - 1]) if idx > 0 else float(closes[idx])
-        value = (hl + abs(float(highs[idx]) - prev_close) + abs(float(lows[idx]) - prev_close)) / 3.0
+        value = (
+            hl
+            + abs(float(highs[idx]) - prev_close)
+            + abs(float(lows[idx]) - prev_close)
+        ) / 3.0
         values.append(value * multiplier)
     return values

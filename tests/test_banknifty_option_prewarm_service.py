@@ -59,7 +59,9 @@ class BankNiftyOptionPrewarmServiceTests(unittest.TestCase):
         ws = FakeWebSocket()
         service = BankNiftyOptionPrewarmService(ws)
 
-        result = service.prewarm(spot_price=58020, option_instruments=self._instruments())
+        result = service.prewarm(
+            spot_price=58020, option_instruments=self._instruments()
+        )
 
         self.assertTrue(result["refreshed"])
         self.assertEqual(len(result["prewarm_tokens"]), 6)
@@ -86,7 +88,9 @@ class BankNiftyOptionPrewarmServiceTests(unittest.TestCase):
         service.prewarm(spot_price=58020, option_instruments=self._instruments())
         service.last_refresh_at = ist_now_naive() - timedelta(seconds=5)
 
-        result = service.prewarm(spot_price=58110, option_instruments=self._instruments())
+        result = service.prewarm(
+            spot_price=58110, option_instruments=self._instruments()
+        )
 
         self.assertTrue(result["refreshed"])
         self.assertEqual(len(ws.subscriptions), 2)

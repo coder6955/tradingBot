@@ -8,7 +8,12 @@ from typing import Any, Callable
 
 from app.config import settings
 from app.providers.kite_provider import KiteProvider
-from app.services.database import Candle, RawTickRecord, RejectedOpportunityRecord, get_session
+from app.services.database import (
+    Candle,
+    RawTickRecord,
+    RejectedOpportunityRecord,
+    get_session,
+)
 from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
 from app.services.time_utils import ist_today
@@ -32,9 +37,17 @@ class RejectedOpportunityOutcomeService:
         self.last_result: dict[str, Any] | None = None
         self._token_cache: dict[tuple[str, str], int | None] = {}
 
-    def evaluate_once(self, *, symbol: str | None = "BANKNIFTY", limit: int = 100, learning_only: bool = True) -> dict[str, Any]:
+    def evaluate_once(
+        self,
+        *,
+        symbol: str | None = "BANKNIFTY",
+        limit: int = 100,
+        learning_only: bool = True,
+    ) -> dict[str, Any]:
         provider = self.kite_provider_factory()
-        rows = self.repository.list_pending_later_outcomes(symbol=symbol, limit=limit, learning_only=learning_only)
+        rows = self.repository.list_pending_later_outcomes(
+            symbol=symbol, limit=limit, learning_only=learning_only
+        )
         results = [self._evaluate_record(provider, row) for row in rows]
         self.last_result = {
             "learning_only": learning_only,
@@ -56,7 +69,14 @@ class RejectedOpportunityOutcomeService:
         provider = self.kite_provider_factory()
         limit = max(1, int(batch_limit or settings.rejected_outcome_batch_limit))
         batches = max(1, int(max_batches or settings.rejected_outcome_max_batches))
-        delay = max(0.0, float(settings.rejected_outcome_batch_delay_seconds if delay_seconds is None else delay_seconds))
+        delay = max(
+            0.0,
+            float(
+                settings.rejected_outcome_batch_delay_seconds
+                if delay_seconds is None
+                else delay_seconds
+            ),
+        )
         after_id: int | None = None
         all_results: list[dict[str, Any]] = []
         batch_summaries: list[dict[str, Any]] = []
@@ -96,10 +116,16 @@ class RejectedOpportunityOutcomeService:
         }
         return self.last_result
 
-    def _evaluate_record(self, provider: KiteProvider, record: RejectedOpportunityRecord) -> dict[str, Any]:
+    def _evaluate_record(
+        self, provider: KiteProvider, record: RejectedOpportunityRecord
+    ) -> dict[str, Any]:
         prices = self._planned_prices(record)
         if not prices:
-            return {"id": record.id, "updated": False, "reason": "planned_prices_unavailable"}
+            return {
+                "id": record.id,
+                "updated": False,
+                "reason": "planned_prices_unavailable",
+            }
 
         replay_result = self._outcome_from_raw_ticks(provider, record, prices)
         if replay_result is None:
@@ -109,7 +135,13 @@ class RejectedOpportunityOutcomeService:
                 int(record.id),
                 outcome=str(replay_result["outcome"]),
                 exit_price=self._float(replay_result.get("exit_price")),
-                notes=self._notes(record, str(replay_result["outcome"]), float(replay_result["exit_price"]), prices, replay=replay_result),
+                notes=self._notes(
+                    record,
+                    str(replay_result["outcome"]),
+                    float(replay_result["exit_price"]),
+                    prices,
+                    replay=replay_result,
+                ),
                 outcome_at=self._parse_datetime(replay_result.get("outcome_at")),
                 outcome_minutes=self._float(replay_result.get("outcome_minutes")),
                 outcome_source=str(replay_result.get("source") or "candle_replay"),
@@ -131,9 +163,18 @@ class RejectedOpportunityOutcomeService:
                 "ambiguous": bool(replay_result.get("ambiguous")),
             }
 
-        age_minutes = self._minutes_between(record.created_at, datetime.now().replace(tzinfo=None))
-        if age_minutes is None or age_minutes < settings.rejected_outcome_horizon_minutes:
-            return {"id": record.id, "updated": False, "reason": "chronological_outcome_pending"}
+        age_minutes = self._minutes_between(
+            record.created_at, datetime.now().replace(tzinfo=None)
+        )
+        if (
+            age_minutes is None
+            or age_minutes < settings.rejected_outcome_horizon_minutes
+        ):
+            return {
+                "id": record.id,
+                "updated": False,
+                "reason": "chronological_outcome_pending",
+            }
         updated = self.repository.mark_later_outcome(
             int(record.id),
             outcome="censored_chronological_data_unavailable",
@@ -141,7 +182,12 @@ class RejectedOpportunityOutcomeService:
             outcome_source="censored",
             confidence="censored_excluded",
         )
-        return {"id": updated.id, "updated": True, "later_outcome": updated.later_outcome, "source": "censored"}
+        return {
+            "id": updated.id,
+            "updated": True,
+            "later_outcome": updated.later_outcome,
+            "source": "censored",
+        }
 
     def _outcome_from_raw_ticks(
         self,
@@ -153,7 +199,9 @@ class RejectedOpportunityOutcomeService:
         if token is None or record.created_at is None:
             return None
         start = record.created_at.replace(tzinfo=None)
-        horizon = start + timedelta(minutes=max(1, int(settings.rejected_outcome_horizon_minutes)))
+        horizon = start + timedelta(
+            minutes=max(1, int(settings.rejected_outcome_horizon_minutes))
+        )
         session = get_session()
         try:
             ticks = (
@@ -164,7 +212,11 @@ class RejectedOpportunityOutcomeService:
                     RawTickRecord.exchange_timestamp >= start,
                     RawTickRecord.exchange_timestamp <= horizon,
                 )
-                .order_by(RawTickRecord.exchange_timestamp.asc(), RawTickRecord.sequence.asc(), RawTickRecord.id.asc())
+                .order_by(
+                    RawTickRecord.exchange_timestamp.asc(),
+                    RawTickRecord.sequence.asc(),
+                    RawTickRecord.id.asc(),
+                )
                 .all()
             )
         finally:
@@ -188,7 +240,9 @@ class RejectedOpportunityOutcomeService:
 
     def _planned_prices(self, record: RejectedOpportunityRecord) -> dict[str, float]:
         factors = self._json(record.factor_scores_json)
-        prices = factors.get("prices", {}) if isinstance(factors.get("prices"), dict) else {}
+        prices = (
+            factors.get("prices", {}) if isinstance(factors.get("prices"), dict) else {}
+        )
         parsed: dict[str, float] = {}
         for key in ("entry_price", "stop_loss", "target_1", "target_2", "target_3"):
             value = self._float(prices.get(key))
@@ -210,7 +264,9 @@ class RejectedOpportunityOutcomeService:
 
         for timeframe in self._replay_timeframes():
             since = self._replay_start(record, timeframe)
-            candles = self._load_replay_candles(symbols=symbols, timeframe=timeframe, since=since)
+            candles = self._load_replay_candles(
+                symbols=symbols, timeframe=timeframe, since=since
+            )
             if not candles:
                 continue
             outcome = self._replay_candles(record, prices, candles)
@@ -220,13 +276,17 @@ class RejectedOpportunityOutcomeService:
                 return outcome
         return None
 
-    def _replay_symbols(self, provider: KiteProvider, record: RejectedOpportunityRecord) -> list[str]:
+    def _replay_symbols(
+        self, provider: KiteProvider, record: RejectedOpportunityRecord
+    ) -> list[str]:
         symbols: list[str] = []
         if record.tradingsymbol:
             symbols.append(str(record.tradingsymbol).upper())
         token = self._record_instrument_token(provider, record)
         if token is not None and settings.rejected_outcome_use_ws_token_candles:
-            symbols.append(f"{settings.websocket_candle_storage_prefix}:{int(token)}".upper())
+            symbols.append(
+                f"{settings.websocket_candle_storage_prefix}:{int(token)}".upper()
+            )
         seen: set[str] = set()
         unique: list[str] = []
         for symbol in symbols:
@@ -235,9 +295,15 @@ class RejectedOpportunityOutcomeService:
                 unique.append(symbol)
         return unique
 
-    def _record_instrument_token(self, provider: KiteProvider, record: RejectedOpportunityRecord) -> int | None:
+    def _record_instrument_token(
+        self, provider: KiteProvider, record: RejectedOpportunityRecord
+    ) -> int | None:
         factors = self._json(record.factor_scores_json)
-        contract = factors.get("contract", {}) if isinstance(factors.get("contract"), dict) else {}
+        contract = (
+            factors.get("contract", {})
+            if isinstance(factors.get("contract"), dict)
+            else {}
+        )
         for key in ("instrument_token", "token"):
             value = self._int(contract.get(key))
             if value is not None:
@@ -267,8 +333,12 @@ class RejectedOpportunityOutcomeService:
         values = [item.strip() for item in raw.split(",") if item.strip()]
         return values or ["1minute", "5minute"]
 
-    def _replay_start(self, record: RejectedOpportunityRecord, timeframe: str) -> datetime:
-        created_at = record.created_at or datetime.combine(ist_today(), datetime.min.time())
+    def _replay_start(
+        self, record: RejectedOpportunityRecord, timeframe: str
+    ) -> datetime:
+        created_at = record.created_at or datetime.combine(
+            ist_today(), datetime.min.time()
+        )
         created_at = created_at.replace(tzinfo=None)
         minutes = self._timeframe_minutes(timeframe)
         minute = (created_at.minute // minutes) * minutes
@@ -280,7 +350,9 @@ class RejectedOpportunityOutcomeService:
             return 1
         return max(1, int(match.group(1)))
 
-    def _load_replay_candles(self, *, symbols: list[str], timeframe: str, since: datetime) -> list[Candle]:
+    def _load_replay_candles(
+        self, *, symbols: list[str], timeframe: str, since: datetime
+    ) -> list[Candle]:
         session = get_session()
         try:
             return (
@@ -318,7 +390,11 @@ class RejectedOpportunityOutcomeService:
         target = self._best_target_for_candle(side, prices, candle)
         stop_hit = False
         if stop_loss is not None:
-            stop_hit = candle.high_price >= stop_loss if side == "SELL" else candle.low_price <= stop_loss
+            stop_hit = (
+                candle.high_price >= stop_loss
+                if side == "SELL"
+                else candle.low_price <= stop_loss
+            )
         target_hit = target is not None
         if not stop_hit and not target_hit:
             return None
@@ -335,10 +411,17 @@ class RejectedOpportunityOutcomeService:
                 ambiguous_target_price=target_price,
             )
         if stop_hit and target is None:
-            return self._candle_result(record, candle, "would_have_hit_stop_loss", float(stop_loss or candle.close_price))
+            return self._candle_result(
+                record,
+                candle,
+                "would_have_hit_stop_loss",
+                float(stop_loss or candle.close_price),
+            )
         if target is not None:
             key, target_price = target
-            return self._candle_result(record, candle, f"would_have_hit_{key}", target_price)
+            return self._candle_result(
+                record, candle, f"would_have_hit_{key}", target_price
+            )
         return None
 
     def _best_target_for_candle(
@@ -370,32 +453,46 @@ class RejectedOpportunityOutcomeService:
         ambiguous_target_price: float | None = None,
     ) -> dict[str, Any]:
         outcome_at = candle.timestamp.replace(tzinfo=None) if candle.timestamp else None
-        rejection_candle_at = record.created_at.replace(second=0, microsecond=0) if record.created_at else None
+        rejection_candle_at = (
+            record.created_at.replace(second=0, microsecond=0)
+            if record.created_at
+            else None
+        )
         return {
             "outcome": outcome,
             "exit_price": exit_price,
             "source": "candle_replay",
             "source_symbol": candle.symbol,
-            "candle_timestamp": candle.timestamp.isoformat(sep=" ") if candle.timestamp else None,
+            "candle_timestamp": candle.timestamp.isoformat(sep=" ")
+            if candle.timestamp
+            else None,
             "outcome_at": outcome_at.isoformat(sep=" ") if outcome_at else None,
             "outcome_minutes": self._minutes_between(rejection_candle_at, outcome_at),
             "candle_high": float(candle.high_price),
             "candle_low": float(candle.low_price),
             "candle_close": float(candle.close_price),
             "ambiguous": ambiguous,
-            "confidence": "chronological_ambiguous" if ambiguous else "chronological_medium",
+            "confidence": "chronological_ambiguous"
+            if ambiguous
+            else "chronological_medium",
             "ambiguous_stop_price": ambiguous_stop_price,
             "ambiguous_target_key": ambiguous_target_key,
             "ambiguous_target_price": ambiguous_target_price,
         }
 
-    def _current_option_price(self, provider: KiteProvider, record: RejectedOpportunityRecord) -> float | None:
+    def _current_option_price(
+        self, provider: KiteProvider, record: RejectedOpportunityRecord
+    ) -> float | None:
         if not record.tradingsymbol:
             return None
-        instrument = f"{record.exchange or settings.option_exchange}:{record.tradingsymbol}"
+        instrument = (
+            f"{record.exchange or settings.option_exchange}:{record.tradingsymbol}"
+        )
         try:
             if self.market_data_coordinator is not None:
-                quote = self.market_data_coordinator.quote([instrument], provider=provider)
+                quote = self.market_data_coordinator.quote(
+                    [instrument], provider=provider
+                )
             else:
                 quote = provider.quote([instrument])
         except Exception:
@@ -411,7 +508,9 @@ class RejectedOpportunityOutcomeService:
             return None
         return 0.0 if str(record.side).upper() == "BUY" else None
 
-    def _outcome_for_price(self, record: RejectedOpportunityRecord, price: float, prices: dict[str, float]) -> str | None:
+    def _outcome_for_price(
+        self, record: RejectedOpportunityRecord, price: float, prices: dict[str, float]
+    ) -> str | None:
         expiry = self._parse_date(record.expiry)
         if expiry is not None and expiry < ist_today():
             return "would_have_expired"
@@ -501,7 +600,16 @@ class RejectedOpportunityOutcomeService:
         except ValueError:
             return None
 
-    def _minutes_between(self, start: datetime | None, end: datetime | None) -> float | None:
+    def _minutes_between(
+        self, start: datetime | None, end: datetime | None
+    ) -> float | None:
         if start is None or end is None:
             return None
-        return round(max(0.0, (end.replace(tzinfo=None) - start.replace(tzinfo=None)).total_seconds() / 60), 2)
+        return round(
+            max(
+                0.0,
+                (end.replace(tzinfo=None) - start.replace(tzinfo=None)).total_seconds()
+                / 60,
+            ),
+            2,
+        )

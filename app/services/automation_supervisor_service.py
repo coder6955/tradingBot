@@ -13,7 +13,9 @@ from app.services.data_ingestion_service import DataIngestionService
 from app.services.market_session_service import MarketSessionService
 from app.services.notification_service import NotificationService
 from app.services.opportunity_outcome_service import OpportunityOutcomeService
-from app.services.option_snapshot_collector_service import OptionSnapshotCollectorService
+from app.services.option_snapshot_collector_service import (
+    OptionSnapshotCollectorService,
+)
 from app.services.risk_management_service import RiskManagementService
 from app.services.runtime_job_repository import RuntimeJobRepository
 
@@ -41,7 +43,9 @@ class AutomationSupervisorService:
         self.risk_management_service = risk_management_service
         self.notification_service = notification_service or NotificationService()
         self.after_market_research_service = after_market_research_service
-        self.market_session_service = market_session_service or MarketSessionService(clock=self._now)
+        self.market_session_service = market_session_service or MarketSessionService(
+            clock=self._now
+        )
         self.lifecycle_repository = lifecycle_repository or RuntimeJobRepository()
         self.task: asyncio.Task[None] | None = None
         self.running = False
@@ -68,7 +72,9 @@ class AutomationSupervisorService:
         self.supervisor_restart_count = 0
         self.service_recovery_count = 0
 
-    def start(self, config: dict[str, Any] | None = None, *, trigger: str = "api") -> dict[str, Any]:
+    def start(
+        self, config: dict[str, Any] | None = None, *, trigger: str = "api"
+    ) -> dict[str, Any]:
         if self._task_is_healthy():
             self.duplicate_start_prevented_count += 1
             return self.status()
@@ -121,8 +127,12 @@ class AutomationSupervisorService:
                 "boot_id": self.boot_id,
                 "process_id": self.process_id,
                 "task_healthy": self._task_is_healthy(),
-                "started_at": self._format_dt(self.started_at) if self.started_at else None,
-                "stopped_at": self._format_dt(self.stopped_at) if self.stopped_at else None,
+                "started_at": self._format_dt(self.started_at)
+                if self.started_at
+                else None,
+                "stopped_at": self._format_dt(self.stopped_at)
+                if self.stopped_at
+                else None,
                 "last_start_trigger": self.last_start_trigger,
                 "last_stop_reason": self.last_stop_reason,
                 "current_run": dict(self.lifecycle_run) if self.lifecycle_run else None,
@@ -133,9 +143,17 @@ class AutomationSupervisorService:
             "config": self.config or self._normalize_config({}),
             "last_cycle_at": self.last_cycle_at,
             "last_bootstrap_date": self.last_bootstrap_date,
-            "last_intraday_candle_sync_at": self._format_dt(self.last_intraday_candle_sync_at) if self.last_intraday_candle_sync_at else None,
+            "last_intraday_candle_sync_at": self._format_dt(
+                self.last_intraday_candle_sync_at
+            )
+            if self.last_intraday_candle_sync_at
+            else None,
             "last_intraday_candle_sync_result": self.last_intraday_candle_sync_result,
-            "last_live_option_candle_catchup_at": self._format_dt(self.last_live_option_candle_catchup_at) if self.last_live_option_candle_catchup_at else None,
+            "last_live_option_candle_catchup_at": self._format_dt(
+                self.last_live_option_candle_catchup_at
+            )
+            if self.last_live_option_candle_catchup_at
+            else None,
             "last_live_option_candle_catchup_result": self.last_live_option_candle_catchup_result,
             "last_bootstrap_result": self.last_bootstrap_result,
             "last_actions": self.last_actions[-20:],
@@ -145,8 +163,13 @@ class AutomationSupervisorService:
                 "collector": self.snapshot_collector_service.status(),
                 "auto_trader": self.auto_trader_service.status(),
                 "outcome_monitor": self.outcome_service.status(),
-                "risk": {"status": "deferred", "reason": "use /risk/status for explicit risk evaluation"},
-                "after_market_research": self.after_market_research_service.status() if self.after_market_research_service else {"enabled": False},
+                "risk": {
+                    "status": "deferred",
+                    "reason": "use /risk/status for explicit risk evaluation",
+                },
+                "after_market_research": self.after_market_research_service.status()
+                if self.after_market_research_service
+                else {"enabled": False},
             },
         }
 
@@ -169,12 +192,20 @@ class AutomationSupervisorService:
                 actions.extend(self._stop_intraday_services_now())
                 self._evaluate_open_once_if_due(now, actions)
                 self._run_after_market_research_if_due(now, actions)
-                actions.append({"action": "market_closed", "status": "ok", "message": "intraday Kite scanning services are stopped outside market hours"})
+                actions.append(
+                    {
+                        "action": "market_closed",
+                        "status": "ok",
+                        "message": "intraday Kite scanning services are stopped outside market hours",
+                    }
+                )
                 if self._should_stop_after_after_market_complete(now, actions):
                     self.running = False
                     self.stopped_at = now
                     self.last_stop_reason = "after_market_pipeline_completed"
-                    self._finish_lifecycle_run(status="completed", reason=self.last_stop_reason)
+                    self._finish_lifecycle_run(
+                        status="completed", reason=self.last_stop_reason
+                    )
                     actions.append(
                         {
                             "action": "automation_stop_after_after_market_complete",
@@ -183,7 +214,12 @@ class AutomationSupervisorService:
                         }
                     )
             self.last_actions.extend(actions)
-            return {"status": "ok", "market_open": self._market_is_open(now), "actions": actions, "automation": self.status()}
+            return {
+                "status": "ok",
+                "market_open": self._market_is_open(now),
+                "actions": actions,
+                "automation": self.status(),
+            }
         except Exception as exc:
             error = {"time": self._format_dt(now), "error": str(exc)}
             self.errors.append(error)
@@ -213,7 +249,9 @@ class AutomationSupervisorService:
                 self.running = False
                 self.stopped_at = self._now()
                 self.last_stop_reason = "supervisor_task_terminated_unexpectedly"
-                self._finish_lifecycle_run(status="failed", reason=self.last_stop_reason)
+                self._finish_lifecycle_run(
+                    status="failed", reason=self.last_stop_reason
+                )
 
     def _bootstrap_daily_data(self) -> dict[str, Any]:
         symbols = self._symbols()
@@ -228,7 +266,9 @@ class AutomationSupervisorService:
         self.last_bootstrap_result = result
         return {"action": "daily_candle_ingestion", "status": "ok", "result": result}
 
-    def _sync_intraday_candles_if_due(self, now: datetime, actions: list[dict[str, Any]]) -> None:
+    def _sync_intraday_candles_if_due(
+        self, now: datetime, actions: list[dict[str, Any]]
+    ) -> None:
         if not bool(self.config["intraday_candle_sync"]):
             return
         interval_minutes = max(1, int(self.config["intraday_candle_sync_minutes"]))
@@ -245,17 +285,33 @@ class AutomationSupervisorService:
         )
         self.last_intraday_candle_sync_at = now
         self.last_intraday_candle_sync_result = result
-        actions.append({"action": "intraday_candle_checkpoint_sync", "status": "ok", "result": result})
+        actions.append(
+            {
+                "action": "intraday_candle_checkpoint_sync",
+                "status": "ok",
+                "result": result,
+            }
+        )
 
-    def _live_option_candle_catchup_if_due(self, now: datetime, actions: list[dict[str, Any]]) -> None:
+    def _live_option_candle_catchup_if_due(
+        self, now: datetime, actions: list[dict[str, Any]]
+    ) -> None:
         if not settings.enable_live_option_candle_gap_backfill:
             return
-        interval_seconds = max(1, int(settings.live_option_candle_backfill_interval_seconds))
+        interval_seconds = max(
+            1, int(settings.live_option_candle_backfill_interval_seconds)
+        )
         if self.last_live_option_candle_catchup_at is not None:
             elapsed = (now - self.last_live_option_candle_catchup_at).total_seconds()
             if elapsed < interval_seconds:
                 return
-        timeframes = [item.strip() for item in str(settings.live_option_candle_backfill_timeframes or "1minute").split(",") if item.strip()]
+        timeframes = [
+            item.strip()
+            for item in str(
+                settings.live_option_candle_backfill_timeframes or "1minute"
+            ).split(",")
+            if item.strip()
+        ]
         result = self.data_ingestion_service.backfill_live_relevant_option_candle_gaps(
             symbols=self._symbols(),
             now=now,
@@ -267,25 +323,43 @@ class AutomationSupervisorService:
         )
         self.last_live_option_candle_catchup_at = now
         self.last_live_option_candle_catchup_result = result
-        actions.append({"action": "live_option_candle_gap_catchup", "status": result.get("status", "ok"), "result": result})
+        actions.append(
+            {
+                "action": "live_option_candle_gap_catchup",
+                "status": result.get("status", "ok"),
+                "result": result,
+            }
+        )
 
     def _ensure_intraday_services(self) -> list[dict[str, Any]]:
         actions: list[dict[str, Any]] = []
         symbols = self._symbols()
         if not self._service_is_healthy(self.snapshot_collector_service):
-            self._prepare_service_recovery(self.snapshot_collector_service, "snapshot_collector")
+            self._prepare_service_recovery(
+                self.snapshot_collector_service, "snapshot_collector"
+            )
             collector = self.snapshot_collector_service.start(
                 symbols=symbols,
                 interval_seconds=int(self.config["snapshot_interval_seconds"]),
                 strike_window_pct=float(self.config["strike_window_pct"]),
                 max_contracts_per_symbol=int(self.config["max_contracts_per_symbol"]),
             )
-            actions.append({"action": "start_snapshot_collector", "status": "ok", "collector": collector})
+            actions.append(
+                {
+                    "action": "start_snapshot_collector",
+                    "status": "ok",
+                    "collector": collector,
+                }
+            )
 
         if not self._service_is_healthy(self.outcome_service):
             self._prepare_service_recovery(self.outcome_service, "outcome_monitor")
-            monitor = self.outcome_service.start(interval_seconds=int(self.config["outcome_interval_seconds"]))
-            actions.append({"action": "start_outcome_monitor", "status": "ok", "monitor": monitor})
+            monitor = self.outcome_service.start(
+                interval_seconds=int(self.config["outcome_interval_seconds"])
+            )
+            actions.append(
+                {"action": "start_outcome_monitor", "status": "ok", "monitor": monitor}
+            )
 
         if not self._service_is_healthy(self.auto_trader_service):
             self._prepare_service_recovery(self.auto_trader_service, "auto_trader")
@@ -298,43 +372,88 @@ class AutomationSupervisorService:
                 confirm_live=bool(self.config["confirm_live"]),
                 order_mode=str(self.config["order_mode"]),
             )
-            actions.append({"action": "start_auto_trader", "status": "ok", "auto_trader": trader})
+            actions.append(
+                {"action": "start_auto_trader", "status": "ok", "auto_trader": trader}
+            )
         return actions or [{"action": "intraday_services", "status": "already_running"}]
 
     def _evaluate_open_once(self, actions: list[dict[str, Any]]) -> None:
         try:
             result = self.outcome_service.evaluate_once(
                 limit=int(settings.rejected_outcome_batch_limit),
-                exhaust_rejected=bool(settings.automation_exhaust_rejected_outcomes_after_close),
+                exhaust_rejected=bool(
+                    settings.automation_exhaust_rejected_outcomes_after_close
+                ),
             )
-            actions.append({"action": "evaluate_open_opportunities", "status": "ok", "result": result})
+            actions.append(
+                {
+                    "action": "evaluate_open_opportunities",
+                    "status": "ok",
+                    "result": result,
+                }
+            )
         except Exception as exc:
-            actions.append({"action": "evaluate_open_opportunities", "status": "error", "message": str(exc)})
+            actions.append(
+                {
+                    "action": "evaluate_open_opportunities",
+                    "status": "error",
+                    "message": str(exc),
+                }
+            )
 
-    def _evaluate_open_once_if_due(self, now: datetime, actions: list[dict[str, Any]]) -> None:
+    def _evaluate_open_once_if_due(
+        self, now: datetime, actions: list[dict[str, Any]]
+    ) -> None:
         market_close = self._parse_time(settings.runtime_market_close_time)
         if now.weekday() >= 5 or now.time() <= market_close:
-            actions.append({"action": "evaluate_open_opportunities", "status": "skipped", "reason": "market_not_closed_for_day"})
+            actions.append(
+                {
+                    "action": "evaluate_open_opportunities",
+                    "status": "skipped",
+                    "reason": "market_not_closed_for_day",
+                }
+            )
             return
         today = now.date().isoformat()
         if self.last_market_closed_evaluation_date == today:
-            actions.append({"action": "evaluate_open_opportunities", "status": "skipped", "reason": "already_checked_after_market_close"})
+            actions.append(
+                {
+                    "action": "evaluate_open_opportunities",
+                    "status": "skipped",
+                    "reason": "already_checked_after_market_close",
+                }
+            )
             return
         self._evaluate_open_once(actions)
         self.last_market_closed_evaluation_date = today
 
-    def _run_after_market_research_if_due(self, now: datetime, actions: list[dict[str, Any]]) -> None:
+    def _run_after_market_research_if_due(
+        self, now: datetime, actions: list[dict[str, Any]]
+    ) -> None:
         if self.after_market_research_service is None:
             return
         try:
             result = self.after_market_research_service.maybe_run_after_market(now)
-            if result.get("status") != "idle" or result.get("reason") == "already_ran_today":
+            if (
+                result.get("status") != "idle"
+                or result.get("reason") == "already_ran_today"
+            ):
                 actions.append(result)
         except Exception as exc:
-            actions.append({"action": "after_market_research", "status": "error", "message": str(exc)})
+            actions.append(
+                {
+                    "action": "after_market_research",
+                    "status": "error",
+                    "message": str(exc),
+                }
+            )
 
-    def _should_stop_after_after_market_complete(self, now: datetime, actions: list[dict[str, Any]]) -> bool:
-        if not self.running or not bool(settings.automation_stop_after_after_market_complete):
+    def _should_stop_after_after_market_complete(
+        self, now: datetime, actions: list[dict[str, Any]]
+    ) -> bool:
+        if not self.running or not bool(
+            settings.automation_stop_after_after_market_complete
+        ):
             return False
         # A boot-managed supervisor must survive overnight so it can restart
         # the intraday workers on the next market day without human action.
@@ -352,7 +471,11 @@ class AutomationSupervisorService:
             reason = str(action.get("reason") or "")
             return status in {"ok", "partial"} or reason == "already_ran_today"
         try:
-            status = self.after_market_research_service.status() if self.after_market_research_service else {}
+            status = (
+                self.after_market_research_service.status()
+                if self.after_market_research_service
+                else {}
+            )
         except Exception:
             return False
         return status.get("next_action") == "research_completed_for_today"
@@ -378,7 +501,14 @@ class AutomationSupervisorService:
             task = getattr(service, "task", None)
             if task is not None:
                 task.cancel()
-            actions.append({"action": action, "status": "ok", "reason": "market_closed", "service": service.status()})
+            actions.append(
+                {
+                    "action": action,
+                    "status": "ok",
+                    "reason": "market_closed",
+                    "service": service.status(),
+                }
+            )
         return actions
 
     def _should_bootstrap_today(self, now: datetime) -> bool:
@@ -386,16 +516,23 @@ class AutomationSupervisorService:
             return False
         if self.last_bootstrap_date == now.date().isoformat():
             return False
-        return self.market_session_service.current_runtime_mode(now) in {"PRE_MARKET", "AFTER_MARKET_REVIEW"}
+        return self.market_session_service.current_runtime_mode(now) in {
+            "PRE_MARKET",
+            "AFTER_MARKET_REVIEW",
+        }
 
     def _market_is_open(self, now: datetime | None = None) -> bool:
         return self.market_session_service.should_run_live_modules(now or self._now())
 
     def _normalize_config(self, payload: dict[str, Any]) -> dict[str, Any]:
-        order_mode = str(payload.get("order_mode") or settings.default_order_mode or "paper").lower()
+        order_mode = str(
+            payload.get("order_mode") or settings.default_order_mode or "paper"
+        ).lower()
         if order_mode not in {"paper", "live"}:
             order_mode = "paper"
-        place_orders = bool(payload.get("place_orders", settings.automation_place_orders))
+        place_orders = bool(
+            payload.get("place_orders", settings.automation_place_orders)
+        )
         if "place_orders" not in payload:
             place_orders = True
         confirm_live = bool(payload.get("confirm_live", order_mode == "live"))
@@ -403,18 +540,47 @@ class AutomationSupervisorService:
             "symbols": payload.get("symbols") or settings.automation_symbols,
             "order_mode": order_mode,
             "side": str(payload.get("side") or settings.automation_side).upper(),
-            "scan_interval_seconds": int(payload.get("scan_interval_seconds") or settings.automation_scan_interval_seconds),
-            "snapshot_interval_seconds": int(payload.get("snapshot_interval_seconds") or settings.automation_snapshot_interval_seconds),
-            "outcome_interval_seconds": int(payload.get("outcome_interval_seconds") or settings.automation_outcome_interval_seconds),
-            "ingest_days": int(payload.get("ingest_days") or settings.automation_ingest_days),
-            "checkpoint_overlap_minutes": int(payload.get("checkpoint_overlap_minutes") or settings.automation_checkpoint_overlap_minutes),
-            "intraday_candle_sync": bool(payload.get("intraday_candle_sync", settings.automation_intraday_candle_sync)),
-            "intraday_candle_sync_minutes": int(payload.get("intraday_candle_sync_minutes") or settings.automation_intraday_candle_sync_minutes),
+            "scan_interval_seconds": int(
+                payload.get("scan_interval_seconds")
+                or settings.automation_scan_interval_seconds
+            ),
+            "snapshot_interval_seconds": int(
+                payload.get("snapshot_interval_seconds")
+                or settings.automation_snapshot_interval_seconds
+            ),
+            "outcome_interval_seconds": int(
+                payload.get("outcome_interval_seconds")
+                or settings.automation_outcome_interval_seconds
+            ),
+            "ingest_days": int(
+                payload.get("ingest_days") or settings.automation_ingest_days
+            ),
+            "checkpoint_overlap_minutes": int(
+                payload.get("checkpoint_overlap_minutes")
+                or settings.automation_checkpoint_overlap_minutes
+            ),
+            "intraday_candle_sync": bool(
+                payload.get(
+                    "intraday_candle_sync", settings.automation_intraday_candle_sync
+                )
+            ),
+            "intraday_candle_sync_minutes": int(
+                payload.get("intraday_candle_sync_minutes")
+                or settings.automation_intraday_candle_sync_minutes
+            ),
             "place_orders": place_orders,
             "confirm_live": confirm_live if order_mode == "live" else False,
-            "scan_limit": int(payload.get("scan_limit") or settings.automation_scan_limit),
-            "strike_window_pct": float(payload.get("strike_window_pct") or settings.automation_strike_window_pct),
-            "max_contracts_per_symbol": int(payload.get("max_contracts_per_symbol") or settings.automation_max_contracts_per_symbol),
+            "scan_limit": int(
+                payload.get("scan_limit") or settings.automation_scan_limit
+            ),
+            "strike_window_pct": float(
+                payload.get("strike_window_pct")
+                or settings.automation_strike_window_pct
+            ),
+            "max_contracts_per_symbol": int(
+                payload.get("max_contracts_per_symbol")
+                or settings.automation_max_contracts_per_symbol
+            ),
         }
 
     def _symbols(self) -> list[str]:
@@ -472,7 +638,9 @@ class AutomationSupervisorService:
             previous = (
                 latest_run(job_name="automation_supervisor")
                 if callable(latest_run)
-                else self.lifecycle_repository.latest(job_name="automation_supervisor", trading_date=trading_date)
+                else self.lifecycle_repository.latest(
+                    job_name="automation_supervisor", trading_date=trading_date
+                )
             )
             if previous and previous.get("status") == "running" and previous.get("id"):
                 previous_metadata = dict(previous.get("metadata") or {})

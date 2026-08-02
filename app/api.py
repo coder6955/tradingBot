@@ -22,7 +22,9 @@ from app.services.automation_supervisor_service import AutomationSupervisorServi
 from app.services.opportunity_repository import OpportunityRepository
 from app.services.opportunity_outcome_service import OpportunityOutcomeService
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
-from app.services.rejected_opportunity_outcome_service import RejectedOpportunityOutcomeService
+from app.services.rejected_opportunity_outcome_service import (
+    RejectedOpportunityOutcomeService,
+)
 from app.services.broker_sync_service import BrokerSyncService
 from app.services.backtest_service import BacktestService
 from app.services.data_ingestion_service import DataIngestionService
@@ -56,16 +58,23 @@ from app.services.market_data_runtime_service import MarketDataRuntimeService
 from app.services.market_session_service import MarketSessionService
 from app.services.opportunity_analytics_service import OpportunityAnalyticsService
 from app.services.option_history_repository import OptionHistoryRepository
-from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
+from app.services.option_premium_confirmation_service import (
+    OptionPremiumConfirmationService,
+)
 from app.services.option_quality_service import OptionQualityService
-from app.services.option_snapshot_collector_service import OptionSnapshotCollectorService
+from app.services.option_snapshot_collector_service import (
+    OptionSnapshotCollectorService,
+)
 from app.services.outcome_learning_service import OutcomeLearningService
 from app.services.professional_readiness_service import ProfessionalReadinessService
 from app.services.professional_insights_service import ProfessionalInsightsService
 from app.services.risk_management_service import RiskManagementService
 from app.services.pre_order_risk_service import PreOrderRiskService
 from app.services.risk_policy_service import RiskPolicyService
-from app.services.research_reporting_service import ResearchDatasetAuditService, ShadowPolicyResearchReportService
+from app.services.research_reporting_service import (
+    ResearchDatasetAuditService,
+    ShadowPolicyResearchReportService,
+)
 from app.services.runtime_trading_config_service import RuntimeTradingConfigService
 from app.services.runtime_job_repository import RuntimeJobRepository
 from app.services.strategy_edge_service import StrategyEdgeService
@@ -106,18 +115,51 @@ _research_report_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _research_report_cache_lock = threading.Lock()
 
 OPENAPI_TAGS = [
-    {"name": "01 System", "description": "Start here: app health, DB health, and workflow overview."},
-    {"name": "02 Kite Login", "description": "Authenticate with Zerodha Kite and verify account connectivity."},
-    {"name": "03 Scanner", "description": "Find and diagnose option opportunities. Emitted opportunities are saved to DB."},
-    {"name": "04 Orders", "description": "Place paper orders by default; live orders require explicit live config and confirmation."},
-    {"name": "05 Auto Trader", "description": "Continuously scan for opportunities and optionally place orders."},
-    {"name": "06 Opportunity Journal", "description": "Review saved opportunities, mark outcomes, and study failures."},
-    {"name": "07 Outcome Monitor", "description": "Automatically evaluate open opportunities against stop/target prices."},
-    {"name": "08 Paper Trading", "description": "Inspect and close simulated in-memory paper trades."},
+    {
+        "name": "01 System",
+        "description": "Start here: app health, DB health, and workflow overview.",
+    },
+    {
+        "name": "02 Kite Login",
+        "description": "Authenticate with Zerodha Kite and verify account connectivity.",
+    },
+    {
+        "name": "03 Scanner",
+        "description": "Find and diagnose option opportunities. Emitted opportunities are saved to DB.",
+    },
+    {
+        "name": "04 Orders",
+        "description": "Place paper orders by default; live orders require explicit live config and confirmation.",
+    },
+    {
+        "name": "05 Auto Trader",
+        "description": "Continuously scan for opportunities and optionally place orders.",
+    },
+    {
+        "name": "06 Opportunity Journal",
+        "description": "Review saved opportunities, mark outcomes, and study failures.",
+    },
+    {
+        "name": "07 Outcome Monitor",
+        "description": "Automatically evaluate open opportunities against stop/target prices.",
+    },
+    {
+        "name": "08 Paper Trading",
+        "description": "Inspect and close simulated in-memory paper trades.",
+    },
     {"name": "09 Market Data", "description": "Read stored market summaries."},
-    {"name": "10 Research", "description": "Market insight filters, Greeks, IV, option-quality filters, and historical rule replay."},
-    {"name": "11 Data Ingestion", "description": "Pull historical candles and option-chain snapshots into MySQL."},
-    {"name": "12 Automation", "description": "One-switch supervisor for daily ingestion, collectors, scanners, and monitors."},
+    {
+        "name": "10 Research",
+        "description": "Market insight filters, Greeks, IV, option-quality filters, and historical rule replay.",
+    },
+    {
+        "name": "11 Data Ingestion",
+        "description": "Pull historical candles and option-chain snapshots into MySQL.",
+    },
+    {
+        "name": "12 Automation",
+        "description": "One-switch supervisor for daily ingestion, collectors, scanners, and monitors.",
+    },
 ]
 
 app = FastAPI(
@@ -135,7 +177,9 @@ async def log_request_timing(request: Request, call_next):
         response = await call_next(request)
     except Exception:
         elapsed = time_module.perf_counter() - started
-        logger.exception("request failed after %.3fs path=%s", elapsed, request.url.path)
+        logger.exception(
+            "request failed after %.3fs path=%s", elapsed, request.url.path
+        )
         raise
     elapsed = time_module.perf_counter() - started
     response.headers["X-Process-Time-ms"] = str(round(elapsed * 1000, 3))
@@ -150,7 +194,9 @@ async def log_request_timing(request: Request, call_next):
     return response
 
 
-def _extract_api_auth_token(authorization: str | None, x_api_key: str | None) -> str | None:
+def _extract_api_auth_token(
+    authorization: str | None, x_api_key: str | None
+) -> str | None:
     if x_api_key:
         return x_api_key.strip()
     if authorization:
@@ -168,17 +214,23 @@ def require_api_auth(
     configured_token = settings.api_auth_token
     if not configured_token:
         if settings.api_auth_required:
-            raise HTTPException(status_code=503, detail="API auth token is not configured")
+            raise HTTPException(
+                status_code=503, detail="API auth token is not configured"
+            )
         return
     supplied_token = _extract_api_auth_token(authorization, x_api_key)
-    if not supplied_token or not secrets.compare_digest(str(configured_token), supplied_token):
+    if not supplied_token or not secrets.compare_digest(
+        str(configured_token), supplied_token
+    ):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 PROTECTED_ROUTE = [Depends(require_api_auth)]
 
 
-def _bounded_int(value: object, default: int, *, minimum: int = 1, maximum: int = 3000) -> int:
+def _bounded_int(
+    value: object, default: int, *, minimum: int = 1, maximum: int = 3000
+) -> int:
     try:
         parsed = int(value) if value is not None else default
     except (TypeError, ValueError):
@@ -241,7 +293,9 @@ market_session_service = MarketSessionService()
 latency_metrics_service = LatencyMetricsService()
 episode_outcome_collector.latency_metrics = latency_metrics_service
 raw_tick_capture_service = RawTickCaptureService()
-underlying_candle_service = UnderlyingCandleService(market_session_service=market_session_service)
+underlying_candle_service = UnderlyingCandleService(
+    market_session_service=market_session_service
+)
 kite_websocket_price_feed = KiteWebSocketPriceFeed(
     market_session_service=market_session_service,
     latency_metrics=latency_metrics_service,
@@ -264,11 +318,19 @@ def _cached_executable_bid_for_equity(trade: Any) -> float | None:
         return None
     observed_at = tick.receive_timestamp or tick.timestamp
     age = (ist_now_naive() - observed_at.replace(tzinfo=None)).total_seconds()
-    return float(tick.bid) if age <= float(settings.websocket_price_stale_seconds) else None
+    return (
+        float(tick.bid)
+        if age <= float(settings.websocket_price_stale_seconds)
+        else None
+    )
 
 
-risk_management_service.account_equity_state_service.executable_bid_provider = _cached_executable_bid_for_equity
-banknifty_option_prewarm_service = BankNiftyOptionPrewarmService(kite_websocket_price_feed)
+risk_management_service.account_equity_state_service.executable_bid_provider = (
+    _cached_executable_bid_for_equity
+)
+banknifty_option_prewarm_service = BankNiftyOptionPrewarmService(
+    kite_websocket_price_feed
+)
 shared_trade_setup_service = TradeSetupService()
 market_data_runtime_service = MarketDataRuntimeService(
     websocket_feed=kite_websocket_price_feed,
@@ -278,7 +340,9 @@ market_data_runtime_service = MarketDataRuntimeService(
 strategy_validation_repository = StrategyValidationRepository()
 strategy_version_registry = StrategyVersionRegistry()
 banknifty_intelligence_service = BankNiftyIntelligenceService()
-strategy_edge_service = StrategyEdgeService(backtest_service=backtest_service, repository=strategy_validation_repository)
+strategy_edge_service = StrategyEdgeService(
+    backtest_service=backtest_service, repository=strategy_validation_repository
+)
 day_type_service = DayTypeService()
 option_premium_confirmation_service = OptionPremiumConfirmationService()
 time_bucket_edge_service = TimeBucketEdgeService(backtest_service=backtest_service)
@@ -344,7 +408,9 @@ rejected_opportunity_outcome_service = RejectedOpportunityOutcomeService(
     kite_provider_factory=get_kite_provider,
     market_data_coordinator=market_data_coordinator,
 )
-after_market_research_service.rejected_outcome_service = rejected_opportunity_outcome_service
+after_market_research_service.rejected_outcome_service = (
+    rejected_opportunity_outcome_service
+)
 
 
 data_ingestion_service = DataIngestionService(
@@ -356,7 +422,9 @@ data_ingestion_service = DataIngestionService(
 )
 after_market_research_service.data_ingestion_service = data_ingestion_service
 option_premium_confirmation_service.live_gap_backfill_service = data_ingestion_service
-option_snapshot_collector_service = OptionSnapshotCollectorService(data_ingestion_service)
+option_snapshot_collector_service = OptionSnapshotCollectorService(
+    data_ingestion_service
+)
 
 
 def get_scanner_service() -> ScannerService:
@@ -364,7 +432,9 @@ def get_scanner_service() -> ScannerService:
         strategy_edge_service=strategy_edge_service,
         feed=shared_kite_feed,
         trade_setup_service=shared_trade_setup_service,
-        option_premium_confirmation_service=OptionPremiumConfirmationService(kite_websocket_price_feed, live_gap_backfill_service=data_ingestion_service),
+        option_premium_confirmation_service=OptionPremiumConfirmationService(
+            kite_websocket_price_feed, live_gap_backfill_service=data_ingestion_service
+        ),
         rejected_opportunity_repository=rejected_opportunity_repository,
         banknifty_intelligence_service=banknifty_intelligence_service,
         banknifty_option_prewarm_service=banknifty_option_prewarm_service,
@@ -413,7 +483,12 @@ def _combined_live_safety_status() -> dict[str, Any]:
             "source": "strategy_lineage",
             "strategy": version,
         }
-    return {"blocked": False, "source": "combined", "broker": broker, "strategy": version}
+    return {
+        "blocked": False,
+        "source": "combined",
+        "broker": broker,
+        "strategy": version,
+    }
 
 
 armed_entry_tracker_service = ArmedEntryTrackerService(
@@ -442,7 +517,9 @@ auto_trader_service = AutoTraderService(
     fast_candidate_promoter=armed_entry_tracker_service,
     decision_evidence_repository=decision_evidence_repository,
 )
-banknifty_fast_rally_service = BankNiftyFastRallyService(auto_trader_service.request_fast_rescan, latency_metrics=latency_metrics_service)
+banknifty_fast_rally_service = BankNiftyFastRallyService(
+    auto_trader_service.request_fast_rescan, latency_metrics=latency_metrics_service
+)
 
 
 def _dispatch_strategy_tick(tick: object) -> None:
@@ -476,8 +553,12 @@ broker_sync_service = BrokerSyncService(
     notification_service=notification_service,
     latency_metrics=latency_metrics_service,
 )
-broker_sync_service.set_exit_confirmation_callback(trade_exit_service.confirm_live_exit_for_trade)
-kite_websocket_price_feed.order_update_handler = broker_sync_service.handle_order_postback
+broker_sync_service.set_exit_confirmation_callback(
+    trade_exit_service.confirm_live_exit_for_trade
+)
+kite_websocket_price_feed.order_update_handler = (
+    broker_sync_service.handle_order_postback
+)
 automation_supervisor_service = AutomationSupervisorService(
     data_ingestion_service=data_ingestion_service,
     snapshot_collector_service=option_snapshot_collector_service,
@@ -497,8 +578,12 @@ async def startup_automation() -> None:
     episode_outcome_collector.start()
     raw_tick_capture_service.start()
     underlying_candle_service.start()
-    threading.Thread(target=_run_startup_maintenance, name="startup-maintenance", daemon=True).start()
-    threading.Thread(target=_run_startup_broker_sync, name="startup-broker-sync", daemon=True).start()
+    threading.Thread(
+        target=_run_startup_maintenance, name="startup-maintenance", daemon=True
+    ).start()
+    threading.Thread(
+        target=_run_startup_broker_sync, name="startup-broker-sync", daemon=True
+    ).start()
     if settings.automation_enabled:
         automation_supervisor_service.start(trigger="application_startup")
 
@@ -534,18 +619,31 @@ def _run_startup_maintenance() -> None:
                 ),
                 None,
             )
-            underlying_token = int(banknifty.get("instrument_token")) if banknifty and banknifty.get("instrument_token") else None
+            underlying_token = (
+                int(banknifty.get("instrument_token"))
+                if banknifty and banknifty.get("instrument_token")
+                else None
+            )
             if underlying_token:
                 banknifty_fast_rally_service.set_underlying_token(underlying_token)
                 underlying_candle_service.set_underlying_token(underlying_token)
-                kite_websocket_price_feed.register_token_symbol(underlying_token, "BANKNIFTY")
-                kite_websocket_price_feed.subscribe({underlying_token}, owner="core_market", mode="quote")
+                kite_websocket_price_feed.register_token_symbol(
+                    underlying_token, "BANKNIFTY"
+                )
+                kite_websocket_price_feed.subscribe(
+                    {underlying_token}, owner="core_market", mode="quote"
+                )
         except Exception:
             logger.exception("startup websocket start failed")
     try:
         if _scanner_market_is_open():
             _start_scanner_refresh(
-                cache_key=_scanner_cache_key(side=settings.automation_side, symbols=settings.automation_symbols, limit=settings.automation_scan_limit, order_mode=settings.default_order_mode),
+                cache_key=_scanner_cache_key(
+                    side=settings.automation_side,
+                    symbols=settings.automation_symbols,
+                    limit=settings.automation_scan_limit,
+                    order_mode=settings.default_order_mode,
+                ),
                 side=settings.automation_side,
                 symbols=settings.automation_symbols,
                 limit=settings.automation_scan_limit,
@@ -586,7 +684,11 @@ async def health() -> dict[str, str]:
     return {"status": "ok", "service": settings.app_name}
 
 
-@app.get("/market-data/pipeline-status", tags=["09 Market Data"], summary="Inspect canonical candles, raw ticks, queues, and latency")
+@app.get(
+    "/market-data/pipeline-status",
+    tags=["09 Market Data"],
+    summary="Inspect canonical candles, raw ticks, queues, and latency",
+)
 def market_data_pipeline_status() -> dict[str, object]:
     return {
         "canonical_underlying_candles": underlying_candle_service.status(),
@@ -607,12 +709,23 @@ def banknifty_constituent_status() -> dict[str, object]:
     return banknifty_intelligence_service.snapshot_status()
 
 
-@app.get("/runtime/latency", tags=["01 System"], summary="Read end-to-end trading-path latency percentiles")
+@app.get(
+    "/runtime/latency",
+    tags=["01 System"],
+    summary="Read end-to-end trading-path latency percentiles",
+)
 def runtime_latency() -> dict[str, object]:
-    return {**latency_metrics_service.report(), "io_call_budgets": io_call_metrics.report()}
+    return {
+        **latency_metrics_service.report(),
+        "io_call_budgets": io_call_metrics.report(),
+    }
 
 
-@app.get("/risk/policy/status", tags=["01 System"], summary="Inspect active and shadow risk-tier policy safety")
+@app.get(
+    "/risk/policy/status",
+    tags=["01 System"],
+    summary="Inspect active and shadow risk-tier policy safety",
+)
 def risk_policy_status() -> dict[str, object]:
     policy = RiskPolicyService()
     conflicts = policy.configuration_conflicts()
@@ -636,13 +749,21 @@ def risk_policy_status() -> dict[str, object]:
         "validated_higher_risk_active": settings.enable_validated_higher_risk_active,
         "exceptional_live_risk_active": settings.enable_exceptional_live_risk,
         "configuration_conflicts": conflicts,
-        "configuration_valid": not any(not item.startswith("POLICY_CONFLICT_") for item in conflicts),
+        "configuration_valid": not any(
+            not item.startswith("POLICY_CONFLICT_") for item in conflicts
+        ),
     }
 
 
-@app.get("/risk/equity/snapshot", tags=["01 System"], summary="Create an audited executable-bid account-equity snapshot")
+@app.get(
+    "/risk/equity/snapshot",
+    tags=["01 System"],
+    summary="Create an audited executable-bid account-equity snapshot",
+)
 def audited_account_equity_snapshot() -> dict[str, object]:
-    return risk_management_service.account_equity_state_service.snapshot(persist=True).to_dict()
+    return risk_management_service.account_equity_state_service.snapshot(
+        persist=True
+    ).to_dict()
 
 
 @app.get("/db/health", tags=["01 System"], summary="Check database connectivity")
@@ -669,12 +790,18 @@ def db_health() -> dict[str, object]:
         }
 
 
-@app.get("/runtime/status", tags=["01 System"], summary="Inspect live runtime scheduler and API load controls")
+@app.get(
+    "/runtime/status",
+    tags=["01 System"],
+    summary="Inspect live runtime scheduler and API load controls",
+)
 async def runtime_status() -> dict[str, object]:
     now = ist_now_naive()
     with scanner_response_cache_lock:
         scanner_entries = len(scanner_response_cache)
-        scanner_refreshing = sum(1 for entry in scanner_response_cache.values() if entry.get("refreshing"))
+        scanner_refreshing = sum(
+            1 for entry in scanner_response_cache.values() if entry.get("refreshing")
+        )
         scanner_errors = [
             {"key": key, "error": entry.get("last_error")}
             for key, entry in scanner_response_cache.items()
@@ -693,7 +820,9 @@ async def runtime_status() -> dict[str, object]:
             "scanner_response_stale_ttl_seconds": settings.scanner_response_stale_ttl_seconds,
         },
         "kite": {
-            "access_token_available": bool(load_access_token() or settings.kite_access_token),
+            "access_token_available": bool(
+                load_access_token() or settings.kite_access_token
+            ),
             "shared_provider_created": shared_kite_provider is not None,
             "api_timeout_seconds": settings.kite_api_timeout_seconds,
         },
@@ -704,7 +833,9 @@ async def runtime_status() -> dict[str, object]:
             "running": ws_status.get("running"),
             "connected": ws_status.get("connected"),
             "market_session": ws_status.get("market_session"),
-            "duplicate_start_prevented_count": ws_status.get("duplicate_start_prevented_count"),
+            "duplicate_start_prevented_count": ws_status.get(
+                "duplicate_start_prevented_count"
+            ),
             "reconnect_count": ws_status.get("reconnect_count"),
             "disconnect_count": ws_status.get("disconnect_count"),
             "last_error": ws_status.get("last_error"),
@@ -730,41 +861,77 @@ async def runtime_status() -> dict[str, object]:
     }
 
 
-@app.get("/market-data/cache/status", tags=["09 Market Data"], summary="Inspect shared market-data quote cache")
+@app.get(
+    "/market-data/cache/status",
+    tags=["09 Market Data"],
+    summary="Inspect shared market-data quote cache",
+)
 def market_data_cache_status() -> dict[str, object]:
     return market_data_coordinator.status()
 
 
-@app.get("/strategy/versions/current", tags=["10 Research"], summary="Inspect the active strategy version registry entry")
+@app.get(
+    "/strategy/versions/current",
+    tags=["10 Research"],
+    summary="Inspect the active strategy version registry entry",
+)
 def current_strategy_version() -> dict[str, object]:
     return strategy_version_registry.current_version()
 
 
-@app.get("/strategy/versions", tags=["10 Research"], summary="List strategy version registry entries")
+@app.get(
+    "/strategy/versions",
+    tags=["10 Research"],
+    summary="List strategy version registry entries",
+)
 def list_strategy_versions(limit: int = 50) -> dict[str, object]:
     return strategy_version_registry.list_versions(limit=limit)
 
 
-@app.get("/strategy/versions/{version}", tags=["10 Research"], summary="Inspect one strategy version registry entry")
+@app.get(
+    "/strategy/versions/{version}",
+    tags=["10 Research"],
+    summary="Inspect one strategy version registry entry",
+)
 def get_strategy_version(version: str) -> dict[str, object]:
     result = strategy_version_registry.get_version(version)
     if result.get("status") == "not_found":
-        raise HTTPException(status_code=404, detail=f"strategy version not found: {version}")
+        raise HTTPException(
+            status_code=404, detail=f"strategy version not found: {version}"
+        )
     return result
 
 
-@app.get("/research/evidence-matrix", tags=["10 Research"], summary="Inspect setup/regime outcome evidence")
-def get_evidence_matrix(group_by: str | None = None, limit: int = 5000) -> dict[str, object]:
-    dimensions = [item.strip() for item in str(group_by or "").split(",") if item.strip()] or None
-    return evidence_matrix_service.report(group_by=dimensions, limit=max(1, min(int(limit), 10000)))
+@app.get(
+    "/research/evidence-matrix",
+    tags=["10 Research"],
+    summary="Inspect setup/regime outcome evidence",
+)
+def get_evidence_matrix(
+    group_by: str | None = None, limit: int = 5000
+) -> dict[str, object]:
+    dimensions = [
+        item.strip() for item in str(group_by or "").split(",") if item.strip()
+    ] or None
+    return evidence_matrix_service.report(
+        group_by=dimensions, limit=max(1, min(int(limit), 10000))
+    )
 
 
-@app.get("/research/strategy-promotion", tags=["10 Research"], summary="Evaluate guarded strategy promotion readiness")
+@app.get(
+    "/research/strategy-promotion",
+    tags=["10 Research"],
+    summary="Evaluate guarded strategy promotion readiness",
+)
 def get_strategy_promotion(timeframe: str = "5minute") -> dict[str, object]:
     return strategy_promotion_service.evaluate(timeframe=timeframe)
 
 
-@app.get("/research/shadow-validation/status", tags=["10 Research"], summary="Inspect asynchronous research collection health")
+@app.get(
+    "/research/shadow-validation/status",
+    tags=["10 Research"],
+    summary="Inspect asynchronous research collection health",
+)
 def shadow_validation_status() -> dict[str, object]:
     return {
         "active_policy_changed": False,
@@ -774,23 +941,41 @@ def shadow_validation_status() -> dict[str, object]:
     }
 
 
-@app.get("/research/dataset-audit", tags=["10 Research"], summary="Audit replay and executable-quote dataset completeness")
+@app.get(
+    "/research/dataset-audit",
+    tags=["10 Research"],
+    summary="Audit replay and executable-quote dataset completeness",
+)
 def research_dataset_audit() -> dict[str, object]:
     return research_dataset_audit_service.audit()
 
 
-@app.get("/research/shadow-policy-report", tags=["10 Research"], summary="Compare shadow policies by chronological unique episodes")
+@app.get(
+    "/research/shadow-policy-report",
+    tags=["10 Research"],
+    summary="Compare shadow policies by chronological unique episodes",
+)
 def shadow_policy_report(maximum_horizon_seconds: int = 900) -> dict[str, object]:
     horizon = max(30, min(int(maximum_horizon_seconds), 86400))
     return shadow_policy_research_report_service.report(maximum_horizon_seconds=horizon)
 
 
-@app.post("/strategy/versions/register", tags=["10 Research"], summary="Register or refresh the current strategy version with human notes")
-def register_strategy_version(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
+@app.post(
+    "/strategy/versions/register",
+    tags=["10 Research"],
+    summary="Register or refresh the current strategy version with human notes",
+)
+def register_strategy_version(
+    payload: dict[str, object] | None = Body(default=None),
+) -> dict[str, object]:
     payload = payload or {}
     base = strategy_version_registry.current_payload(
-        human_note=str(payload.get("human_note")) if payload.get("human_note") else None,
-        reason_for_change=str(payload.get("reason_for_change")) if payload.get("reason_for_change") else None,
+        human_note=str(payload.get("human_note"))
+        if payload.get("human_note")
+        else None,
+        reason_for_change=str(payload.get("reason_for_change"))
+        if payload.get("reason_for_change")
+        else None,
     )
     for key in (
         "strategy_name",
@@ -847,7 +1032,12 @@ def root() -> dict[str, object]:
     }
 
 
-@app.get("/dashboard", response_class=HTMLResponse, tags=["01 System"], summary="Open command center dashboard")
+@app.get(
+    "/dashboard",
+    response_class=HTMLResponse,
+    tags=["01 System"],
+    summary="Open command center dashboard",
+)
 async def command_center_dashboard() -> HTMLResponse:
     return HTMLResponse(
         """
@@ -1642,12 +1832,28 @@ setInterval(refreshAll, DASHBOARD_REFRESH_MS);
 
 def _decision_event_from_opportunity(record) -> dict[str, object]:
     factors = _json_dict(getattr(record, "factor_scores_json", None))
-    timing = factors.get("entry_timing", {}) if isinstance(factors.get("entry_timing"), dict) else {}
+    timing = (
+        factors.get("entry_timing", {})
+        if isinstance(factors.get("entry_timing"), dict)
+        else {}
+    )
     state = str(timing.get("entry_timing_state") or "ACCEPTED")
     reason = str(timing.get("entry_timing_reason") or "Accepted opportunity saved")
-    market = factors.get("market_regime", {}) if isinstance(factors.get("market_regime"), dict) else {}
-    momentum = factors.get("momentum_phase", {}) if isinstance(factors.get("momentum_phase"), dict) else {}
-    family = factors.get("setup_family", {}) if isinstance(factors.get("setup_family"), dict) else {}
+    market = (
+        factors.get("market_regime", {})
+        if isinstance(factors.get("market_regime"), dict)
+        else {}
+    )
+    momentum = (
+        factors.get("momentum_phase", {})
+        if isinstance(factors.get("momentum_phase"), dict)
+        else {}
+    )
+    family = (
+        factors.get("setup_family", {})
+        if isinstance(factors.get("setup_family"), dict)
+        else {}
+    )
     return {
         "time": format_ist(record.created_at),
         "sort_time": record.created_at.isoformat() if record.created_at else "",
@@ -1672,17 +1878,48 @@ def _decision_event_from_opportunity(record) -> dict[str, object]:
 
 def _decision_event_from_rejection(record) -> dict[str, object]:
     factors = _json_dict(getattr(record, "factor_scores_json", None))
-    timing = factors.get("entry_timing", {}) if isinstance(factors.get("entry_timing"), dict) else {}
+    timing = (
+        factors.get("entry_timing", {})
+        if isinstance(factors.get("entry_timing"), dict)
+        else {}
+    )
     reasons = _json_list(getattr(record, "reasons_json", None))
     state = str(timing.get("entry_timing_state") or "REJECTED")
-    reason = str(timing.get("entry_timing_reason") or "; ".join(reasons[:3]) or record.primary_gate or "Rejected setup")
-    market = factors.get("market_regime", {}) if isinstance(factors.get("market_regime"), dict) else {}
-    momentum = factors.get("momentum_phase", {}) if isinstance(factors.get("momentum_phase"), dict) else {}
-    family = factors.get("setup_family", {}) if isinstance(factors.get("setup_family"), dict) else {}
+    reason = str(
+        timing.get("entry_timing_reason")
+        or "; ".join(reasons[:3])
+        or record.primary_gate
+        or "Rejected setup"
+    )
+    market = (
+        factors.get("market_regime", {})
+        if isinstance(factors.get("market_regime"), dict)
+        else {}
+    )
+    momentum = (
+        factors.get("momentum_phase", {})
+        if isinstance(factors.get("momentum_phase"), dict)
+        else {}
+    )
+    family = (
+        factors.get("setup_family", {})
+        if isinstance(factors.get("setup_family"), dict)
+        else {}
+    )
     severity = "warn"
-    if any(item in reasons for item in ["entry_too_late", "chase_risk_high", "selected_option_quote_invalid"]):
+    if any(
+        item in reasons
+        for item in [
+            "entry_too_late",
+            "chase_risk_high",
+            "selected_option_quote_invalid",
+        ]
+    ):
         severity = "bad"
-    elif any(item in reasons for item in ["waiting_for_entry_trigger", "premium_trigger_not_broken_yet"]):
+    elif any(
+        item in reasons
+        for item in ["waiting_for_entry_trigger", "premium_trigger_not_broken_yet"]
+    ):
         severity = "watch"
     return {
         "time": format_ist(record.created_at),
@@ -1701,7 +1938,9 @@ def _decision_event_from_rejection(record) -> dict[str, object]:
         "market_regime": market.get("regime"),
         "momentum_phase": momentum.get("phase"),
         "setup_family": family.get("name"),
-        "abstention_code": market.get("abstention_code") or momentum.get("abstention_code") or family.get("abstention_code"),
+        "abstention_code": market.get("abstention_code")
+        or momentum.get("abstention_code")
+        or family.get("abstention_code"),
     }
 
 
@@ -1715,14 +1954,20 @@ def _decision_event_from_trade(record) -> dict[str, object]:
     elif status in {"closing", "exit_failed", "reconciliation_mismatch"}:
         title = f"Exit attention: {status}"
         severity = "bad"
-        message = str(record.exit_last_error or record.exit_order_status or "Exit needs monitoring")
+        message = str(
+            record.exit_last_error
+            or record.exit_order_status
+            or "Exit needs monitoring"
+        )
     else:
         title = f"Trade open: {record.action}"
         severity = "watch"
         message = f"Entry {record.entry_price}; SL {record.stop_loss}; Target 1 {record.target_1}"
     return {
         "time": format_ist(record.updated_at or record.created_at),
-        "sort_time": (record.updated_at or record.created_at).isoformat() if (record.updated_at or record.created_at) else "",
+        "sort_time": (record.updated_at or record.created_at).isoformat()
+        if (record.updated_at or record.created_at)
+        else "",
         "type": "trade",
         "severity": severity,
         "title": title,
@@ -1761,9 +2006,15 @@ def _decision_event_from_auto_decision(item: dict[str, object]) -> dict[str, obj
     event_type = str(item.get("event_type") or "fast_rally_candidate_validation")
     passed = bool(item.get("passed"))
     direction = str(item.get("direction") or "").lower()
-    reason = str(item.get("reason") or ("candidate_passed" if passed else "candidate_rejected"))
+    reason = str(
+        item.get("reason") or ("candidate_passed" if passed else "candidate_rejected")
+    )
     move_pct = item.get("move_pct")
-    move_text = f"; Bank Nifty move {float(move_pct):.4f}%" if isinstance(move_pct, (int, float)) else ""
+    move_text = (
+        f"; Bank Nifty move {float(move_pct):.4f}%"
+        if isinstance(move_pct, (int, float))
+        else ""
+    )
     if event_type == "fast_rally_dispatch":
         scheduled = bool(item.get("scheduled"))
         stage = str(item.get("stage") or ("queued" if scheduled else "suppressed"))
@@ -1772,7 +2023,9 @@ def _decision_event_from_auto_decision(item: dict[str, object]) -> dict[str, obj
             "sort_time": item.get("time"),
             "type": "fast_rally_dispatch",
             "severity": "watch" if scheduled else "warn",
-            "title": "Fast-rally validation queued" if scheduled else "Fast-rally validation suppressed",
+            "title": "Fast-rally validation queued"
+            if scheduled
+            else "Fast-rally validation suppressed",
             "message": f"{stage}: {reason}{move_text}",
             "source": item.get("source") or "banknifty_fast_rally",
             "direction": direction or None,
@@ -1785,7 +2038,8 @@ def _decision_event_from_auto_decision(item: dict[str, object]) -> dict[str, obj
         "type": "candidate_validation",
         "severity": "ok" if passed else ("bad" if item.get("error") else "warn"),
         "title": f"Fast-rally candidate {'validated' if passed else 'rejected'}",
-        "message": f"{reason}{move_text}" + (f"; {item.get('error')}" if item.get("error") else ""),
+        "message": f"{reason}{move_text}"
+        + (f"; {item.get('error')}" if item.get("error") else ""),
         "source": item.get("source") or "fast_rally_candidate_validation",
         "direction": direction or None,
         "reason": reason,
@@ -1820,7 +2074,11 @@ def _decision_event_from_error(item: dict[str, object]) -> dict[str, object]:
     source = str(item.get("source") or "automation")
     error_type = str(item.get("error_type") or "")
     raw_error = str(item.get("error") or "Unknown automation failure")
-    if error_type == "KeyError" or (len(raw_error) >= 3 and raw_error[0] == raw_error[-1] and raw_error[0] in {"'", '"'}):
+    if error_type == "KeyError" or (
+        len(raw_error) >= 3
+        and raw_error[0] == raw_error[-1]
+        and raw_error[0] in {"'", '"'}
+    ):
         field = raw_error.strip("'\"") or "unknown"
         message = f"The {source.replace('_', ' ')} could not complete because required field '{field}' was missing."
     elif raw_error == "scheduled_scan_rest_call_budget_exceeded":
@@ -1906,7 +2164,9 @@ def opportunity_record_to_dict(record) -> dict[str, object]:
         "lot_size": record.lot_size,
         "score": record.score,
         "probability": record.probability,
-        "heuristic_score_confidence": getattr(record, "heuristic_score_confidence", None),
+        "heuristic_score_confidence": getattr(
+            record, "heuristic_score_confidence", None
+        ),
         "probability_source": getattr(record, "probability_source", None),
         "calibration_version": getattr(record, "calibration_version", None),
         "strategy_version": getattr(record, "strategy_version", None),
@@ -1948,7 +2208,9 @@ def trade_record_to_dict(record) -> dict[str, object]:
         "target_3": record.target_3,
         "exit_price": record.exit_price,
         "exit_rule_first_triggered": getattr(record, "exit_rule_first_triggered", None),
-        "exit_triggered_rules": _json_list(getattr(record, "exit_triggered_rules_json", None)),
+        "exit_triggered_rules": _json_list(
+            getattr(record, "exit_triggered_rules_json", None)
+        ),
         "exit_ltp": getattr(record, "exit_ltp", None),
         "exit_best_bid": getattr(record, "exit_best_bid", None),
         "exit_best_ask": getattr(record, "exit_best_ask", None),
@@ -1956,7 +2218,9 @@ def trade_record_to_dict(record) -> dict[str, object]:
         "exit_depth_coverage": getattr(record, "exit_depth_coverage", None),
         "exit_spread_pct": getattr(record, "exit_spread_pct", None),
         "exit_execution_source": getattr(record, "exit_execution_source", None),
-        "exit_quote_timestamp": format_ist(getattr(record, "exit_quote_timestamp", None)),
+        "exit_quote_timestamp": format_ist(
+            getattr(record, "exit_quote_timestamp", None)
+        ),
         "exit_order_id": getattr(record, "exit_order_id", None),
         "exit_order_status": getattr(record, "exit_order_status", None),
         "exit_attempt_count": getattr(record, "exit_attempt_count", 0),
@@ -1967,12 +2231,18 @@ def trade_record_to_dict(record) -> dict[str, object]:
         "protective_order_status": getattr(record, "protective_order_status", None),
         "protective_trigger_price": getattr(record, "protective_trigger_price", None),
         "protective_last_error": getattr(record, "protective_last_error", None),
-        "protective_requested_at": format_ist(getattr(record, "protective_requested_at", None)),
-        "protective_cancelled_at": format_ist(getattr(record, "protective_cancelled_at", None)),
+        "protective_requested_at": format_ist(
+            getattr(record, "protective_requested_at", None)
+        ),
+        "protective_cancelled_at": format_ist(
+            getattr(record, "protective_cancelled_at", None)
+        ),
         "price_source": getattr(record, "price_source", None),
         "price_timestamp": format_ist(getattr(record, "price_timestamp", None)),
         "price_age_seconds": getattr(record, "price_age_seconds", None),
-        "highest_price_during_trade": getattr(record, "highest_price_during_trade", None),
+        "highest_price_during_trade": getattr(
+            record, "highest_price_during_trade", None
+        ),
         "lowest_price_during_trade": getattr(record, "lowest_price_during_trade", None),
         "mfe_points": getattr(record, "mfe_points", None),
         "mfe_percent": getattr(record, "mfe_percent", None),
@@ -1988,7 +2258,9 @@ def trade_record_to_dict(record) -> dict[str, object]:
         "slippage_cost": getattr(record, "slippage_cost", None),
         "spread_cost": getattr(record, "spread_cost", None),
         "remaining_quantity": getattr(record, "remaining_quantity", None),
-        "pnl": getattr(record, "net_pnl", None) if getattr(record, "net_pnl", None) is not None else record.pnl,
+        "pnl": getattr(record, "net_pnl", None)
+        if getattr(record, "net_pnl", None) is not None
+        else record.pnl,
         "outcome": record.outcome,
         "notes": record.notes,
         "strategy_version": getattr(record, "strategy_version", None),
@@ -2029,14 +2301,27 @@ def parse_symbol_list(value: object, default: list[str] | None = None) -> list[s
     return symbols or (default or ["BANKNIFTY"])
 
 
-@app.get("/market/{symbol}", tags=["09 Market Data"], summary="Get stored market summary for a symbol")
+@app.get(
+    "/market/{symbol}",
+    tags=["09 Market Data"],
+    summary="Get stored market summary for a symbol",
+)
 def get_market_summary(symbol: str) -> dict[str, object]:
     return market_data_service.get_market_summary(symbol)
 
 
-@app.get("/data/ingest/status", tags=["11 Data Ingestion"], summary="Show stored candle and option-history counts")
-def get_ingestion_status(symbols: str | None = None, timeframe: str = "5minute") -> dict[str, object]:
-    return data_ingestion_service.status(symbols=parse_symbol_list(symbols, default=[]) if symbols else None, timeframe=timeframe)
+@app.get(
+    "/data/ingest/status",
+    tags=["11 Data Ingestion"],
+    summary="Show stored candle and option-history counts",
+)
+def get_ingestion_status(
+    symbols: str | None = None, timeframe: str = "5minute"
+) -> dict[str, object]:
+    return data_ingestion_service.status(
+        symbols=parse_symbol_list(symbols, default=[]) if symbols else None,
+        timeframe=timeframe,
+    )
 
 
 @app.post(
@@ -2063,7 +2348,9 @@ def ingest_historical_candles(
     ),
 ) -> dict[str, object]:
     payload = payload or {}
-    _require_manual_override_for_market_heavy_operation(payload, "historical candle ingestion")
+    _require_manual_override_for_market_heavy_operation(
+        payload, "historical candle ingestion"
+    )
     try:
         return data_ingestion_service.ingest_candles(
             symbols=parse_symbol_list(payload.get("symbols")),
@@ -2072,7 +2359,10 @@ def ingest_historical_candles(
             to_date=str(payload.get("to")) if payload.get("to") else None,
             days=_bounded_int(payload.get("days"), 90, maximum=365),
             use_checkpoint=bool(payload.get("use_checkpoint", False)),
-            overlap_minutes=int(payload.get("overlap_minutes") or settings.automation_checkpoint_overlap_minutes),
+            overlap_minutes=int(
+                payload.get("overlap_minutes")
+                or settings.automation_checkpoint_overlap_minutes
+            ),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2084,9 +2374,13 @@ def ingest_historical_candles(
     summary="Safely bootstrap canonical Bank Nifty 1m/5m candles",
     dependencies=PROTECTED_ROUTE,
 )
-def bootstrap_banknifty_canonical(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
+def bootstrap_banknifty_canonical(
+    payload: dict[str, object] | None = Body(default=None),
+) -> dict[str, object]:
     payload = payload or {}
-    _require_manual_override_for_market_heavy_operation(payload, "Bank Nifty canonical candle bootstrap")
+    _require_manual_override_for_market_heavy_operation(
+        payload, "Bank Nifty canonical candle bootstrap"
+    )
     try:
         return data_ingestion_service.bootstrap_canonical_banknifty(
             from_date=str(payload.get("from")) if payload.get("from") else None,
@@ -2125,7 +2419,9 @@ def ingest_option_snapshots(
         return data_ingestion_service.capture_option_snapshots(
             symbols=parse_symbol_list(payload.get("symbols")),
             strike_window_pct=float(payload.get("strike_window_pct") or 4.0),
-            max_contracts_per_symbol=int(payload.get("max_contracts_per_symbol") or 120),
+            max_contracts_per_symbol=int(
+                payload.get("max_contracts_per_symbol") or 120
+            ),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2170,7 +2466,11 @@ async def stop_option_snapshot_collector() -> dict[str, object]:
     return await option_snapshot_collector_service.stop()
 
 
-@app.get("/data/collector/status", tags=["11 Data Ingestion"], summary="Get option-chain snapshot collector status")
+@app.get(
+    "/data/collector/status",
+    tags=["11 Data Ingestion"],
+    summary="Get option-chain snapshot collector status",
+)
 def get_option_snapshot_collector_status() -> dict[str, object]:
     return option_snapshot_collector_service.status()
 
@@ -2225,21 +2525,35 @@ async def stop_automation() -> dict[str, object]:
     description="Runs the same decision cycle the supervisor loop runs: bootstrap data if needed, start market-hour services, or evaluate open outcomes after hours.",
     dependencies=PROTECTED_ROUTE,
 )
-def run_automation_once(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
+def run_automation_once(
+    payload: dict[str, object] | None = Body(default=None),
+) -> dict[str, object]:
     return automation_supervisor_service.run_once(payload or None)
 
 
-@app.get("/automation/status", tags=["12 Automation"], summary="Get automation supervisor status")
+@app.get(
+    "/automation/status",
+    tags=["12 Automation"],
+    summary="Get automation supervisor status",
+)
 def get_automation_status() -> dict[str, object]:
     return automation_supervisor_service.status()
 
 
-@app.get("/runtime/trading-config", tags=["12 Automation"], summary="Inspect dashboard runtime trading mode config")
+@app.get(
+    "/runtime/trading-config",
+    tags=["12 Automation"],
+    summary="Inspect dashboard runtime trading mode config",
+)
 async def get_runtime_trading_config() -> dict[str, object]:
     return runtime_trading_config_service.status()
 
 
-@app.get("/runtime/trading-config/preview", tags=["12 Automation"], summary="Preview paper/live dashboard mode changes")
+@app.get(
+    "/runtime/trading-config/preview",
+    tags=["12 Automation"],
+    summary="Preview paper/live dashboard mode changes",
+)
 async def preview_runtime_trading_config(mode: str = "paper") -> dict[str, object]:
     return runtime_trading_config_service.preview(mode)
 
@@ -2250,7 +2564,9 @@ async def preview_runtime_trading_config(mode: str = "paper") -> dict[str, objec
     summary="Apply dashboard runtime trading mode config",
     dependencies=PROTECTED_ROUTE,
 )
-async def apply_runtime_trading_config(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
+async def apply_runtime_trading_config(
+    payload: dict[str, object] | None = Body(default=None),
+) -> dict[str, object]:
     return runtime_trading_config_service.apply(payload or {})
 
 
@@ -2279,7 +2595,9 @@ def ingest_option_candles(
     ),
 ) -> dict[str, object]:
     payload = payload or {}
-    _require_manual_override_for_market_heavy_operation(payload, "historical option candle ingestion")
+    _require_manual_override_for_market_heavy_operation(
+        payload, "historical option candle ingestion"
+    )
     try:
         return data_ingestion_service.ingest_option_candles(
             symbols=parse_symbol_list(payload.get("symbols")),
@@ -2288,7 +2606,9 @@ def ingest_option_candles(
             to_date=str(payload.get("to")) if payload.get("to") else None,
             days=_bounded_int(payload.get("days"), 30, maximum=90),
             strike_window_pct=float(payload.get("strike_window_pct") or 2.0),
-            max_contracts_per_symbol=_bounded_int(payload.get("max_contracts_per_symbol"), 20, maximum=120),
+            max_contracts_per_symbol=_bounded_int(
+                payload.get("max_contracts_per_symbol"), 20, maximum=120
+            ),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2307,12 +2627,22 @@ def get_option_candle_coverage(
     timeframes: str | None = None,
     max_contracts: int | None = None,
 ) -> dict[str, object]:
-    timeframe_values = [item.strip() for item in str(timeframes or settings.targeted_option_candle_backfill_timeframes).split(",") if item.strip()]
+    timeframe_values = [
+        item.strip()
+        for item in str(
+            timeframes or settings.targeted_option_candle_backfill_timeframes
+        ).split(",")
+        if item.strip()
+    ]
     return data_ingestion_service.option_candle_coverage_report(
         symbols=parse_symbol_list(symbols),
         trading_date=trading_date,
         timeframes=timeframe_values,
-        max_contracts=_bounded_int(max_contracts, settings.targeted_option_candle_backfill_max_contracts, maximum=500),
+        max_contracts=_bounded_int(
+            max_contracts,
+            settings.targeted_option_candle_backfill_max_contracts,
+            maximum=500,
+        ),
     )
 
 
@@ -2340,20 +2670,40 @@ def ingest_relevant_option_candles(
     ),
 ) -> dict[str, object]:
     payload = payload or {}
-    _require_manual_override_for_market_heavy_operation(payload, "targeted relevant option candle backfill")
+    _require_manual_override_for_market_heavy_operation(
+        payload, "targeted relevant option candle backfill"
+    )
     timeframe_values = [
         item.strip()
-        for item in str(payload.get("timeframes") or settings.targeted_option_candle_backfill_timeframes).split(",")
+        for item in str(
+            payload.get("timeframes")
+            or settings.targeted_option_candle_backfill_timeframes
+        ).split(",")
         if item.strip()
     ]
     try:
         return data_ingestion_service.backfill_relevant_option_candles(
             symbols=parse_symbol_list(payload.get("symbols")),
-            trading_date=str(payload.get("trading_date")) if payload.get("trading_date") else None,
+            trading_date=str(payload.get("trading_date"))
+            if payload.get("trading_date")
+            else None,
             timeframes=timeframe_values,
-            max_contracts=_bounded_int(payload.get("max_contracts"), settings.targeted_option_candle_backfill_max_contracts, maximum=500),
-            batch_limit=_bounded_int(payload.get("batch_limit"), settings.targeted_option_candle_backfill_batch_limit, maximum=100),
-            delay_seconds=float(payload.get("delay_seconds", settings.targeted_option_candle_backfill_delay_seconds)),
+            max_contracts=_bounded_int(
+                payload.get("max_contracts"),
+                settings.targeted_option_candle_backfill_max_contracts,
+                maximum=500,
+            ),
+            batch_limit=_bounded_int(
+                payload.get("batch_limit"),
+                settings.targeted_option_candle_backfill_batch_limit,
+                maximum=100,
+            ),
+            delay_seconds=float(
+                payload.get(
+                    "delay_seconds",
+                    settings.targeted_option_candle_backfill_delay_seconds,
+                )
+            ),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -2383,7 +2733,9 @@ def ingest_all_market_research_data(
     ),
 ) -> dict[str, object]:
     payload = payload or {}
-    _require_manual_override_for_market_heavy_operation(payload, "full market research data ingestion")
+    _require_manual_override_for_market_heavy_operation(
+        payload, "full market research data ingestion"
+    )
     try:
         return data_ingestion_service.ingest_all(
             symbols=parse_symbol_list(payload.get("symbols")),
@@ -2392,15 +2744,24 @@ def ingest_all_market_research_data(
             to_date=str(payload.get("to")) if payload.get("to") else None,
             days=_bounded_int(payload.get("days"), 90, maximum=365),
             strike_window_pct=float(payload.get("strike_window_pct") or 4.0),
-            max_contracts_per_symbol=_bounded_int(payload.get("max_contracts_per_symbol"), 120, maximum=200),
+            max_contracts_per_symbol=_bounded_int(
+                payload.get("max_contracts_per_symbol"), 120, maximum=200
+            ),
             use_checkpoint=bool(payload.get("use_checkpoint", False)),
-            overlap_minutes=int(payload.get("overlap_minutes") or settings.automation_checkpoint_overlap_minutes),
+            overlap_minutes=int(
+                payload.get("overlap_minutes")
+                or settings.automation_checkpoint_overlap_minutes
+            ),
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/research/settings", tags=["10 Research"], summary="Show option-buying research thresholds")
+@app.get(
+    "/research/settings",
+    tags=["10 Research"],
+    summary="Show option-buying research thresholds",
+)
 def get_research_settings() -> dict[str, object]:
     return {
         "option_quality": {
@@ -2450,7 +2811,13 @@ def get_research_settings() -> dict[str, object]:
             "score_role": "ranking_only_after_primary_gates",
             "five_minute_role": "setup direction, regime, day structure, and completed-candle confirmation",
             "one_minute_role": "entry timing and fast confirmation",
-            "shadow_only_layers": ["hierarchical_market_state", "momentum_phase", "setup_family_adjustment", "candidate_utility", "duplicate_regime_scores"],
+            "shadow_only_layers": [
+                "hierarchical_market_state",
+                "momentum_phase",
+                "setup_family_adjustment",
+                "candidate_utility",
+                "duplicate_regime_scores",
+            ],
             "fast_context_max_age_seconds": settings.fast_scan_context_max_age_seconds,
             "scheduled_scan_max_rest_calls": settings.scheduled_scan_max_rest_calls,
             "note": "Shadow layers are collected for research and cannot block, approve, or adjust an entry.",
@@ -2628,7 +2995,9 @@ def get_market_insights(
         contract = OptionContract(
             tradingsymbol=str(contract_payload.get("tradingsymbol") or ""),
             exchange=str(contract_payload.get("exchange") or "NFO"),
-            instrument_token=int(contract_payload["instrument_token"]) if contract_payload.get("instrument_token") else None,
+            instrument_token=int(contract_payload["instrument_token"])
+            if contract_payload.get("instrument_token")
+            else None,
             name=str(contract_payload.get("name") or symbol),
             expiry=str(contract_payload.get("expiry") or ""),
             strike=float(contract_payload.get("strike") or 0),
@@ -2640,7 +3009,9 @@ def get_market_insights(
             bid=float(contract_payload.get("bid") or 0),
             ask=float(contract_payload.get("ask") or 0),
         )
-        premium_eval = option_premium_confirmation_service.evaluate(contract=contract, side=side, timeframe=timeframe)
+        premium_eval = option_premium_confirmation_service.evaluate(
+            contract=contract, side=side, timeframe=timeframe
+        )
     else:
         premium_eval = {
             "enabled": settings.enable_option_premium_confirmation,
@@ -2657,9 +3028,13 @@ def get_market_insights(
         "side": side,
         "timeframe": timeframe,
         "insights": {
-            "day_type": day_type_service.evaluate(symbol=symbol, trend=trend, timeframe=timeframe),
+            "day_type": day_type_service.evaluate(
+                symbol=symbol, trend=trend, timeframe=timeframe
+            ),
             "option_premium_confirmation": premium_eval,
-            "time_bucket_edge": time_bucket_edge_service.evaluate(symbol=symbol, trend=trend, timeframe=timeframe),
+            "time_bucket_edge": time_bucket_edge_service.evaluate(
+                symbol=symbol, trend=trend, timeframe=timeframe
+            ),
         },
     }
 
@@ -2684,10 +3059,14 @@ def get_outcome_learning() -> dict[str, object]:
     description="Studies saved opportunities by CE/PE, expiry day, time bucket, score bucket, setup type, and failure tags.",
     dependencies=PROTECTED_ROUTE,
 )
-def get_opportunity_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+def get_opportunity_analytics(
+    symbol: str = "BANKNIFTY", limit: int = 1000
+) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("opportunity_analytics"):
         return deferred
-    return opportunity_analytics_service.analyze(symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000))
+    return opportunity_analytics_service.analyze(
+        symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000)
+    )
 
 
 @app.get(
@@ -2697,10 +3076,14 @@ def get_opportunity_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> d
     description="Separates execution quality from signal quality: fill rate, entry deviation, CE/PE results, time bucket, and P&L metrics.",
     dependencies=PROTECTED_ROUTE,
 )
-def get_execution_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+def get_execution_analytics(
+    symbol: str = "BANKNIFTY", limit: int = 1000
+) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("execution_analytics"):
         return deferred
-    return execution_analytics_service.analyze(symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000))
+    return execution_analytics_service.analyze(
+        symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000)
+    )
 
 
 @app.get(
@@ -2710,10 +3093,14 @@ def get_execution_analytics(symbol: str = "BANKNIFTY", limit: int = 1000) -> dic
     description="Combines accepted vs rejected analysis, time buckets, DTE, factor attribution, exits, data quality, and shadow/live evidence.",
     dependencies=PROTECTED_ROUTE,
 )
-def get_professional_insights(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+def get_professional_insights(
+    symbol: str = "BANKNIFTY", limit: int = 1000
+) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("professional_insights"):
         return deferred
-    return professional_insights_service.analyze(symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000))
+    return professional_insights_service.analyze(
+        symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000)
+    )
 
 
 @app.get(
@@ -2726,10 +3113,14 @@ def get_professional_insights(symbol: str = "BANKNIFTY", limit: int = 1000) -> d
     ),
     dependencies=PROTECTED_ROUTE,
 )
-def get_research_engine_report(symbol: str = "BANKNIFTY", limit: int = 2000) -> dict[str, object]:
+def get_research_engine_report(
+    symbol: str = "BANKNIFTY", limit: int = 2000
+) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("research_engine"):
         return deferred
-    return professional_insights_service.research_engine_report(symbol=symbol, limit=_bounded_int(limit, 2000, maximum=5000))
+    return professional_insights_service.research_engine_report(
+        symbol=symbol, limit=_bounded_int(limit, 2000, maximum=5000)
+    )
 
 
 @app.get(
@@ -2776,10 +3167,14 @@ def get_gate_effectiveness_report(
     description="Shows missed winners, saved losers, unresolved and ambiguous rejected setups after candle replay.",
     dependencies=PROTECTED_ROUTE,
 )
-def get_rejected_opportunity_quality_report(symbol: str = "BANKNIFTY", limit: int = 3000) -> dict[str, object]:
+def get_rejected_opportunity_quality_report(
+    symbol: str = "BANKNIFTY", limit: int = 3000
+) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("rejected_opportunity_quality"):
         return deferred
-    return professional_insights_service.rejected_opportunity_quality_report(symbol=symbol, limit=_bounded_int(limit, 3000, maximum=5000))
+    return professional_insights_service.rejected_opportunity_quality_report(
+        symbol=symbol, limit=_bounded_int(limit, 3000, maximum=5000)
+    )
 
 
 @app.get(
@@ -2820,10 +3215,14 @@ def get_threshold_validation_report(
     summary="Inspect conservative paper/backtest fill realism and execution drag",
     dependencies=PROTECTED_ROUTE,
 )
-def get_execution_realism_report(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+def get_execution_realism_report(
+    symbol: str = "BANKNIFTY", limit: int = 1000
+) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("execution_realism"):
         return deferred
-    return professional_insights_service.execution_realism_report(symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000))
+    return professional_insights_service.execution_realism_report(
+        symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000)
+    )
 
 
 @app.get(
@@ -2833,11 +3232,17 @@ def get_execution_realism_report(symbol: str = "BANKNIFTY", limit: int = 1000) -
     description="Shows the day's accepted setups, rejected setups, trades, outcomes, top rejection gates, and review timeline.",
     dependencies=PROTECTED_ROUTE,
 )
-def get_daily_review(symbol: str = "BANKNIFTY", review_date: str | None = None, limit: int = 1000) -> dict[str, object]:
+def get_daily_review(
+    symbol: str = "BANKNIFTY", review_date: str | None = None, limit: int = 1000
+) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("daily_review"):
         return deferred
     parsed_date = datetime.fromisoformat(review_date).date() if review_date else None
-    return professional_insights_service.daily_review(symbol=symbol, review_date=parsed_date, limit=_bounded_int(limit, 1000, maximum=3000))
+    return professional_insights_service.daily_review(
+        symbol=symbol,
+        review_date=parsed_date,
+        limit=_bounded_int(limit, 1000, maximum=3000),
+    )
 
 
 @app.get(
@@ -2851,7 +3256,9 @@ def get_daily_banknifty_summary(date: str | None = None) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("daily_banknifty_summary"):
         return deferred
     parsed_date = datetime.fromisoformat(date).date() if date else None
-    return professional_insights_service.daily_banknifty_summary(summary_date=parsed_date)
+    return professional_insights_service.daily_banknifty_summary(
+        summary_date=parsed_date
+    )
 
 
 @app.get(
@@ -2878,13 +3285,19 @@ def run_after_market_research(
     payload: dict[str, object] | None = Body(
         default=None,
         examples=[{"force": False}],
-    )
+    ),
 ) -> dict[str, object]:
     payload = payload or {}
-    _require_manual_override_for_market_heavy_operation(payload, "after-market research job")
+    _require_manual_override_for_market_heavy_operation(
+        payload, "after-market research job"
+    )
     if hasattr(after_market_research_service, "run_async"):
-        return after_market_research_service.run_async(trigger="manual", force=bool(payload.get("force", False)))
-    return after_market_research_service.run_once(trigger="manual", force=bool(payload.get("force", False)))
+        return after_market_research_service.run_async(
+            trigger="manual", force=bool(payload.get("force", False))
+        )
+    return after_market_research_service.run_once(
+        trigger="manual", force=bool(payload.get("force", False))
+    )
 
 
 @app.get(
@@ -2896,7 +3309,9 @@ def run_after_market_research(
 def get_trade_journal(symbol: str = "BANKNIFTY", limit: int = 200) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("trade_journal"):
         return deferred
-    return professional_insights_service.trade_journal(symbol=symbol, limit=_bounded_int(limit, 200, maximum=1000))
+    return professional_insights_service.trade_journal(
+        symbol=symbol, limit=_bounded_int(limit, 200, maximum=1000)
+    )
 
 
 @app.get(
@@ -2917,10 +3332,14 @@ def get_data_completeness(symbol: str = "BANKNIFTY") -> dict[str, object]:
     summary="Compare shadow, paper, and live trade evidence",
     dependencies=PROTECTED_ROUTE,
 )
-def get_shadow_comparison(symbol: str = "BANKNIFTY", limit: int = 1000) -> dict[str, object]:
+def get_shadow_comparison(
+    symbol: str = "BANKNIFTY", limit: int = 1000
+) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("shadow_comparison"):
         return deferred
-    return professional_insights_service.analyze(symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000))["shadow_mode_comparison"]
+    return professional_insights_service.analyze(
+        symbol=symbol, limit=_bounded_int(limit, 1000, maximum=3000)
+    )["shadow_mode_comparison"]
 
 
 @app.get(
@@ -2943,7 +3362,9 @@ def get_professional_readiness(
         metadata = job_run.get("metadata", {}) if isinstance(job_run, dict) else {}
         latest = metadata.get("result") if isinstance(metadata, dict) else None
     reports = latest.get("reports", {}) if isinstance(latest, dict) else {}
-    stage = reports.get("professional_readiness", {}) if isinstance(reports, dict) else {}
+    stage = (
+        reports.get("professional_readiness", {}) if isinstance(reports, dict) else {}
+    )
     result = stage.get("result") if isinstance(stage, dict) else None
     if isinstance(result, dict):
         return {
@@ -3034,13 +3455,21 @@ def score_option_quality(
         contract = OptionContract(
             tradingsymbol=str(contract_payload.get("tradingsymbol") or ""),
             exchange=str(contract_payload.get("exchange") or settings.option_exchange),
-            instrument_token=int(contract_payload["instrument_token"]) if contract_payload.get("instrument_token") is not None else None,
+            instrument_token=int(contract_payload["instrument_token"])
+            if contract_payload.get("instrument_token") is not None
+            else None,
             name=str(contract_payload.get("name") or payload.get("symbol") or ""),
             expiry=str(contract_payload.get("expiry") or ""),
             strike=float(contract_payload.get("strike") or 0),
-            option_type=str(contract_payload.get("option_type") or contract_payload.get("instrument_type") or ""),
+            option_type=str(
+                contract_payload.get("option_type")
+                or contract_payload.get("instrument_type")
+                or ""
+            ),
             lot_size=int(contract_payload.get("lot_size") or 1),
-            last_price=float(contract_payload.get("last_price") or payload.get("entry_price") or 0),
+            last_price=float(
+                contract_payload.get("last_price") or payload.get("entry_price") or 0
+            ),
             open_interest=float(contract_payload.get("open_interest") or 0),
             volume=float(contract_payload.get("volume") or 0),
             bid=float(contract_payload.get("bid") or 0),
@@ -3082,7 +3511,9 @@ def run_research_backtest(
     ),
 ) -> dict[str, object]:
     _require_manual_override_for_market_heavy_operation(payload, "research backtest")
-    if deferred := _defer_review_analysis_during_market("backtest", manual_override=_manual_override_requested(payload)):
+    if deferred := _defer_review_analysis_during_market(
+        "backtest", manual_override=_manual_override_requested(payload)
+    ):
         return deferred
     try:
         return backtest_service.run(
@@ -3090,7 +3521,9 @@ def run_research_backtest(
             timeframe=str(payload.get("timeframe") or "5minute"),
             side=str(payload.get("side") or "BUY"),
             direction=str(payload.get("direction") or "BOTH"),
-            horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
+            horizon_candles=int(payload["horizon_candles"])
+            if payload.get("horizon_candles") is not None
+            else None,
             limit=_bounded_int(payload.get("limit"), 2000, maximum=5000),
         )
     except Exception as exc:
@@ -3118,15 +3551,21 @@ def run_option_premium_backtest(
         ]
     ),
 ) -> dict[str, object]:
-    _require_manual_override_for_market_heavy_operation(payload, "option premium backtest")
-    if deferred := _defer_review_analysis_during_market("option_premium_backtest", manual_override=_manual_override_requested(payload)):
+    _require_manual_override_for_market_heavy_operation(
+        payload, "option premium backtest"
+    )
+    if deferred := _defer_review_analysis_during_market(
+        "option_premium_backtest", manual_override=_manual_override_requested(payload)
+    ):
         return deferred
     try:
         return backtest_service.run_option_premium(
             symbol=str(payload.get("symbol") or "NIFTY"),
             timeframe=str(payload.get("timeframe") or "5minute"),
             direction=str(payload.get("direction") or "BOTH"),
-            horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
+            horizon_candles=int(payload["horizon_candles"])
+            if payload.get("horizon_candles") is not None
+            else None,
             limit=_bounded_int(payload.get("limit"), 3000, maximum=5000),
             decision_mode=str(payload.get("decision_mode") or "scanner_parity"),
         )
@@ -3155,14 +3594,18 @@ def run_ablation_backtest(
     ),
 ) -> dict[str, object]:
     _require_manual_override_for_market_heavy_operation(payload, "ablation backtest")
-    if deferred := _defer_review_analysis_during_market("ablation_backtest", manual_override=_manual_override_requested(payload)):
+    if deferred := _defer_review_analysis_during_market(
+        "ablation_backtest", manual_override=_manual_override_requested(payload)
+    ):
         return deferred
     try:
         return backtest_service.run_ablation(
             symbol=str(payload.get("symbol") or "BANKNIFTY"),
             timeframe=str(payload.get("timeframe") or "5minute"),
             direction=str(payload.get("direction") or "BOTH"),
-            horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
+            horizon_candles=int(payload["horizon_candles"])
+            if payload.get("horizon_candles") is not None
+            else None,
             limit=_bounded_int(payload.get("limit"), 1000, maximum=3000),
         )
     except Exception as exc:
@@ -3190,15 +3633,21 @@ def run_walk_forward_validation(
         ]
     ),
 ) -> dict[str, object]:
-    _require_manual_override_for_market_heavy_operation(payload, "walk-forward validation")
-    if deferred := _defer_review_analysis_during_market("walk_forward", manual_override=_manual_override_requested(payload)):
+    _require_manual_override_for_market_heavy_operation(
+        payload, "walk-forward validation"
+    )
+    if deferred := _defer_review_analysis_during_market(
+        "walk_forward", manual_override=_manual_override_requested(payload)
+    ):
         return deferred
     try:
         return backtest_service.run_walk_forward(
             symbol=str(payload.get("symbol") or "NIFTY"),
             timeframe=str(payload.get("timeframe") or "5minute"),
             direction=str(payload.get("direction") or "BOTH"),
-            horizon_candles=int(payload["horizon_candles"]) if payload.get("horizon_candles") is not None else None,
+            horizon_candles=int(payload["horizon_candles"])
+            if payload.get("horizon_candles") is not None
+            else None,
             limit=_bounded_int(payload.get("limit"), 3000, maximum=5000),
             decision_mode=str(payload.get("decision_mode") or "scanner_parity"),
         )
@@ -3225,8 +3674,12 @@ def validate_strategy_edge(
         ]
     ),
 ) -> dict[str, object]:
-    _require_manual_override_for_market_heavy_operation(payload, "strategy edge validation")
-    if deferred := _defer_review_analysis_during_market("strategy_edge_validation", manual_override=_manual_override_requested(payload)):
+    _require_manual_override_for_market_heavy_operation(
+        payload, "strategy edge validation"
+    )
+    if deferred := _defer_review_analysis_during_market(
+        "strategy_edge_validation", manual_override=_manual_override_requested(payload)
+    ):
         return deferred
     try:
         return strategy_edge_service.validate(
@@ -3239,7 +3692,11 @@ def validate_strategy_edge(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/research/strategy-edge", tags=["10 Research"], summary="List recent saved strategy edge validations")
+@app.get(
+    "/research/strategy-edge",
+    tags=["10 Research"],
+    summary="List recent saved strategy edge validations",
+)
 def list_strategy_edge(limit: int = 50) -> dict[str, object]:
     rows = strategy_edge_service.recent(limit=limit)
     return {"count": len(rows), "validations": rows}
@@ -3265,11 +3722,15 @@ def rank_strategy_edge(
     ),
 ) -> dict[str, object]:
     _require_manual_override_for_market_heavy_operation(payload, "strategy ranking")
-    if deferred := _defer_review_analysis_during_market("strategy_ranking", manual_override=_manual_override_requested(payload)):
+    if deferred := _defer_review_analysis_during_market(
+        "strategy_ranking", manual_override=_manual_override_requested(payload)
+    ):
         return deferred
     symbols = parse_symbol_list(payload.get("symbols"))
     direction_value = payload.get("directions") or "CALL,PUT"
-    directions = [item.strip().upper() for item in str(direction_value).split(",") if item.strip()]
+    directions = [
+        item.strip().upper() for item in str(direction_value).split(",") if item.strip()
+    ]
     rows: list[dict[str, object]] = []
     for symbol in symbols:
         for direction in directions:
@@ -3283,7 +3744,15 @@ def rank_strategy_edge(
                     )
                 )
             except Exception as exc:
-                rows.append({"symbol": symbol, "direction": direction, "passed": False, "reasons": [str(exc)], "summary": {}})
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "direction": direction,
+                        "passed": False,
+                        "reasons": [str(exc)],
+                        "summary": {},
+                    }
+                )
     ranked = sorted(
         rows,
         key=lambda row: (
@@ -3332,14 +3801,20 @@ def import_option_history(
         ]
     ),
 ) -> dict[str, object]:
-    _require_manual_override_for_market_heavy_operation(payload, "option history import")
-    if deferred := _defer_review_analysis_during_market("option_history_import", manual_override=_manual_override_requested(payload)):
+    _require_manual_override_for_market_heavy_operation(
+        payload, "option history import"
+    )
+    if deferred := _defer_review_analysis_during_market(
+        "option_history_import", manual_override=_manual_override_requested(payload)
+    ):
         return deferred
     try:
         rows = payload.get("snapshots")
         if not isinstance(rows, list):
             raise ValueError("snapshots must be a list")
-        return option_history_repository.import_snapshots([row for row in rows if isinstance(row, dict)])
+        return option_history_repository.import_snapshots(
+            [row for row in rows if isinstance(row, dict)]
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -3349,10 +3824,14 @@ def import_option_history(
     tags=["10 Research"],
     summary="List stored historical option quote snapshots",
 )
-def list_option_history(underlying: str | None = None, limit: int = 20) -> dict[str, object]:
+def list_option_history(
+    underlying: str | None = None, limit: int = 20
+) -> dict[str, object]:
     if deferred := _defer_review_analysis_during_market("option_history"):
         return deferred
-    records = option_history_repository.latest_snapshots(underlying=underlying, limit=limit)
+    records = option_history_repository.latest_snapshots(
+        underlying=underlying, limit=limit
+    )
     return {
         "count": len(records),
         "total_snapshots": option_history_repository.count_snapshots(underlying),
@@ -3386,7 +3865,12 @@ def get_signals(side: str = "BUY", limit: int = 10) -> list[dict[str, object]]:
     summary="Scan option opportunities and save them to DB",
     description="Use this for manual Bank Nifty scanning. Example: `/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3`.",
 )
-def get_opportunities(side: str = "BUY", symbols: str | None = None, limit: int = 10, order_mode: str = "paper") -> dict[str, object]:
+def get_opportunities(
+    side: str = "BUY",
+    symbols: str | None = None,
+    limit: int = 10,
+    order_mode: str = "paper",
+) -> dict[str, object]:
     if not _scanner_market_is_open():
         return {
             "mode": order_mode.lower(),
@@ -3400,14 +3884,28 @@ def get_opportunities(side: str = "BUY", symbols: str | None = None, limit: int 
             "reason": "market_closed",
             "disclaimer": "Scanner opportunities are only evaluated during configured market hours.",
         }
-    cache_key = _scanner_cache_key(side=side, symbols=symbols, limit=limit, order_mode=order_mode)
+    cache_key = _scanner_cache_key(
+        side=side, symbols=symbols, limit=limit, order_mode=order_mode
+    )
     cached = _scanner_cached_response(cache_key)
     if cached is not None:
         if cached.get("refresh_due"):
-            _start_scanner_refresh(cache_key=cache_key, side=side, symbols=symbols, limit=limit, order_mode=order_mode)
+            _start_scanner_refresh(
+                cache_key=cache_key,
+                side=side,
+                symbols=symbols,
+                limit=limit,
+                order_mode=order_mode,
+            )
         return cached["payload"]  # type: ignore[return-value]
 
-    _start_scanner_refresh(cache_key=cache_key, side=side, symbols=symbols, limit=limit, order_mode=order_mode)
+    _start_scanner_refresh(
+        cache_key=cache_key,
+        side=side,
+        symbols=symbols,
+        limit=limit,
+        order_mode=order_mode,
+    )
     return {
         "status": "warming",
         "mode": order_mode.lower(),
@@ -3423,16 +3921,23 @@ def get_opportunities(side: str = "BUY", symbols: str | None = None, limit: int 
     }
 
 
-def _build_scanner_opportunities_payload(side: str, symbols: str | None, limit: int, order_mode: str) -> dict[str, object]:
+def _build_scanner_opportunities_payload(
+    side: str, symbols: str | None, limit: int, order_mode: str
+) -> dict[str, object]:
     scanner_service = get_scanner_service()
-    symbol_list = [item.strip().upper() for item in symbols.split(",")] if symbols else None
+    symbol_list = (
+        [item.strip().upper() for item in symbols.split(",")] if symbols else None
+    )
     recommendations = scanner_service.scan_symbols(
         symbols=symbol_list,
         side=side.upper(),
         order_mode=order_mode.lower(),
         rejection_source="manual_scan",
     )
-    saved_ids = [opportunity_repository.save_opportunity(signal).id for signal in recommendations[:limit]]
+    saved_ids = [
+        opportunity_repository.save_opportunity(signal).id
+        for signal in recommendations[:limit]
+    ]
     return {
         "mode": order_mode.lower(),
         "market_data": type(scanner_service.feed).__name__,
@@ -3445,9 +3950,20 @@ def _build_scanner_opportunities_payload(side: str, symbols: str | None, limit: 
     }
 
 
-def _scanner_cache_key(*, side: str, symbols: str | None, limit: int, order_mode: str) -> str:
-    normalized_symbols = ",".join(item.strip().upper() for item in (symbols or "").split(",") if item.strip())
-    return "|".join([side.upper(), normalized_symbols or "DEFAULT", str(max(1, int(limit))), order_mode.lower()])
+def _scanner_cache_key(
+    *, side: str, symbols: str | None, limit: int, order_mode: str
+) -> str:
+    normalized_symbols = ",".join(
+        item.strip().upper() for item in (symbols or "").split(",") if item.strip()
+    )
+    return "|".join(
+        [
+            side.upper(),
+            normalized_symbols or "DEFAULT",
+            str(max(1, int(limit))),
+            order_mode.lower(),
+        ]
+    )
 
 
 def _scanner_cached_response(cache_key: str) -> dict[str, object] | None:
@@ -3469,37 +3985,60 @@ def _scanner_cached_response(cache_key: str) -> dict[str, object] | None:
         return {"payload": response, "refresh_due": age > fresh_ttl}
 
 
-def _start_scanner_refresh(*, cache_key: str, side: str, symbols: str | None, limit: int, order_mode: str) -> None:
+def _start_scanner_refresh(
+    *, cache_key: str, side: str, symbols: str | None, limit: int, order_mode: str
+) -> None:
     now = ist_now_naive()
     stuck_after = max(5, int(settings.scanner_refresh_stuck_seconds))
     with scanner_response_cache_lock:
         entry = scanner_response_cache.setdefault(cache_key, {})
         started_at = entry.get("refresh_started_at")
-        if entry.get("refreshing") and isinstance(started_at, datetime) and (now - started_at).total_seconds() < stuck_after:
+        if (
+            entry.get("refreshing")
+            and isinstance(started_at, datetime)
+            and (now - started_at).total_seconds() < stuck_after
+        ):
             return
         entry["refreshing"] = True
         entry["refresh_started_at"] = now
 
     thread = threading.Thread(
         target=_refresh_scanner_cache,
-        kwargs={"cache_key": cache_key, "side": side, "symbols": symbols, "limit": limit, "order_mode": order_mode},
+        kwargs={
+            "cache_key": cache_key,
+            "side": side,
+            "symbols": symbols,
+            "limit": limit,
+            "order_mode": order_mode,
+        },
         name=f"scanner-refresh-{cache_key}",
         daemon=True,
     )
     thread.start()
 
 
-def _refresh_scanner_cache(*, cache_key: str, side: str, symbols: str | None, limit: int, order_mode: str) -> None:
+def _refresh_scanner_cache(
+    *, cache_key: str, side: str, symbols: str | None, limit: int, order_mode: str
+) -> None:
     started = ist_now_naive()
     try:
-        payload = _build_scanner_opportunities_payload(side=side, symbols=symbols, limit=limit, order_mode=order_mode)
-        payload = {**payload, "status": "ok", "cached": False, "refreshed_at": ist_now_naive().isoformat(sep=" ")}
+        payload = _build_scanner_opportunities_payload(
+            side=side, symbols=symbols, limit=limit, order_mode=order_mode
+        )
+        payload = {
+            **payload,
+            "status": "ok",
+            "cached": False,
+            "refreshed_at": ist_now_naive().isoformat(sep=" "),
+        }
         with scanner_response_cache_lock:
             scanner_response_cache[cache_key] = {
                 "payload": payload,
                 "cached_at": ist_now_naive(),
                 "refreshing": False,
-                "last_duration_seconds": round((ist_now_naive() - started).total_seconds(), 3),
+                "last_duration_seconds": round(
+                    (ist_now_naive() - started).total_seconds(), 3
+                ),
             }
     except Exception as exc:
         logger.exception("scanner refresh failed")
@@ -3531,7 +4070,9 @@ def _current_market_session() -> str:
     return "MARKET_CLOSED"
 
 
-def _defer_review_analysis_during_market(report: str, *, manual_override: bool = False) -> dict[str, object] | None:
+def _defer_review_analysis_during_market(
+    report: str, *, manual_override: bool = False
+) -> dict[str, object] | None:
     session = _current_market_session()
     if session != "REGULAR_MARKET" or manual_override:
         return None
@@ -3544,10 +4085,16 @@ def _defer_review_analysis_during_market(report: str, *, manual_override: bool =
     }
 
 
-def _require_manual_override_for_market_heavy_operation(payload: dict[str, object], operation: str) -> None:
+def _require_manual_override_for_market_heavy_operation(
+    payload: dict[str, object], operation: str
+) -> None:
     if _current_market_session() != "REGULAR_MARKET":
         return
-    if bool(payload.get("manual_override") or payload.get("force") or settings.runtime_manual_override):
+    if bool(
+        payload.get("manual_override")
+        or payload.get("force")
+        or settings.runtime_manual_override
+    ):
         return
     raise HTTPException(
         status_code=409,
@@ -3559,7 +4106,11 @@ def _require_manual_override_for_market_heavy_operation(payload: dict[str, objec
 
 
 def _manual_override_requested(payload: dict[str, object]) -> bool:
-    return bool(payload.get("manual_override") or payload.get("force") or settings.runtime_manual_override)
+    return bool(
+        payload.get("manual_override")
+        or payload.get("force")
+        or settings.runtime_manual_override
+    )
 
 
 def _parse_market_time(value: str) -> time:
@@ -3573,9 +4124,16 @@ def _parse_market_time(value: str) -> time:
     summary="Explain why symbols passed or failed scanner gates",
     description="Use after `/scanner/opportunities` when a symbol is not appearing or when a signal needs explanation.",
 )
-def get_scanner_diagnostics(side: str = "BUY", symbols: str | None = None, limit: int = 25, order_mode: str = "paper") -> dict[str, object]:
+def get_scanner_diagnostics(
+    side: str = "BUY",
+    symbols: str | None = None,
+    limit: int = 25,
+    order_mode: str = "paper",
+) -> dict[str, object]:
     scanner_service = get_scanner_service()
-    symbol_list = [item.strip().upper() for item in symbols.split(",")] if symbols else None
+    symbol_list = (
+        [item.strip().upper() for item in symbols.split(",")] if symbols else None
+    )
     diagnostics = scanner_service.scan_with_diagnostics(
         symbols=symbol_list,
         side=side.upper(),
@@ -3644,9 +4202,9 @@ def place_order(
                     "factor_scores": {
                         "strategy_metadata": {
                             "strategy_name": "banknifty_option_buying",
-                            "strategy_version": "banknifty_option_buying_v1"
+                            "strategy_version": "banknifty_option_buying_v1",
                         },
-                        "contract": {"expiry": "2026-07-26"}
+                        "contract": {"expiry": "2026-07-26"},
                     },
                 },
             }
@@ -3658,13 +4216,26 @@ def place_order(
     try:
         signal_payload = payload.get("signal")
         if not isinstance(signal_payload, dict):
-            signal_payload = {key: value for key, value in payload.items() if key not in {"confirm_live", "opportunity_id", "order_mode"}}
+            signal_payload = {
+                key: value
+                for key, value in payload.items()
+                if key not in {"confirm_live", "opportunity_id", "order_mode"}
+            }
         signal = Signal(**signal_payload)  # type: ignore[arg-type]
         confirm_live = bool(payload.get("confirm_live", False))
-        order_mode = str(payload.get("order_mode") or settings.default_order_mode or "paper").lower()
+        order_mode = str(
+            payload.get("order_mode") or settings.default_order_mode or "paper"
+        ).lower()
         opportunity_id_value = payload.get("opportunity_id")
-        opportunity_id = int(opportunity_id_value) if opportunity_id_value is not None else None
-        return get_order_service().place_signal_order(signal, confirm_live=confirm_live, opportunity_id=opportunity_id, order_mode=order_mode)
+        opportunity_id = (
+            int(opportunity_id_value) if opportunity_id_value is not None else None
+        )
+        return get_order_service().place_signal_order(
+            signal,
+            confirm_live=confirm_live,
+            opportunity_id=opportunity_id,
+            order_mode=order_mode,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -3677,13 +4248,28 @@ def get_risk_status() -> dict[str, object]:
     }
 
 
-@app.get("/trades", tags=["04 Orders"], summary="List actual paper/live trade lifecycle records")
-def list_trades(status: str | None = None, limit: int = 100, include_artifacts: bool = False) -> dict[str, object]:
-    records = trade_repository.list_trades(status=status, limit=limit, include_artifacts=include_artifacts)
-    return {"count": len(records), "trades": [trade_record_to_dict(record) for record in records]}
+@app.get(
+    "/trades",
+    tags=["04 Orders"],
+    summary="List actual paper/live trade lifecycle records",
+)
+def list_trades(
+    status: str | None = None, limit: int = 100, include_artifacts: bool = False
+) -> dict[str, object]:
+    records = trade_repository.list_trades(
+        status=status, limit=limit, include_artifacts=include_artifacts
+    )
+    return {
+        "count": len(records),
+        "trades": [trade_record_to_dict(record) for record in records],
+    }
 
 
-@app.get("/trades/exit-alerts", tags=["04 Orders"], summary="List live trades stuck in closing, exit_failed, or reconciliation mismatch")
+@app.get(
+    "/trades/exit-alerts",
+    tags=["04 Orders"],
+    summary="List live trades stuck in closing, exit_failed, or reconciliation mismatch",
+)
 def trade_exit_alerts(limit: int = 100) -> dict[str, object]:
     records = trade_repository.exit_alerts(limit=limit)
     return {
@@ -3693,7 +4279,11 @@ def trade_exit_alerts(limit: int = 100) -> dict[str, object]:
     }
 
 
-@app.get("/trades/test-artifacts", tags=["04 Orders"], summary="List suspected synthetic test rows in trades")
+@app.get(
+    "/trades/test-artifacts",
+    tags=["04 Orders"],
+    summary="List suspected synthetic test rows in trades",
+)
 def trade_test_artifacts(limit: int = 100) -> dict[str, object]:
     return trade_repository.suspected_test_artifacts(limit=limit)
 
@@ -3704,7 +4294,9 @@ def trade_test_artifacts(limit: int = 100) -> dict[str, object]:
     summary="Quarantine suspected synthetic test rows in trades",
     dependencies=PROTECTED_ROUTE,
 )
-def quarantine_trade_test_artifacts(payload: dict[str, object] | None = Body(default=None)) -> dict[str, object]:
+def quarantine_trade_test_artifacts(
+    payload: dict[str, object] | None = Body(default=None),
+) -> dict[str, object]:
     payload = payload or {}
     return trade_repository.quarantine_suspected_test_artifacts(
         limit=int(payload.get("limit") or 100),
@@ -3720,7 +4312,11 @@ def quarantine_trade_test_artifacts(payload: dict[str, object] | None = Body(def
 )
 def close_trade(
     trade_id: int,
-    payload: dict[str, object] = Body(examples=[{"outcome": "target_1", "exit_price": 115, "notes": "Manual paper exit"}]),
+    payload: dict[str, object] = Body(
+        examples=[
+            {"outcome": "target_1", "exit_price": 115, "notes": "Manual paper exit"}
+        ]
+    ),
 ) -> dict[str, object]:
     outcome = str(payload.get("outcome") or "")
     exit_price = payload.get("exit_price")
@@ -3746,10 +4342,14 @@ def close_trade(
     summary="Sync open live trades with Kite order status",
     dependencies=PROTECTED_ROUTE,
 )
-def sync_live_trades(payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100}])) -> dict[str, object]:
+def sync_live_trades(
+    payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100}]),
+) -> dict[str, object]:
     payload = payload or {}
     try:
-        return broker_sync_service.sync_open_trades(limit=_bounded_int(payload.get("limit"), 100, maximum=500))
+        return broker_sync_service.sync_open_trades(
+            limit=_bounded_int(payload.get("limit"), 100, maximum=500)
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -3767,12 +4367,20 @@ def reconcile_broker_positions() -> dict[str, object]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/broker/reconciliation/status", tags=["04 Orders"], summary="Inspect broker/local reconciliation live-trading block")
+@app.get(
+    "/broker/reconciliation/status",
+    tags=["04 Orders"],
+    summary="Inspect broker/local reconciliation live-trading block",
+)
 def broker_reconciliation_status() -> dict[str, object]:
     return broker_sync_service.live_block_status()
 
 
-@app.get("/broker/emergency-protection/status", tags=["04 Orders"], summary="Inspect broker-side emergency SL/GTT capability")
+@app.get(
+    "/broker/emergency-protection/status",
+    tags=["04 Orders"],
+    summary="Inspect broker-side emergency SL/GTT capability",
+)
 def broker_emergency_protection_status() -> dict[str, object]:
     return {
         "enabled": settings.enable_broker_emergency_sl,
@@ -3790,18 +4398,32 @@ def broker_emergency_protection_status() -> dict[str, object]:
     summary="Auto square-off open trades at target or stop",
     dependencies=PROTECTED_ROUTE,
 )
-def evaluate_trade_exits(payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100}])) -> dict[str, object]:
+def evaluate_trade_exits(
+    payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100}]),
+) -> dict[str, object]:
     payload = payload or {}
     try:
-        return trade_exit_service.evaluate_once(limit=_bounded_int(payload.get("limit"), 100, maximum=500))
+        return trade_exit_service.evaluate_once(
+            limit=_bounded_int(payload.get("limit"), 100, maximum=500)
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/alerts/test", tags=["01 System"], summary="Send a test Telegram alert if configured")
-def send_test_alert(payload: dict[str, object] | None = Body(default=None, examples=[{"message": "AI Option Trader test alert"}])) -> dict[str, object]:
+@app.post(
+    "/alerts/test",
+    tags=["01 System"],
+    summary="Send a test Telegram alert if configured",
+)
+def send_test_alert(
+    payload: dict[str, object] | None = Body(
+        default=None, examples=[{"message": "AI Option Trader test alert"}]
+    ),
+) -> dict[str, object]:
     payload = payload or {}
-    return notification_service.send(str(payload.get("message") or "AI Option Trader test alert"))
+    return notification_service.send(
+        str(payload.get("message") or "AI Option Trader test alert")
+    )
 
 
 @app.post(
@@ -3839,22 +4461,32 @@ async def start_auto_trader(
     symbols_value = payload.get("symbols")
     symbols = None
     if isinstance(symbols_value, str):
-        symbols = [item.strip().upper() for item in symbols_value.split(",") if item.strip()]
+        symbols = [
+            item.strip().upper() for item in symbols_value.split(",") if item.strip()
+        ]
     elif isinstance(symbols_value, list):
-        symbols = [str(item).strip().upper() for item in symbols_value if str(item).strip()]
+        symbols = [
+            str(item).strip().upper() for item in symbols_value if str(item).strip()
+        ]
 
-    order_mode = str(payload.get("order_mode") or settings.default_order_mode or "paper").lower()
+    order_mode = str(
+        payload.get("order_mode") or settings.default_order_mode or "paper"
+    ).lower()
     status = auto_trader_service.start(
         side=str(payload.get("side") or "BUY"),
         symbols=symbols,
-        interval_seconds=int(payload.get("interval_seconds") or settings.scanner_interval_seconds),
+        interval_seconds=int(
+            payload.get("interval_seconds") or settings.scanner_interval_seconds
+        ),
         limit=int(payload.get("limit") or 5),
         place_orders=bool(payload.get("place_orders", True)),
         confirm_live=bool(payload.get("confirm_live", order_mode == "live")),
         order_mode=order_mode,
     )
     if bool(payload.get("monitor_outcomes", True)):
-        opportunity_outcome_service.start(interval_seconds=int(payload.get("outcome_interval_seconds") or 30))
+        opportunity_outcome_service.start(
+            interval_seconds=int(payload.get("outcome_interval_seconds") or 30)
+        )
     return {
         "auto_trader": status,
         "opportunity_monitor": opportunity_outcome_service.status(),
@@ -3871,12 +4503,20 @@ async def stop_auto_trader() -> dict[str, object]:
     return await auto_trader_service.stop()
 
 
-@app.get("/auto-trader/status", tags=["05 Auto Trader"], summary="Get continuous scanner status")
+@app.get(
+    "/auto-trader/status",
+    tags=["05 Auto Trader"],
+    summary="Get continuous scanner status",
+)
 def get_auto_trader_status() -> dict[str, object]:
     return auto_trader_service.status()
 
 
-@app.get("/auto-trader/latest", tags=["05 Auto Trader"], summary="Get latest auto-trader opportunities")
+@app.get(
+    "/auto-trader/latest",
+    tags=["05 Auto Trader"],
+    summary="Get latest auto-trader opportunities",
+)
 def get_auto_trader_latest() -> dict[str, object]:
     return {
         "status": auto_trader_service.status(),
@@ -3884,7 +4524,11 @@ def get_auto_trader_latest() -> dict[str, object]:
     }
 
 
-@app.get("/auto-trader/executions", tags=["05 Auto Trader"], summary="Get auto-trader order execution history")
+@app.get(
+    "/auto-trader/executions",
+    tags=["05 Auto Trader"],
+    summary="Get auto-trader order execution history",
+)
 def get_auto_trader_executions() -> dict[str, object]:
     return {
         "count": len(auto_trader_service.executions),
@@ -3903,7 +4547,9 @@ def get_dashboard_decision_feed(limit: int = 30) -> dict[str, object]:
     events: list[dict[str, object]] = []
     for record in opportunity_repository.list_opportunities(limit=limit):
         events.append(_decision_event_from_opportunity(record))
-    for record in rejected_opportunity_repository.list_rejections(symbol="BANKNIFTY", limit=limit):
+    for record in rejected_opportunity_repository.list_rejections(
+        symbol="BANKNIFTY", limit=limit
+    ):
         events.append(_decision_event_from_rejection(record))
     for record in trade_repository.list_trades(limit=limit):
         events.append(_decision_event_from_trade(record))
@@ -3912,10 +4558,16 @@ def get_dashboard_decision_feed(limit: int = 30) -> dict[str, object]:
     for item in auto_trader_service.recent_decision_events(limit=limit):
         events.append(_decision_event_from_auto_decision(item))
     if auto_trader_service.last_scan_result:
-        events.append(_decision_event_from_scan_heartbeat(auto_trader_service.last_scan_result))
+        events.append(
+            _decision_event_from_scan_heartbeat(auto_trader_service.last_scan_result)
+        )
     for item in auto_trader_service.errors[-limit:]:
         events.append(_decision_event_from_error(item))
-    events = sorted(events, key=lambda item: _decision_sort_timestamp(item.get("sort_time")), reverse=True)[:limit]
+    events = sorted(
+        events,
+        key=lambda item: _decision_sort_timestamp(item.get("sort_time")),
+        reverse=True,
+    )[:limit]
     for item in events:
         item.pop("sort_time", None)
     return {"status": "ok", "count": len(events), "events": events}
@@ -3927,7 +4579,9 @@ def get_dashboard_decision_feed(limit: int = 30) -> dict[str, object]:
     summary="List saved scanner opportunities",
     description="Use `status=open` to see opportunities still being monitored, or omit status to see recent records.",
 )
-def list_saved_opportunities(status: str | None = None, limit: int = 50) -> dict[str, object]:
+def list_saved_opportunities(
+    status: str | None = None, limit: int = 50
+) -> dict[str, object]:
     records = opportunity_repository.list_opportunities(status=status, limit=limit)
     return {
         "count": len(records),
@@ -3976,7 +4630,11 @@ def update_opportunity_outcome(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.get("/opportunities/performance", tags=["06 Opportunity Journal"], summary="Summarize opportunity win/loss performance")
+@app.get(
+    "/opportunities/performance",
+    tags=["06 Opportunity Journal"],
+    summary="Summarize opportunity win/loss performance",
+)
 def get_opportunity_performance() -> dict[str, object]:
     return opportunity_repository.summarize_performance()
 
@@ -4004,9 +4662,13 @@ def get_rejected_opportunities(
     limit: int = 1000,
     learning_eligible: bool | None = None,
 ) -> dict[str, object]:
-    if deferred := _defer_review_analysis_during_market("rejected_opportunity_analysis"):
+    if deferred := _defer_review_analysis_during_market(
+        "rejected_opportunity_analysis"
+    ):
         return deferred
-    return rejected_opportunity_repository.analyze(symbol=symbol, limit=limit, learning_eligible=learning_eligible)
+    return rejected_opportunity_repository.analyze(
+        symbol=symbol, limit=limit, learning_eligible=learning_eligible
+    )
 
 
 @app.post(
@@ -4016,12 +4678,22 @@ def get_rejected_opportunities(
 )
 def update_rejected_opportunity_outcome(
     rejection_id: int,
-    payload: dict[str, object] = Body(examples=[{"outcome": "would_have_hit_target", "exit_price": 250.0, "notes": "Rejected setup later moved well"}]),
+    payload: dict[str, object] = Body(
+        examples=[
+            {
+                "outcome": "would_have_hit_target",
+                "exit_price": 250.0,
+                "notes": "Rejected setup later moved well",
+            }
+        ]
+    ),
 ) -> dict[str, object]:
     outcome = str(payload.get("outcome") or "")
     if not outcome:
         raise HTTPException(status_code=400, detail="outcome is required")
-    exit_price = float(payload["exit_price"]) if payload.get("exit_price") is not None else None
+    exit_price = (
+        float(payload["exit_price"]) if payload.get("exit_price") is not None else None
+    )
     try:
         record = rejected_opportunity_repository.mark_later_outcome(
             rejection_id,
@@ -4030,7 +4702,9 @@ def update_rejected_opportunity_outcome(
             notes=str(payload.get("notes") or ""),
             outcome_source=str(payload.get("outcome_source") or "manual"),
             outcome_timeframe=str(payload.get("outcome_timeframe") or "") or None,
-            outcome_minutes=float(payload["outcome_minutes"]) if payload.get("outcome_minutes") is not None else None,
+            outcome_minutes=float(payload["outcome_minutes"])
+            if payload.get("outcome_minutes") is not None
+            else None,
             ambiguous=bool(payload.get("ambiguous", False)),
         )
         return {"rejection": rejected_opportunity_repository.to_dict(record)}
@@ -4045,7 +4719,7 @@ def update_rejected_opportunity_outcome(
     description="Fetches current option prices and auto-marks accepted opportunity outcomes plus later outcomes for rejected setups where possible.",
 )
 def evaluate_open_opportunities(
-    payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100}])
+    payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100}]),
 ) -> dict[str, object]:
     payload = payload or {}
     return opportunity_outcome_service.evaluate_once(
@@ -4061,7 +4735,9 @@ def evaluate_open_opportunities(
     description="Checks rejected scanner setups against current option prices and stores later_outcome when target/stop/expiry can be inferred.",
 )
 def evaluate_rejected_opportunities(
-    payload: dict[str, object] | None = Body(default=None, examples=[{"limit": 100, "symbol": "BANKNIFTY", "exhaust": True}])
+    payload: dict[str, object] | None = Body(
+        default=None, examples=[{"limit": 100, "symbol": "BANKNIFTY", "exhaust": True}]
+    ),
 ) -> dict[str, object]:
     payload = payload or {}
     symbol_value = payload.get("symbol", "BANKNIFTY")
@@ -4069,10 +4745,18 @@ def evaluate_rejected_opportunities(
     if bool(payload.get("exhaust", payload.get("all", False))):
         return rejected_opportunity_outcome_service.evaluate_batches(
             symbol=symbol,
-            batch_limit=int(payload.get("limit") or settings.rejected_outcome_batch_limit),
-            max_batches=int(payload.get("max_batches") or settings.rejected_outcome_max_batches),
+            batch_limit=int(
+                payload.get("limit") or settings.rejected_outcome_batch_limit
+            ),
+            max_batches=int(
+                payload.get("max_batches") or settings.rejected_outcome_max_batches
+            ),
             learning_only=bool(payload.get("learning_only", True)),
-            delay_seconds=float(payload.get("delay_seconds", settings.rejected_outcome_batch_delay_seconds)),
+            delay_seconds=float(
+                payload.get(
+                    "delay_seconds", settings.rejected_outcome_batch_delay_seconds
+                )
+            ),
         )
     return rejected_opportunity_outcome_service.evaluate_once(
         symbol=symbol,
@@ -4088,18 +4772,30 @@ def evaluate_rejected_opportunities(
     description="Usually started automatically by `/auto-trader/start` when `monitor_outcomes=true`.",
 )
 async def start_opportunity_monitor(
-    payload: dict[str, object] | None = Body(default=None, examples=[{"interval_seconds": 30}])
+    payload: dict[str, object] | None = Body(
+        default=None, examples=[{"interval_seconds": 30}]
+    ),
 ) -> dict[str, object]:
     payload = payload or {}
-    return opportunity_outcome_service.start(interval_seconds=int(payload.get("interval_seconds") or 30))
+    return opportunity_outcome_service.start(
+        interval_seconds=int(payload.get("interval_seconds") or 30)
+    )
 
 
-@app.post("/opportunity-monitor/stop", tags=["07 Outcome Monitor"], summary="Stop automatic outcome monitoring")
+@app.post(
+    "/opportunity-monitor/stop",
+    tags=["07 Outcome Monitor"],
+    summary="Stop automatic outcome monitoring",
+)
 async def stop_opportunity_monitor() -> dict[str, object]:
     return await opportunity_outcome_service.stop()
 
 
-@app.get("/opportunity-monitor/status", tags=["07 Outcome Monitor"], summary="Get outcome monitor status")
+@app.get(
+    "/opportunity-monitor/status",
+    tags=["07 Outcome Monitor"],
+    summary="Get outcome monitor status",
+)
 def get_opportunity_monitor_status() -> dict[str, object]:
     return opportunity_outcome_service.status()
 
@@ -4128,27 +4824,41 @@ def scan_once_auto_trader(
         symbols_value = payload.get("symbols")
         symbols = None
         if isinstance(symbols_value, str):
-            symbols = [item.strip().upper() for item in symbols_value.split(",") if item.strip()]
+            symbols = [
+                item.strip().upper()
+                for item in symbols_value.split(",")
+                if item.strip()
+            ]
         elif isinstance(symbols_value, list):
-            symbols = [str(item).strip().upper() for item in symbols_value if str(item).strip()]
+            symbols = [
+                str(item).strip().upper() for item in symbols_value if str(item).strip()
+            ]
         auto_trader_service.config = {
             "side": str(payload.get("side") or "BUY").upper(),
             "symbols": symbols,
-            "interval_seconds": int(payload.get("interval_seconds") or settings.scanner_interval_seconds),
+            "interval_seconds": int(
+                payload.get("interval_seconds") or settings.scanner_interval_seconds
+            ),
             "limit": int(payload.get("limit") or 5),
             "place_orders": bool(payload.get("place_orders", False)),
             "confirm_live": False,
-            "order_mode": str(payload.get("order_mode") or settings.default_order_mode or "paper").lower(),
+            "order_mode": str(
+                payload.get("order_mode") or settings.default_order_mode or "paper"
+            ).lower(),
         }
     return auto_trader_service.scan_once()
 
 
-@app.get("/paper/summary", tags=["08 Paper Trading"], summary="Get paper-trading summary")
+@app.get(
+    "/paper/summary", tags=["08 Paper Trading"], summary="Get paper-trading summary"
+)
 def get_paper_summary() -> dict[str, object]:
     return paper_trading_service.get_summary()
 
 
-@app.get("/paper/positions", tags=["08 Paper Trading"], summary="List open paper positions")
+@app.get(
+    "/paper/positions", tags=["08 Paper Trading"], summary="List open paper positions"
+)
 def get_paper_positions() -> dict[str, object]:
     return {
         "count": len(paper_trading_service.positions),
@@ -4156,7 +4866,11 @@ def get_paper_positions() -> dict[str, object]:
     }
 
 
-@app.get("/paper/trades", tags=["08 Paper Trading"], summary="List open and closed paper trades")
+@app.get(
+    "/paper/trades",
+    tags=["08 Paper Trading"],
+    summary="List open and closed paper trades",
+)
 def get_paper_trades() -> dict[str, object]:
     return {
         "open_positions": paper_trading_service.positions,
@@ -4172,7 +4886,9 @@ def get_paper_trades() -> dict[str, object]:
     description="Closes an in-memory paper position and records simulated P&L.",
 )
 def close_paper_position(
-    payload: dict[str, object] = Body(examples=[{"symbol": "NIFTY24JUN22000CE", "exit_price": 115}])
+    payload: dict[str, object] = Body(
+        examples=[{"symbol": "NIFTY24JUN22000CE", "exit_price": 115}]
+    ),
 ) -> dict[str, object]:
     symbol = str(payload.get("symbol") or "")
     exit_price = payload.get("exit_price")
@@ -4181,12 +4897,16 @@ def close_paper_position(
     if exit_price is None:
         raise HTTPException(status_code=400, detail="exit_price is required")
     try:
-        trade = paper_trading_service.close_trade(symbol=symbol, exit_price=float(exit_price))
-        return {"status": "closed", "trade": trade, "summary": paper_trading_service.get_summary()}
+        trade = paper_trading_service.close_trade(
+            symbol=symbol, exit_price=float(exit_price)
+        )
+        return {
+            "status": "closed",
+            "trade": trade,
+            "summary": paper_trading_service.get_summary(),
+        }
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
 
 
 @app.get("/kite/login", tags=["02 Kite Login"], summary="Return Kite login URL")
@@ -4218,13 +4938,23 @@ def kite_auth() -> RedirectResponse:
 @app.get("/kite/health", tags=["02 Kite Login"], summary="Verify Kite profile access")
 def kite_health() -> dict[str, object]:
     try:
-        profile = _cached_dashboard_broker_call("kite_health", lambda: get_kite_provider().profile())
+        profile = _cached_dashboard_broker_call(
+            "kite_health", lambda: get_kite_provider().profile()
+        )
         return {**profile, "auth": kite_auth_state.status()}
     except Exception as exc:
-        return {"status": "error", "message": str(exc), "auth": kite_auth_state.status()}
+        return {
+            "status": "error",
+            "message": str(exc),
+            "auth": kite_auth_state.status(),
+        }
 
 
-@app.get("/kite/websocket/status", tags=["02 Kite Login"], summary="Inspect active Kite WebSocket price feed")
+@app.get(
+    "/kite/websocket/status",
+    tags=["02 Kite Login"],
+    summary="Inspect active Kite WebSocket price feed",
+)
 def kite_websocket_status() -> dict[str, object]:
     status = application_context.market_data_runtime_service.status()
     status["kite_auth"] = kite_auth_state.status()
@@ -4238,7 +4968,9 @@ def kite_websocket_status() -> dict[str, object]:
 @app.get("/kite/margins", tags=["02 Kite Login"], summary="Get Zerodha margins/funds")
 def kite_margins() -> dict[str, object]:
     try:
-        return _cached_dashboard_broker_call("kite_margins", lambda: get_kite_provider().margins())
+        return _cached_dashboard_broker_call(
+            "kite_margins", lambda: get_kite_provider().margins()
+        )
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
 
@@ -4246,26 +4978,44 @@ def kite_margins() -> dict[str, object]:
 @app.get("/kite/positions", tags=["02 Kite Login"], summary="Get Zerodha positions")
 def kite_positions() -> dict[str, object]:
     try:
-        return _cached_dashboard_broker_call("kite_positions", lambda: get_kite_provider().positions())
+        return _cached_dashboard_broker_call(
+            "kite_positions", lambda: get_kite_provider().positions()
+        )
     except Exception as exc:
         return {"status": "error", "message": str(exc)}
 
 
-def _cached_dashboard_broker_call(cache_key: str, fetcher: Callable[[], dict[str, object]]) -> dict[str, object]:
+def _cached_dashboard_broker_call(
+    cache_key: str, fetcher: Callable[[], dict[str, object]]
+) -> dict[str, object]:
     now = ist_now_naive()
     ttl = max(1, int(settings.dashboard_broker_cache_ttl_seconds))
     cached = dashboard_broker_cache.get(cache_key)
     if cached is not None:
         cached_at, payload = cached
         if (now - cached_at).total_seconds() <= ttl:
-            return {**payload, "cached": True, "cached_at": cached_at.isoformat(sep=" ")}
+            return {
+                **payload,
+                "cached": True,
+                "cached_at": cached_at.isoformat(sep=" "),
+            }
     payload = fetcher()
     dashboard_broker_cache[cache_key] = (now, payload)
     return {**payload, "cached": False, "cached_at": now.isoformat(sep=" ")}
 
 
-@app.get("/kite/callback", response_class=HTMLResponse, tags=["02 Kite Login"], summary="Handle Kite redirect callback")
-@app.get("/login", response_class=HTMLResponse, tags=["02 Kite Login"], summary="Handle alternate Kite redirect callback")
+@app.get(
+    "/kite/callback",
+    response_class=HTMLResponse,
+    tags=["02 Kite Login"],
+    summary="Handle Kite redirect callback",
+)
+@app.get(
+    "/login",
+    response_class=HTMLResponse,
+    tags=["02 Kite Login"],
+    summary="Handle alternate Kite redirect callback",
+)
 def kite_callback(request_token: str | None = None, error: str | None = None):
     """Handle Kite redirect: exchange request_token for access token and show a simple page."""
     if error:
@@ -4279,8 +5029,10 @@ def kite_callback(request_token: str | None = None, error: str | None = None):
         access_token = data.get("access_token")
         if access_token:
             save_access_token(access_token)
-            application_context.market_data_runtime_service.refresh_credentials(access_token=access_token)
-            html = f"<h3>Login successful</h3><p>Access token saved.</p><p><a href=\"/\">Back to app</a></p>"
+            application_context.market_data_runtime_service.refresh_credentials(
+                access_token=access_token
+            )
+            html = f'<h3>Login successful</h3><p>Access token saved.</p><p><a href="/">Back to app</a></p>'
         else:
             html = f"<h3>Login completed but no access token returned.</h3><pre>{data}</pre>"
         return HTMLResponse(html)
@@ -4295,7 +5047,9 @@ def kite_callback(request_token: str | None = None, error: str | None = None):
     description="Use this only if you are manually copying the Kite `request_token` instead of using browser redirect.",
 )
 def kite_session(
-    payload: dict[str, str] = Body(examples=[{"request_token": "paste_request_token_here"}])
+    payload: dict[str, str] = Body(
+        examples=[{"request_token": "paste_request_token_here"}]
+    ),
 ) -> dict[str, object]:
     """Exchange a Kite request_token for an access token and persist it locally."""
     request_token = payload.get("request_token")
@@ -4308,7 +5062,9 @@ def kite_session(
         access_token = data.get("access_token")
         if access_token:
             save_access_token(access_token)
-            application_context.market_data_runtime_service.refresh_credentials(access_token=access_token)
+            application_context.market_data_runtime_service.refresh_credentials(
+                access_token=access_token
+            )
         profile = kite_provider.profile()
         return {
             "status": "ok" if access_token else "missing-access-token",

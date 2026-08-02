@@ -19,7 +19,11 @@ class OpportunityRepository:
         session = get_session()
         try:
             lineage = current_strategy_lineage()
-            probability_meta = signal.factor_scores.get("probability_estimate", {}) if isinstance(signal.factor_scores, dict) else {}
+            probability_meta = (
+                signal.factor_scores.get("probability_estimate", {})
+                if isinstance(signal.factor_scores, dict)
+                else {}
+            )
             record = OpportunityRecord(
                 symbol=signal.symbol,
                 action=signal.action,
@@ -37,8 +41,13 @@ class OpportunityRepository:
                 lot_size=signal.lot_size,
                 score=signal.score,
                 probability=signal.probability,
-                heuristic_score_confidence=probability_meta.get("heuristic_score_confidence"),
-                probability_source=str(probability_meta.get("source") or "unavailable_insufficient_calibration"),
+                heuristic_score_confidence=probability_meta.get(
+                    "heuristic_score_confidence"
+                ),
+                probability_source=str(
+                    probability_meta.get("source")
+                    or "unavailable_insufficient_calibration"
+                ),
                 calibration_version=probability_meta.get("calibration_version"),
                 strategy_version=str(lineage["strategy_version"]),
                 config_hash=str(lineage["config_hash"]),
@@ -53,10 +62,14 @@ class OpportunityRepository:
         finally:
             session.close()
 
-    def list_opportunities(self, status: str | None = None, limit: int = 50) -> list[OpportunityRecord]:
+    def list_opportunities(
+        self, status: str | None = None, limit: int = 50
+    ) -> list[OpportunityRecord]:
         session = get_session()
         try:
-            query = session.query(OpportunityRecord).order_by(OpportunityRecord.id.desc())
+            query = session.query(OpportunityRecord).order_by(
+                OpportunityRecord.id.desc()
+            )
             if status:
                 query = query.filter(OpportunityRecord.status == status)
             return query.limit(limit).all()
@@ -93,7 +106,9 @@ class OpportunityRepository:
             record.failure_tags_json = json.dumps(failure_tags or [])
             if exit_price is not None and record.entry_price is not None:
                 multiplier = 1 if record.side == "BUY" else -1
-                record.pnl = (exit_price - record.entry_price) * record.quantity * multiplier
+                record.pnl = (
+                    (exit_price - record.entry_price) * record.quantity * multiplier
+                )
 
             session.commit()
             session.refresh(record)
@@ -104,8 +119,16 @@ class OpportunityRepository:
     def summarize_performance(self) -> dict[str, Any]:
         records = self.list_opportunities(limit=1000)
         closed = [record for record in records if record.status == "closed"]
-        wins = [record for record in closed if record.outcome in {"target_1", "target_2", "target_3", "winner"}]
-        losses = [record for record in closed if record.outcome in {"stop_loss", "false_signal", "loser"}]
+        wins = [
+            record
+            for record in closed
+            if record.outcome in {"target_1", "target_2", "target_3", "winner"}
+        ]
+        losses = [
+            record
+            for record in closed
+            if record.outcome in {"stop_loss", "false_signal", "loser"}
+        ]
         pnl_values = [float(record.pnl or 0.0) for record in closed]
         return {
             "total": len(records),
@@ -119,7 +142,11 @@ class OpportunityRepository:
 
     def failure_analysis(self) -> dict[str, Any]:
         records = self.list_opportunities(limit=1000)
-        failed = [record for record in records if record.outcome in {"stop_loss", "false_signal", "loser", "expired"}]
+        failed = [
+            record
+            for record in records
+            if record.outcome in {"stop_loss", "false_signal", "loser", "expired"}
+        ]
         tag_counter: Counter[str] = Counter()
         by_symbol: Counter[str] = Counter()
         by_action: Counter[str] = Counter()

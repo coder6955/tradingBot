@@ -13,7 +13,10 @@ from app.services.entry_policy_shadow_service import (
     EntryPolicyContext,
     ShadowEntryPolicyComparisonService,
 )
-from app.services.episode_outcome_collector import EpisodeOutcomeCollector, MarketPathEvent
+from app.services.episode_outcome_collector import (
+    EpisodeOutcomeCollector,
+    MarketPathEvent,
+)
 from app.services.episode_reservation_service import EpisodeReservationService
 from app.services.strategy_lineage_service import current_strategy_lineage
 from app.services.time_utils import ist_now_naive
@@ -53,7 +56,9 @@ class EventTimeReplayService:
         self.policy_service = policy_service or ShadowEntryPolicyComparisonService()
         self.episode_service = episode_service or EpisodeReservationService()
 
-    def episode_key_for_signal(self, signal: Signal, *, metadata: dict[str, Any] | None = None) -> str:
+    def episode_key_for_signal(
+        self, signal: Signal, *, metadata: dict[str, Any] | None = None
+    ) -> str:
         return self.episode_service.identity(signal, metadata=metadata)["episode_key"]
 
     def run(
@@ -74,14 +79,25 @@ class EventTimeReplayService:
             ),
         )
         self._validate_events(ordered, tick_capable=tick_capable)
-        market_events = [self._to_market_event(event) for event in ordered if event.event_type.upper() == "TICK"]
+        market_events = [
+            self._to_market_event(event)
+            for event in ordered
+            if event.event_type.upper() == "TICK"
+        ]
         disabled_policies = [
             policy.version
             for policy in self.policy_service.policies
-            if isinstance(policy, ContinuousTransmissionShadowPolicy) and not tick_capable
+            if isinstance(policy, ContinuousTransmissionShadowPolicy)
+            and not tick_capable
         ]
-        active_policies = [policy for policy in self.policy_service.policies if policy.version not in disabled_policies]
-        comparison = ShadowEntryPolicyComparisonService(active_policies).compare(context, market_events, persist=False)
+        active_policies = [
+            policy
+            for policy in self.policy_service.policies
+            if policy.version not in disabled_policies
+        ]
+        comparison = ShadowEntryPolicyComparisonService(active_policies).compare(
+            context, market_events, persist=False
+        )
         for version in disabled_policies:
             comparison["decisions"][version] = {
                 "policy_version": version,
@@ -94,12 +110,15 @@ class EventTimeReplayService:
                 "shadow_only": True,
                 "can_invoke_order_service": False,
             }
-        collector = EpisodeOutcomeCollector(start_worker=False, persist_observations=False)
+        collector = EpisodeOutcomeCollector(
+            start_worker=False, persist_observations=False
+        )
         collector.register_episode(
             context.episode_key,
             context={
                 "underlying_token": context.metadata.get("underlying_token"),
-                "option_token": context.metadata.get("option_token") or context.metadata.get("instrument_token"),
+                "option_token": context.metadata.get("option_token")
+                or context.metadata.get("instrument_token"),
                 "target_1": context.target_1,
                 "stop_loss": context.stop_loss,
                 "account_equity": context.metadata.get("account_equity"),
@@ -142,7 +161,12 @@ class EventTimeReplayService:
         }
         output_hash = self._hash(result_payload)
         run_id = self._hash({"input_hash": input_hash, "output_hash": output_hash})
-        result = {**result_payload, "run_id": run_id, "input_hash": input_hash, "output_hash": output_hash}
+        result = {
+            **result_payload,
+            "run_id": run_id,
+            "input_hash": input_hash,
+            "output_hash": output_hash,
+        }
         if persist:
             self._persist_run(
                 run_id=run_id,
@@ -156,38 +180,82 @@ class EventTimeReplayService:
             )
         return result
 
-    def visible_candle_events(self, events: list[ReplayEvent], *, as_of: datetime) -> list[ReplayEvent]:
+    def visible_candle_events(
+        self, events: list[ReplayEvent], *, as_of: datetime
+    ) -> list[ReplayEvent]:
         boundary = self._naive(as_of)
         visible: list[ReplayEvent] = []
         for event in events:
             if event.event_type.upper() != "CANDLE":
                 continue
-            complete_at = self._naive(event.candle_complete_at) if event.candle_complete_at else None
-            if event.candle_state.lower() == "completed" and complete_at and complete_at <= boundary:
+            complete_at = (
+                self._naive(event.candle_complete_at)
+                if event.candle_complete_at
+                else None
+            )
+            if (
+                event.candle_state.lower() == "completed"
+                and complete_at
+                and complete_at <= boundary
+            ):
                 visible.append(event)
-            elif event.candle_state.lower() == "building" and self._naive(event.exchange_timestamp) <= boundary:
+            elif (
+                event.candle_state.lower() == "building"
+                and self._naive(event.exchange_timestamp) <= boundary
+            ):
                 visible.append(event)
-        return sorted(visible, key=lambda item: (item.exchange_timestamp, item.receive_timestamp, item.sequence))
+        return sorted(
+            visible,
+            key=lambda item: (
+                item.exchange_timestamp,
+                item.receive_timestamp,
+                item.sequence,
+            ),
+        )
 
-    def _validate_events(self, events: list[ReplayEvent], *, tick_capable: bool) -> None:
+    def _validate_events(
+        self, events: list[ReplayEvent], *, tick_capable: bool
+    ) -> None:
         seen: set[tuple[datetime, datetime, int]] = set()
         for event in events:
-            key = (self._naive(event.exchange_timestamp), self._naive(event.receive_timestamp), int(event.sequence))
+            key = (
+                self._naive(event.exchange_timestamp),
+                self._naive(event.receive_timestamp),
+                int(event.sequence),
+            )
             if key in seen:
-                raise ValueError("replay events must have unique event-time ordering keys")
+                raise ValueError(
+                    "replay events must have unique event-time ordering keys"
+                )
             seen.add(key)
             if event.event_type.upper() == "CANDLE":
                 if event.candle_state.lower() not in {"building", "completed"}:
-                    raise ValueError("candle replay event must be explicitly building or completed")
-                if event.candle_state.lower() == "completed" and event.candle_complete_at is None:
-                    raise ValueError("completed replay candle requires its actual completion timestamp")
-                if event.provenance.lower() not in {"genuine", "generated", "backfilled", "websocket"}:
+                    raise ValueError(
+                        "candle replay event must be explicitly building or completed"
+                    )
+                if (
+                    event.candle_state.lower() == "completed"
+                    and event.candle_complete_at is None
+                ):
+                    raise ValueError(
+                        "completed replay candle requires its actual completion timestamp"
+                    )
+                if event.provenance.lower() not in {
+                    "genuine",
+                    "generated",
+                    "backfilled",
+                    "websocket",
+                }:
                     raise ValueError("candle provenance must be explicit")
             if event.event_type.upper() == "TICK" and event.contract_available is False:
-                raise ValueError("tick event cannot exist before the replay contract is available")
+                raise ValueError(
+                    "tick event cannot exist before the replay contract is available"
+                )
             if event.instrument_master_version is None:
                 raise ValueError("replay event requires instrument-master lineage")
-        if not tick_capable and any(event.event_type.upper() == "TICK" for event in events):
+        if not tick_capable and any(
+            event.event_type.upper() == "TICK" for event in events
+        ):
             raise ValueError("bar-only replay cannot contain tick events")
 
     def _to_market_event(self, event: ReplayEvent) -> MarketPathEvent:
@@ -222,7 +290,11 @@ class EventTimeReplayService:
         lineage = current_strategy_lineage()
         session = get_session()
         try:
-            record = session.query(ReplayRunRecord).filter(ReplayRunRecord.run_id == run_id).first()
+            record = (
+                session.query(ReplayRunRecord)
+                .filter(ReplayRunRecord.run_id == run_id)
+                .first()
+            )
             if record is None:
                 session.add(
                     ReplayRunRecord(
@@ -231,7 +303,9 @@ class EventTimeReplayService:
                         data_version=data_version,
                         config_hash=str(lineage["config_hash"]),
                         strategy_version=str(lineage["strategy_version"]),
-                        policy_versions_json=json.dumps(policy_versions, sort_keys=True),
+                        policy_versions_json=json.dumps(
+                            policy_versions, sort_keys=True
+                        ),
                         input_hash=input_hash,
                         output_hash=output_hash,
                         tick_capable=1 if tick_capable else 0,
@@ -244,7 +318,11 @@ class EventTimeReplayService:
             session.close()
 
     def _hash(self, payload: dict[str, Any]) -> str:
-        return hashlib.sha256(json.dumps(payload, default=str, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return hashlib.sha256(
+            json.dumps(
+                payload, default=str, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
 
     def _naive(self, value: datetime) -> datetime:
         return value.replace(tzinfo=None)

@@ -8,7 +8,15 @@ from app.config import settings
 class MomentumPhaseService:
     """Classify the lifecycle of a directional move without treating momentum as one boolean."""
 
-    PHASES = ("formation", "acceleration", "breakout", "confirmation", "continuation", "exhaustion", "failure")
+    PHASES = (
+        "formation",
+        "acceleration",
+        "breakout",
+        "confirmation",
+        "continuation",
+        "exhaustion",
+        "failure",
+    )
 
     def evaluate(
         self,
@@ -28,7 +36,10 @@ class MomentumPhaseService:
         premium = self._dict(premium_eval)
         premium_details = self._dict(premium.get("details"))
         breakout = bool(premium_details.get("breakout"))
-        premium_volume = bool(premium_details.get("volume_expansion") or premium_details.get("participation_confirmed"))
+        premium_volume = bool(
+            premium_details.get("volume_expansion")
+            or premium_details.get("participation_confirmed")
+        )
         premium_change = self._float(premium_details.get("premium_change_pct"), 0.0)
         price_details = self._dict(price_action.get("details"))
         hard_block = bool(price_details.get("hard_block"))
@@ -75,8 +86,17 @@ class MomentumPhaseService:
         elif phase == "failure":
             score -= 45
         score = max(0, min(100, score))
-        actionable = phase in {"acceleration", "breakout", "confirmation", "continuation"} and score >= settings.momentum_min_entry_score
-        abstention = "MOMENTUM_EXHAUSTED" if phase == "exhaustion" else "MOMENTUM_FAILED" if phase == "failure" else None
+        actionable = (
+            phase in {"acceleration", "breakout", "confirmation", "continuation"}
+            and score >= settings.momentum_min_entry_score
+        )
+        abstention = (
+            "MOMENTUM_EXHAUSTED"
+            if phase == "exhaustion"
+            else "MOMENTUM_FAILED"
+            if phase == "failure"
+            else None
+        )
         invalidation = [
             "underlying_loses_directional_vwap_acceptance",
             "premium_loses_breakout_level_and_option_vwap",

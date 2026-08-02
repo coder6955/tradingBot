@@ -35,16 +35,19 @@ class MockMarketFeed:
                 "market_context": "strong",
             },
         }
-        return base.get(symbol, {
-            "source": "mock",
-            "is_real_data": False,
-            "price": 100.0,
-            "rsi": 50,
-            "adx": 15,
-            "macd_positive": False,
-            "ema_alignment": False,
-            "vwap_above_price": False,
-            "volume_confirmed": False,
-            "trend_bullish": False,
-            "market_context": "neutral",
-        })
+        return base.get(
+            symbol,
+            {
+                "source": "mock",
+                "is_real_data": False,
+                "price": 100.0,
+                "rsi": 50,
+                "adx": 15,
+                "macd_positive": False,
+                "ema_alignment": False,
+                "vwap_above_price": False,
+                "volume_confirmed": False,
+                "trend_bullish": False,
+                "market_context": "neutral",
+            },
+        )

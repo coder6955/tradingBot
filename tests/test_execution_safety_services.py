@@ -44,15 +44,32 @@ class ExecutionSafetyServiceTests(unittest.TestCase):
 
         result = DataFreshnessService().validate_scan_inputs(
             order_mode="live",
-            snapshot={"source": "stored_candles", "is_real_data": True, "quote_timestamp": stale, "candles": [{"date": stale}]},
-            chain_quotes={"NFO:BANKNIFTY26JUL58000CE": {"last_price": 100, "quote_timestamp": stale}},
+            snapshot={
+                "source": "stored_candles",
+                "is_real_data": True,
+                "quote_timestamp": stale,
+                "candles": [{"date": stale}],
+            },
+            chain_quotes={
+                "NFO:BANKNIFTY26JUL58000CE": {
+                    "last_price": 100,
+                    "quote_timestamp": stale,
+                }
+            },
             contract=contract,
         )
 
         self.assertFalse(result["passed"])
         self.assertTrue(any("stale" in reason for reason in result["reasons"]))
-        self.assertTrue(any("canonical completed-candle analysis" in reason for reason in result["reasons"]))
-        self.assertTrue(any("timestamp provenance" in reason for reason in result["reasons"]))
+        self.assertTrue(
+            any(
+                "canonical completed-candle analysis" in reason
+                for reason in result["reasons"]
+            )
+        )
+        self.assertTrue(
+            any("timestamp provenance" in reason for reason in result["reasons"])
+        )
 
     def test_rejected_opportunity_repository_persists_reason_breakdown(self) -> None:
         repo = RejectedOpportunityRepository()
@@ -75,7 +92,10 @@ class ExecutionSafetyServiceTests(unittest.TestCase):
             reasons=["option premium confirmation failed"],
             snapshot={"price": 58000},
             contract=contract,
-            factor_scores={"option_quality": {"score": 80}, "option_premium_confirmation": {"score": 45}},
+            factor_scores={
+                "option_quality": {"score": 80},
+                "option_premium_confirmation": {"score": 45},
+            },
             score_breakdown={"score": 76},
         )
         report = repo.analyze(symbol="BANKNIFTY")
@@ -85,14 +105,19 @@ class ExecutionSafetyServiceTests(unittest.TestCase):
         self.assertEqual(report["ce_vs_pe"]["PE"], 1)
 
     def test_realistic_pnl_deducts_costs_from_gross(self) -> None:
-        result = RealisticPnlService().calculate(entry_price=100, exit_price=110, quantity=30, side="BUY")
+        result = RealisticPnlService().calculate(
+            entry_price=100, exit_price=110, quantity=30, side="BUY"
+        )
 
         self.assertGreater(result.gross_pnl, 0)
         self.assertGreater(result.charges, 0)
         self.assertLess(result.net_pnl, result.gross_pnl)
 
     def test_scanner_and_decision_engine_score_parity(self) -> None:
-        scanner = ScannerService(feed=MockMarketFeed(), rejected_opportunity_repository=RejectedOpportunityRepository())
+        scanner = ScannerService(
+            feed=MockMarketFeed(),
+            rejected_opportunity_repository=RejectedOpportunityRepository(),
+        )
         scanner_score = scanner._score_breakdown(  # noqa: SLF001
             technical_score=95,
             market_score=70,

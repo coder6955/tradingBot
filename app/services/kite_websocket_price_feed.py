@@ -76,7 +76,9 @@ class KiteWebSocketPriceFeed:
         market_session_service: MarketSessionService | None = None,
     ) -> None:
         self.api_key = api_key or settings.kite_api_key
-        self.access_token = access_token or load_access_token() or settings.kite_access_token
+        self.access_token = (
+            access_token or load_access_token() or settings.kite_access_token
+        )
         self.ticker_factory = ticker_factory
         self.order_update_handler = order_update_handler
         self.tick_handler = tick_handler
@@ -85,7 +87,9 @@ class KiteWebSocketPriceFeed:
         self.underlying_tick_handler = underlying_tick_handler
         self.latency_metrics = latency_metrics
         self.clock = clock or ist_now_naive
-        self.market_session_service = market_session_service or MarketSessionService(clock=self.clock)
+        self.market_session_service = market_session_service or MarketSessionService(
+            clock=self.clock
+        )
         self._ticker: Any | None = None
         self._ticks: dict[int, WebSocketTick] = {}
         self._subscribed_tokens: set[int] = set()
@@ -135,14 +139,20 @@ class KiteWebSocketPriceFeed:
         self._gap_backfill_success_count = 0
         self._gap_backfill_failure_count = 0
         self._start_stop_lock = RLock()
-        self._event_queue: queue.PriorityQueue[tuple[int, int, str, Any]] = queue.PriorityQueue(maxsize=max(1, settings.websocket_event_queue_size))
+        self._event_queue: queue.PriorityQueue[tuple[int, int, str, Any]] = (
+            queue.PriorityQueue(maxsize=max(1, settings.websocket_event_queue_size))
+        )
         self._event_sequence = itertools.count()
         self._event_worker: Thread | None = None
         self._event_stop = Event()
-        self._candle_persist_queue: queue.Queue[tuple[int, str, datetime]] = queue.Queue(maxsize=max(1, settings.websocket_candle_persist_queue_size))
+        self._candle_persist_queue: queue.Queue[tuple[int, str, datetime]] = (
+            queue.Queue(maxsize=max(1, settings.websocket_candle_persist_queue_size))
+        )
         self._candle_persist_worker: Thread | None = None
         self._candle_persist_stop = Event()
-        self._pending_candle_persist: dict[tuple[int, str, datetime], WebSocketPremiumCandle] = {}
+        self._pending_candle_persist: dict[
+            tuple[int, str, datetime], WebSocketPremiumCandle
+        ] = {}
         self._queued_candle_persist_keys: set[tuple[int, str, datetime]] = set()
         self.event_queue_dropped_count = 0
         self.event_queue_evicted_warm_count = 0
@@ -172,20 +182,38 @@ class KiteWebSocketPriceFeed:
                 self.websocket_status = "AUTH_FAILED"
                 self.reconnect_skipped_reason = "auth_failed"
                 self.last_error = "kite_relogin_required"
-                return {"started": False, "reason": "kite_relogin_required", "relogin_required": True}
+                return {
+                    "started": False,
+                    "reason": "kite_relogin_required",
+                    "relogin_required": True,
+                }
             session = self.market_session()
             if session != "REGULAR_MARKET":
                 self.running = False
                 self.connected = False
-                self.websocket_status = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
+                self.websocket_status = (
+                    "DISABLED_OUTSIDE_MARKET_HOURS"
+                    if session == "WEEKEND"
+                    else "MARKET_CLOSED"
+                )
                 self.reconnect_skipped_reason = "market_closed"
                 self.last_error = None
-                logger.info("Kite WebSocket not started outside market hours: %s", session)
-                return {"started": False, "reason": "market_closed", "market_session": session}
+                logger.info(
+                    "Kite WebSocket not started outside market hours: %s", session
+                )
+                return {
+                    "started": False,
+                    "reason": "market_closed",
+                    "market_session": session,
+                }
             if self.running:
                 self.duplicate_start_prevented_count += 1
                 logger.info("Kite WebSocket duplicate start prevented")
-                return {"started": True, "already_running": True, "duplicate_start_prevented": True}
+                return {
+                    "started": True,
+                    "already_running": True,
+                    "duplicate_start_prevented": True,
+                }
             cooldown_remaining = self._rate_limit_cooldown_remaining()
             if cooldown_remaining > 0:
                 self.connected = False
@@ -207,7 +235,9 @@ class KiteWebSocketPriceFeed:
             if factory is None:
                 self.last_error = "kite_ticker_unavailable"
                 self.websocket_status = "ERROR"
-                logger.warning("Kite WebSocket not started: kiteconnect.KiteTicker unavailable")
+                logger.warning(
+                    "Kite WebSocket not started: kiteconnect.KiteTicker unavailable"
+                )
                 return {"started": False, "reason": self.last_error}
 
             self._ensure_workers()
@@ -224,8 +254,14 @@ class KiteWebSocketPriceFeed:
                 self.connected = False
                 self.last_error = str(exc)
                 self.last_error_reason = str(exc)
-                self.websocket_status = "AUTH_FAILED" if self._is_auth_failure(None, str(exc), exc=exc) else "ERROR"
-                self.reconnect_skipped_reason = "auth_failed" if self.websocket_status == "AUTH_FAILED" else None
+                self.websocket_status = (
+                    "AUTH_FAILED"
+                    if self._is_auth_failure(None, str(exc), exc=exc)
+                    else "ERROR"
+                )
+                self.reconnect_skipped_reason = (
+                    "auth_failed" if self.websocket_status == "AUTH_FAILED" else None
+                )
                 if self.websocket_status == "AUTH_FAILED":
                     self._mark_auth_failed(str(exc))
                 self._stop_workers()
@@ -239,12 +275,20 @@ class KiteWebSocketPriceFeed:
         self.api_key = settings.kite_api_key
         latest_token = access_token or load_access_token() or settings.kite_access_token
         token_changed = bool(latest_token and latest_token != self.access_token)
-        api_key_changed = bool(self.api_key and self.api_key != self._last_auth_failed_api_key)
+        api_key_changed = bool(
+            self.api_key and self.api_key != self._last_auth_failed_api_key
+        )
         if token_changed:
             logger.info("Kite WebSocket access token refreshed")
         self.access_token = latest_token
-        if latest_token and self.websocket_status == "AUTH_FAILED" and (
-            token_changed or api_key_changed or latest_token != self._last_auth_failed_access_token
+        if (
+            latest_token
+            and self.websocket_status == "AUTH_FAILED"
+            and (
+                token_changed
+                or api_key_changed
+                or latest_token != self._last_auth_failed_access_token
+            )
         ):
             kite_auth_state.clear()
             self.websocket_status = "DISCONNECTED"
@@ -262,7 +306,9 @@ class KiteWebSocketPriceFeed:
             ticker = self._ticker
             if ticker is not None:
                 try:
-                    close = getattr(ticker, "close", None) or getattr(ticker, "stop", None)
+                    close = getattr(ticker, "close", None) or getattr(
+                        ticker, "stop", None
+                    )
                     if close:
                         close()
                 except Exception as exc:
@@ -279,12 +325,22 @@ class KiteWebSocketPriceFeed:
         mode: str = "full",
         lease_seconds: int | None = None,
     ) -> dict[str, Any]:
-        clean_tokens = {int(token) for token in tokens if self._safe_int(token) is not None and int(token) > 0}
-        expires_at = self._now() + timedelta(seconds=max(1, lease_seconds)) if lease_seconds else None
+        clean_tokens = {
+            int(token)
+            for token in tokens
+            if self._safe_int(token) is not None and int(token) > 0
+        }
+        expires_at = (
+            self._now() + timedelta(seconds=max(1, lease_seconds))
+            if lease_seconds
+            else None
+        )
         with self._lock:
             for token in clean_tokens:
                 self._subscription_owners.setdefault(token, {})[str(owner)] = expires_at
-                self._subscription_owner_modes.setdefault(token, {})[str(owner)] = self._normalize_mode(mode)
+                self._subscription_owner_modes.setdefault(token, {})[str(owner)] = (
+                    self._normalize_mode(mode)
+                )
             self._desired_tokens.update(clean_tokens)
         self.cleanup_old_persisted_candles()
         self._rehydrate_premium_candles(clean_tokens)
@@ -292,8 +348,14 @@ class KiteWebSocketPriceFeed:
             return {"subscribed": [], "reason": "token_missing"}
         if not self.running and settings.enable_kite_websocket:
             start_result = self.start()
-            if not start_result.get("started") and start_result.get("reason") == "market_closed":
-                logger.info("Kite WebSocket subscription queued outside market hours: %s", sorted(clean_tokens))
+            if (
+                not start_result.get("started")
+                and start_result.get("reason") == "market_closed"
+            ):
+                logger.info(
+                    "Kite WebSocket subscription queued outside market hours: %s",
+                    sorted(clean_tokens),
+                )
                 return {
                     "subscribed": [],
                     "queued": sorted(clean_tokens),
@@ -301,8 +363,15 @@ class KiteWebSocketPriceFeed:
                     "market_session": start_result.get("market_session"),
                 }
         if not self.connected or self._ticker is None:
-            logger.info("Kite WebSocket queued subscription while disconnected: %s", sorted(clean_tokens))
-            return {"subscribed": [], "queued": sorted(clean_tokens), "reason": "websocket_disconnected"}
+            logger.info(
+                "Kite WebSocket queued subscription while disconnected: %s",
+                sorted(clean_tokens),
+            )
+            return {
+                "subscribed": [],
+                "queued": sorted(clean_tokens),
+                "reason": "websocket_disconnected",
+            }
         return self._subscribe_connected(clean_tokens)
 
     def register_token_symbol(self, instrument_token: int, symbol: str) -> None:
@@ -317,7 +386,12 @@ class KiteWebSocketPriceFeed:
             owners = sorted(self._subscription_owners.get(token, {}))
             modes = dict(self._subscription_owner_modes.get(token, {}))
             symbol = self._token_symbols.get(token)
-        return {"instrument_token": token, "symbol": symbol, "owners": owners, "owner_modes": modes}
+        return {
+            "instrument_token": token,
+            "symbol": symbol,
+            "owners": owners,
+            "owner_modes": modes,
+        }
 
     def replace_owner_subscriptions(
         self,
@@ -328,23 +402,39 @@ class KiteWebSocketPriceFeed:
         overlap_seconds: int = 0,
     ) -> dict[str, Any]:
         """Subscribe a new owner band before its old band is retired."""
-        clean_tokens = {int(token) for token in tokens if self._safe_int(token) is not None and int(token) > 0}
+        clean_tokens = {
+            int(token)
+            for token in tokens
+            if self._safe_int(token) is not None and int(token) > 0
+        }
         owner_key = str(owner)
         now = self._now()
         with self._lock:
-            previous = {token for token, owners in self._subscription_owners.items() if owner_key in owners}
+            previous = {
+                token
+                for token, owners in self._subscription_owners.items()
+                if owner_key in owners
+            }
             for token in clean_tokens:
                 self._subscription_owners.setdefault(token, {})[owner_key] = None
-                self._subscription_owner_modes.setdefault(token, {})[owner_key] = self._normalize_mode(mode)
+                self._subscription_owner_modes.setdefault(token, {})[owner_key] = (
+                    self._normalize_mode(mode)
+                )
             for token in previous - clean_tokens:
                 if overlap_seconds > 0:
-                    self._subscription_owners[token][owner_key] = now + timedelta(seconds=overlap_seconds)
+                    self._subscription_owners[token][owner_key] = now + timedelta(
+                        seconds=overlap_seconds
+                    )
                 else:
                     self._subscription_owners[token].pop(owner_key, None)
                     self._subscription_owner_modes.get(token, {}).pop(owner_key, None)
             immediate_stale = self._rebuild_desired_tokens_locked(now)
         subscription = self.subscribe(clean_tokens, owner=owner_key, mode=mode)
-        immediate_cleanup = self.unsubscribe(immediate_stale, preserve_owners=True) if immediate_stale else {"unsubscribed": []}
+        immediate_cleanup = (
+            self.unsubscribe(immediate_stale, preserve_owners=True)
+            if immediate_stale
+            else {"unsubscribed": []}
+        )
         cleanup = self.cleanup_subscription_leases()
         return {
             **subscription,
@@ -352,11 +442,16 @@ class KiteWebSocketPriceFeed:
             "previous": sorted(previous),
             "retiring": sorted(previous - clean_tokens),
             "cleanup": {
-                "unsubscribed": sorted(set(immediate_cleanup.get("unsubscribed", [])) | set(cleanup.get("unsubscribed", [])))
+                "unsubscribed": sorted(
+                    set(immediate_cleanup.get("unsubscribed", []))
+                    | set(cleanup.get("unsubscribed", []))
+                )
             },
         }
 
-    def release_owner(self, owner: str, tokens: list[int] | set[int] | tuple[int, ...] | None = None) -> dict[str, Any]:
+    def release_owner(
+        self, owner: str, tokens: list[int] | set[int] | tuple[int, ...] | None = None
+    ) -> dict[str, Any]:
         owner_key = str(owner)
         selected = {int(token) for token in tokens} if tokens is not None else None
         with self._lock:
@@ -370,7 +465,11 @@ class KiteWebSocketPriceFeed:
     def cleanup_subscription_leases(self) -> dict[str, Any]:
         with self._lock:
             stale = self._rebuild_desired_tokens_locked(self._now())
-        return self.unsubscribe(stale, preserve_owners=True) if stale else {"unsubscribed": []}
+        return (
+            self.unsubscribe(stale, preserve_owners=True)
+            if stale
+            else {"unsubscribed": []}
+        )
 
     def unsubscribe(
         self,
@@ -379,7 +478,11 @@ class KiteWebSocketPriceFeed:
         preserve_owners: bool = False,
         owner: str = "legacy",
     ) -> dict[str, Any]:
-        requested_tokens = {int(token) for token in tokens if self._safe_int(token) is not None and int(token) > 0}
+        requested_tokens = {
+            int(token)
+            for token in tokens
+            if self._safe_int(token) is not None and int(token) > 0
+        }
         with self._lock:
             if not preserve_owners:
                 for token in requested_tokens:
@@ -394,11 +497,17 @@ class KiteWebSocketPriceFeed:
         if self.connected and self._ticker is not None and clean_tokens:
             try:
                 self._ticker.unsubscribe(list(clean_tokens))
-                logger.info("Kite WebSocket unsubscribed tokens: %s", sorted(clean_tokens))
+                logger.info(
+                    "Kite WebSocket unsubscribed tokens: %s", sorted(clean_tokens)
+                )
             except Exception as exc:
                 self.last_error = str(exc)
                 logger.warning("Kite WebSocket unsubscribe failed: %s", exc)
-                return {"unsubscribed": [], "reason": "subscription_failed", "message": str(exc)}
+                return {
+                    "unsubscribed": [],
+                    "reason": "subscription_failed",
+                    "message": str(exc),
+                }
         return {"unsubscribed": sorted(clean_tokens)}
 
     def get_latest_price(self, instrument_token: int) -> float | None:
@@ -409,11 +518,17 @@ class KiteWebSocketPriceFeed:
         with self._lock:
             return self._ticks.get(int(instrument_token))
 
-    def is_fresh(self, instrument_token: int, max_age_seconds: int | None = None) -> bool:
+    def is_fresh(
+        self, instrument_token: int, max_age_seconds: int | None = None
+    ) -> bool:
         tick = self.get_latest_tick(instrument_token)
         if tick is None:
             return False
-        max_age = max_age_seconds if max_age_seconds is not None else settings.websocket_price_stale_seconds
+        max_age = (
+            max_age_seconds
+            if max_age_seconds is not None
+            else settings.websocket_price_stale_seconds
+        )
         return self._age_seconds(tick.timestamp) <= max_age
 
     def entry_health(self) -> dict[str, Any]:
@@ -423,23 +538,42 @@ class KiteWebSocketPriceFeed:
                 "connected": bool(self.connected),
                 "entry_blocking_gap": self._active_gap_started_at is not None,
                 "websocket_status": self.websocket_status,
-                "last_tick_at": self.last_tick_at.isoformat(sep=" ") if self.last_tick_at else None,
+                "last_tick_at": self.last_tick_at.isoformat(sep=" ")
+                if self.last_tick_at
+                else None,
             }
 
-    def status(self, *, active_trade_tokens: set[int] | None = None, fallback_active: bool = False) -> dict[str, Any]:
+    def status(
+        self,
+        *,
+        active_trade_tokens: set[int] | None = None,
+        fallback_active: bool = False,
+    ) -> dict[str, Any]:
         now = self._now()
         session = self.market_session(now)
         status_label = self.websocket_status
         if not settings.enable_kite_websocket:
             status_label = "DISABLED"
         elif session != "REGULAR_MARKET" and not self.connected:
-            status_label = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
+            status_label = (
+                "DISABLED_OUTSIDE_MARKET_HOURS"
+                if session == "WEEKEND"
+                else "MARKET_CLOSED"
+            )
         with self._lock:
             latest_tick_age = {
-                str(token): round(max(0.0, (now - tick.timestamp.replace(tzinfo=None)).total_seconds()), 3)
+                str(token): round(
+                    max(
+                        0.0, (now - tick.timestamp.replace(tzinfo=None)).total_seconds()
+                    ),
+                    3,
+                )
                 for token, tick in self._ticks.items()
             }
-            candle_counts = {str(token): len(self._current_session_candles_locked(token)) for token in set(self._premium_candles) | set(self._ticks)}
+            candle_counts = {
+                str(token): len(self._current_session_candles_locked(token))
+                for token in set(self._premium_candles) | set(self._ticks)
+            }
             return {
                 "websocket_enabled": settings.enable_kite_websocket,
                 "websocket_status": status_label,
@@ -457,28 +591,40 @@ class KiteWebSocketPriceFeed:
                 },
                 "latest_tick_age": latest_tick_age,
                 "last_tick_timestamp": {
-                    str(token): tick.timestamp.isoformat(sep=" ") for token, tick in self._ticks.items()
+                    str(token): tick.timestamp.isoformat(sep=" ")
+                    for token, tick in self._ticks.items()
                 },
                 "tick_timestamp_source": {
-                    str(token): tick.timestamp_source for token, tick in self._ticks.items()
+                    str(token): tick.timestamp_source
+                    for token, tick in self._ticks.items()
                 },
                 "tick_packet_type": {
                     str(token): tick.packet_type for token, tick in self._ticks.items()
                 },
-                "tick_mode_per_token": {str(token): mode for token, mode in self._tick_modes.items()},
+                "tick_mode_per_token": {
+                    str(token): mode for token, mode in self._tick_modes.items()
+                },
                 "active_trade_tokens": sorted(active_trade_tokens or set()),
                 "fallback_active": fallback_active,
                 "reconnect_count": self.reconnect_count,
                 "disconnect_count": self.disconnect_count,
                 "connected_duration_seconds": self._connected_duration_seconds(),
-                "max_tick_age": max(latest_tick_age.values()) if latest_tick_age else None,
+                "max_tick_age": max(latest_tick_age.values())
+                if latest_tick_age
+                else None,
                 "subscription_failure_count": self.subscription_failure_count,
                 "ignored_tick_count": self.ignored_tick_count,
-                "ticks_seen_by_token": {str(token): count for token, count in self._ticks_seen.items()},
+                "ticks_seen_by_token": {
+                    str(token): count for token, count in self._ticks_seen.items()
+                },
                 "premium_candle_count_by_token": candle_counts,
                 "premium_candle_builder": {
                     str(token): self._premium_candle_status_locked(token, now)
-                    for token in sorted(set(self._premium_candles) | set(self._ticks) | set(active_trade_tokens or set()))
+                    for token in sorted(
+                        set(self._premium_candles)
+                        | set(self._ticks)
+                        | set(active_trade_tokens or set())
+                    )
                 },
                 "candle_persistence": {
                     "enabled": settings.enable_websocket_candle_persistence,
@@ -492,16 +638,24 @@ class KiteWebSocketPriceFeed:
                     "daily_cleanup_enabled": settings.enable_websocket_candle_daily_cleanup,
                     "pending_coalesced_writes": len(self._pending_candle_persist),
                     "queued_coalesced_keys": len(self._queued_candle_persist_keys),
-                    "last_cleanup_date": self._last_candle_cleanup_date.isoformat() if self._last_candle_cleanup_date else None,
-                    "last_cleanup_at": self._last_candle_cleanup_at.isoformat(sep=" ") if self._last_candle_cleanup_at else None,
+                    "last_cleanup_date": self._last_candle_cleanup_date.isoformat()
+                    if self._last_candle_cleanup_date
+                    else None,
+                    "last_cleanup_at": self._last_candle_cleanup_at.isoformat(sep=" ")
+                    if self._last_candle_cleanup_at
+                    else None,
                     "last_cleanup_deleted": self._last_candle_cleanup_deleted,
                     "total_cleanup_deleted": self._total_candle_cleanup_deleted,
                 },
                 "data_gap": self._gap_status_locked(now),
                 "order_update_count": self.order_update_count,
                 "text_message_count": self.text_message_count,
-                "last_disconnect_at": self.last_disconnect_at.isoformat(sep=" ") if self.last_disconnect_at else None,
-                "last_reconnect_at": self.last_reconnect_at.isoformat(sep=" ") if self.last_reconnect_at else None,
+                "last_disconnect_at": self.last_disconnect_at.isoformat(sep=" ")
+                if self.last_disconnect_at
+                else None,
+                "last_reconnect_at": self.last_reconnect_at.isoformat(sep=" ")
+                if self.last_reconnect_at
+                else None,
                 "last_order_update": self.last_order_update,
                 "last_error": self.last_error,
                 "last_error_code": self.last_error_code,
@@ -517,7 +671,11 @@ class KiteWebSocketPriceFeed:
                 "reconnect_request_count": self.reconnect_request_count,
                 "reconnect_skipped_reason": self.reconnect_skipped_reason,
                 "reconnect_owner": "kite_sdk",
-                "rate_limit_blocked_until": self._rate_limit_blocked_until.isoformat(sep=" ") if self._rate_limit_blocked_until else None,
+                "rate_limit_blocked_until": self._rate_limit_blocked_until.isoformat(
+                    sep=" "
+                )
+                if self._rate_limit_blocked_until
+                else None,
                 "rate_limit_cooldown_remaining_seconds": self._rate_limit_cooldown_remaining(),
                 "duplicate_start_prevented_count": self.duplicate_start_prevented_count,
                 "event_queue_size": self._event_queue.qsize(),
@@ -547,7 +705,11 @@ class KiteWebSocketPriceFeed:
     def _on_connect(self, ws: Any, response: Any) -> None:
         self.connected = True
         self.connected_at = self._now()
-        self.last_reconnect_at = self.connected_at if self._active_gap_started_at is not None else self.last_reconnect_at
+        self.last_reconnect_at = (
+            self.connected_at
+            if self._active_gap_started_at is not None
+            else self.last_reconnect_at
+        )
         self.last_error = None
         self.last_error_code = None
         self.last_error_reason = None
@@ -577,7 +739,9 @@ class KiteWebSocketPriceFeed:
                         gap_events.append(gap_event)
                     self._ticks[tick.instrument_token] = tick
                     self._verified_live_tokens.add(tick.instrument_token)
-                    self._ticks_seen[tick.instrument_token] = self._ticks_seen.get(tick.instrument_token, 0) + 1
+                    self._ticks_seen[tick.instrument_token] = (
+                        self._ticks_seen.get(tick.instrument_token, 0) + 1
+                    )
                     self._update_premium_candle(tick)
                     self.last_tick_at = self._now()
                     parsed_ticks.append(tick)
@@ -624,11 +788,19 @@ class KiteWebSocketPriceFeed:
         self.last_disconnect_reason = reason or f"closed:{code}"
         session = self.market_session()
         if session != "REGULAR_MARKET":
-            self.websocket_status = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
+            self.websocket_status = (
+                "DISABLED_OUTSIDE_MARKET_HOURS"
+                if session == "WEEKEND"
+                else "MARKET_CLOSED"
+            )
             self.reconnect_skipped_reason = "market_closed"
             self.last_error = None
             self._stop_sdk_reconnect(ws)
-            logger.info("Kite WebSocket closed outside market hours; reconnect skipped: code=%s reason=%s", code, reason)
+            logger.info(
+                "Kite WebSocket closed outside market hours; reconnect skipped: code=%s reason=%s",
+                code,
+                reason,
+            )
             return
         if self._is_auth_failure(code, reason):
             self.running = False
@@ -638,7 +810,11 @@ class KiteWebSocketPriceFeed:
             self._mark_auth_failed(self.last_error)
             self._stop_sdk_reconnect(ws)
             self._signal_workers_to_stop()
-            logger.error("Kite WebSocket authentication failed; Kite re-login required: code=%s reason=%s", code, reason)
+            logger.error(
+                "Kite WebSocket authentication failed; Kite re-login required: code=%s reason=%s",
+                code,
+                reason,
+            )
             return
         if self._is_rate_limited(code, reason):
             self.running = False
@@ -648,7 +824,11 @@ class KiteWebSocketPriceFeed:
             self._activate_rate_limit_cooldown()
             self._stop_sdk_reconnect(ws)
             self._signal_workers_to_stop()
-            logger.error("Kite WebSocket reconnect skipped due to broker rate limit: code=%s reason=%s", code, reason)
+            logger.error(
+                "Kite WebSocket reconnect skipped due to broker rate limit: code=%s reason=%s",
+                code,
+                reason,
+            )
             return
         self.websocket_status = "DISCONNECTED"
         self.last_error = reason or f"closed:{code}"
@@ -662,11 +842,20 @@ class KiteWebSocketPriceFeed:
         session = self.market_session()
         if session != "REGULAR_MARKET":
             self.connected = False
-            self.websocket_status = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
+            self.websocket_status = (
+                "DISABLED_OUTSIDE_MARKET_HOURS"
+                if session == "WEEKEND"
+                else "MARKET_CLOSED"
+            )
             self.reconnect_skipped_reason = "market_closed"
             self.last_error = None
             self._stop_sdk_reconnect(ws)
-            logger.info("Kite WebSocket error ignored outside market hours: code=%s reason=%s session=%s", code, reason, session)
+            logger.info(
+                "Kite WebSocket error ignored outside market hours: code=%s reason=%s session=%s",
+                code,
+                reason,
+                session,
+            )
             return
         self.last_error = reason or f"error:{code}"
         self.connected = False
@@ -677,7 +866,11 @@ class KiteWebSocketPriceFeed:
             self._mark_auth_failed(self.last_error)
             self._stop_sdk_reconnect(ws)
             self._signal_workers_to_stop()
-            logger.error("Kite WebSocket authentication failed; Kite re-login required: code=%s reason=%s", code, reason)
+            logger.error(
+                "Kite WebSocket authentication failed; Kite re-login required: code=%s reason=%s",
+                code,
+                reason,
+            )
             return
         if self._is_rate_limited(code, reason):
             self.running = False
@@ -686,7 +879,11 @@ class KiteWebSocketPriceFeed:
             self._activate_rate_limit_cooldown()
             self._stop_sdk_reconnect(ws)
             self._signal_workers_to_stop()
-            logger.error("Kite WebSocket reconnect skipped due to broker rate limit: code=%s reason=%s", code, reason)
+            logger.error(
+                "Kite WebSocket reconnect skipped due to broker rate limit: code=%s reason=%s",
+                code,
+                reason,
+            )
             return
         self.websocket_status = "ERROR"
         self._start_global_gap("websocket_error")
@@ -711,8 +908,12 @@ class KiteWebSocketPriceFeed:
                 str(self.api_key),
                 str(self.access_token),
                 reconnect=bool(settings.websocket_reconnect_enabled),
-                reconnect_max_tries=max(1, int(settings.websocket_reconnect_max_attempts_per_window)),
-                reconnect_max_delay=max(5, int(settings.websocket_reconnect_max_delay_seconds)),
+                reconnect_max_tries=max(
+                    1, int(settings.websocket_reconnect_max_attempts_per_window)
+                ),
+                reconnect_max_delay=max(
+                    5, int(settings.websocket_reconnect_max_delay_seconds)
+                ),
             )
         except TypeError:
             # Small test/local adapters may expose only the two credential args.
@@ -733,7 +934,10 @@ class KiteWebSocketPriceFeed:
 
     def _activate_rate_limit_cooldown(self) -> None:
         now = self._now()
-        if self._rate_limit_blocked_until is None or now >= self._rate_limit_blocked_until:
+        if (
+            self._rate_limit_blocked_until is None
+            or now >= self._rate_limit_blocked_until
+        ):
             self._rate_limit_blocked_until = now + timedelta(
                 seconds=max(30, int(settings.websocket_rate_limit_cooldown_seconds))
             )
@@ -751,11 +955,17 @@ class KiteWebSocketPriceFeed:
         session = self.market_session()
         if session != "REGULAR_MARKET":
             self.connected = False
-            self.websocket_status = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
+            self.websocket_status = (
+                "DISABLED_OUTSIDE_MARKET_HOURS"
+                if session == "WEEKEND"
+                else "MARKET_CLOSED"
+            )
             self.reconnect_skipped_reason = "market_closed"
             self.last_error = None
             self._stop_sdk_reconnect(ws)
-            logger.info("Kite WebSocket reconnect skipped outside market hours: %s", session)
+            logger.info(
+                "Kite WebSocket reconnect skipped outside market hours: %s", session
+            )
             return
         self.reconnect_count += 1
         self.last_reconnect_at = self._now()
@@ -772,10 +982,17 @@ class KiteWebSocketPriceFeed:
         self.connected = False
         session = self.market_session()
         if session != "REGULAR_MARKET":
-            self.websocket_status = "DISABLED_OUTSIDE_MARKET_HOURS" if session == "WEEKEND" else "MARKET_CLOSED"
+            self.websocket_status = (
+                "DISABLED_OUTSIDE_MARKET_HOURS"
+                if session == "WEEKEND"
+                else "MARKET_CLOSED"
+            )
             self.reconnect_skipped_reason = "market_closed"
             self.last_error = None
-            logger.info("Kite WebSocket reconnect exhausted callback ignored outside market hours: %s", session)
+            logger.info(
+                "Kite WebSocket reconnect exhausted callback ignored outside market hours: %s",
+                session,
+            )
             return
         self.last_error = "websocket_reconnect_exhausted"
         self.running = False
@@ -787,7 +1004,10 @@ class KiteWebSocketPriceFeed:
     def _on_order_update(self, ws: Any, data: dict[str, Any]) -> None:
         self.order_update_count += 1
         self.last_order_update = dict(data or {})
-        logger.info("Kite WebSocket order update received: %s", self.last_order_update.get("order_id"))
+        logger.info(
+            "Kite WebSocket order update received: %s",
+            self.last_order_update.get("order_id"),
+        )
         self._dispatch_order_update(self.last_order_update)
 
     def _on_message(self, ws: Any, payload: Any, is_binary: bool | None = None) -> None:
@@ -796,7 +1016,10 @@ class KiteWebSocketPriceFeed:
             parsed = self._parse_text_message(payload)
             if parsed:
                 self.last_order_update = parsed
-                logger.info("Kite WebSocket text order message received: %s", parsed.get("order_id"))
+                logger.info(
+                    "Kite WebSocket text order message received: %s",
+                    parsed.get("order_id"),
+                )
                 self._dispatch_order_update(parsed)
             else:
                 logger.info("Kite WebSocket text message ignored")
@@ -827,12 +1050,17 @@ class KiteWebSocketPriceFeed:
                 self._event_stop.clear()
                 return
             self._event_stop.clear()
-            self._event_worker = Thread(target=self._event_loop, name="kite-websocket-event-worker", daemon=True)
+            self._event_worker = Thread(
+                target=self._event_loop, name="kite-websocket-event-worker", daemon=True
+            )
             self._event_worker.start()
 
     def _ensure_candle_persist_worker(self) -> None:
         with self._start_stop_lock:
-            if self._candle_persist_worker is not None and self._candle_persist_worker.is_alive():
+            if (
+                self._candle_persist_worker is not None
+                and self._candle_persist_worker.is_alive()
+            ):
                 self._candle_persist_stop.clear()
                 return
             self._candle_persist_stop.clear()
@@ -867,7 +1095,10 @@ class KiteWebSocketPriceFeed:
                 self._event_queue.task_done()
 
     def _candle_persist_loop(self) -> None:
-        while not self._candle_persist_stop.is_set() or not self._candle_persist_queue.empty():
+        while (
+            not self._candle_persist_stop.is_set()
+            or not self._candle_persist_queue.empty()
+        ):
             try:
                 key = self._candle_persist_queue.get(timeout=0.2)
             except queue.Empty:
@@ -905,34 +1136,59 @@ class KiteWebSocketPriceFeed:
             if critical:
                 self.event_queue_critical_drop_count += 1
                 self.critical_status = "risk_sensitive_websocket_event_dropped"
-                logger.critical("Kite WebSocket risk-sensitive event queue drop event=%s priority=%s", event_type, priority)
+                logger.critical(
+                    "Kite WebSocket risk-sensitive event queue drop event=%s priority=%s",
+                    event_type,
+                    priority,
+                )
             else:
-                logger.warning("Kite WebSocket event queue full; dropped warm event=%s", event_type)
+                logger.warning(
+                    "Kite WebSocket event queue full; dropped warm event=%s", event_type
+                )
             if self.latency_metrics is not None:
                 try:
                     self.latency_metrics.record_queue_drop(
                         critical=critical,
-                        detail={"event_type": event_type, "priority": priority, "queue_capacity": self._event_queue.maxsize},
+                        detail={
+                            "event_type": event_type,
+                            "priority": priority,
+                            "queue_capacity": self._event_queue.maxsize,
+                        },
                     )
                 except Exception:
                     logger.exception("latency queue-drop recording failed")
 
     def _evict_warm_event(self) -> bool:
         with self._event_queue.mutex:
-            warm_indexes = [index for index, queued in enumerate(self._event_queue.queue) if int(queued[0]) >= 4]
+            warm_indexes = [
+                index
+                for index, queued in enumerate(self._event_queue.queue)
+                if int(queued[0]) >= 4
+            ]
             if not warm_indexes:
                 return False
-            index = max(warm_indexes, key=lambda item_index: (self._event_queue.queue[item_index][0], self._event_queue.queue[item_index][1]))
+            index = max(
+                warm_indexes,
+                key=lambda item_index: (
+                    self._event_queue.queue[item_index][0],
+                    self._event_queue.queue[item_index][1],
+                ),
+            )
             del self._event_queue.queue[index]
             heapq.heapify(self._event_queue.queue)
-            self._event_queue.unfinished_tasks = max(0, self._event_queue.unfinished_tasks - 1)
+            self._event_queue.unfinished_tasks = max(
+                0, self._event_queue.unfinished_tasks - 1
+            )
             self._event_queue.not_full.notify()
         self.event_queue_dropped_count += 1
         self.event_queue_evicted_warm_count += 1
         if self.latency_metrics is not None:
             self.latency_metrics.record_queue_drop(
                 critical=False,
-                detail={"event_type": "warm_tick_evicted", "queue_capacity": self._event_queue.maxsize},
+                detail={
+                    "event_type": "warm_tick_evicted",
+                    "queue_capacity": self._event_queue.maxsize,
+                },
             )
         return True
 
@@ -943,7 +1199,10 @@ class KiteWebSocketPriceFeed:
             return 1
         if event_type == "tick" and isinstance(payload, WebSocketTick):
             owners = self._subscription_owners.get(int(payload.instrument_token), {})
-            if any(owner.startswith("armed:") or owner.startswith("active_trade") for owner in owners):
+            if any(
+                owner.startswith("armed:") or owner.startswith("active_trade")
+                for owner in owners
+            ):
                 return 2
             return 4
         return 5
@@ -985,7 +1244,9 @@ class KiteWebSocketPriceFeed:
         if self.raw_tick_handler is None:
             return
         try:
-            self.raw_tick_handler(tick, self.subscription_context(tick.instrument_token))
+            self.raw_tick_handler(
+                tick, self.subscription_context(tick.instrument_token)
+            )
         except Exception:
             logger.exception("raw tick capture handler failed")
 
@@ -995,26 +1256,39 @@ class KiteWebSocketPriceFeed:
         if tick.receive_timestamp is None:
             self.latency_metrics.record_missing(
                 "exchange_tick_to_application_receive",
-                detail={"instrument_token": tick.instrument_token, "reason": "receive_timestamp_missing"},
+                detail={
+                    "instrument_token": tick.instrument_token,
+                    "reason": "receive_timestamp_missing",
+                },
             )
             return
         if tick.timestamp_source not in {"exchange_timestamp", "last_trade_time"}:
             self.latency_metrics.record_missing(
                 "exchange_tick_to_application_receive",
-                detail={"instrument_token": tick.instrument_token, "reason": "exchange_timestamp_unavailable", "timestamp_source": tick.timestamp_source},
+                detail={
+                    "instrument_token": tick.instrument_token,
+                    "reason": "exchange_timestamp_unavailable",
+                    "timestamp_source": tick.timestamp_source,
+                },
             )
             return
         self.latency_metrics.record_between(
             "exchange_timestamp_to_local_receipt",
             tick.timestamp,
             tick.receive_timestamp,
-            detail={"instrument_token": tick.instrument_token, "timestamp_source": tick.timestamp_source},
+            detail={
+                "instrument_token": tick.instrument_token,
+                "timestamp_source": tick.timestamp_source,
+            },
         )
         self.latency_metrics.record_between(
             "exchange_tick_to_application_receive",
             tick.timestamp,
             tick.receive_timestamp,
-            detail={"instrument_token": tick.instrument_token, "timestamp_source": tick.timestamp_source},
+            detail={
+                "instrument_token": tick.instrument_token,
+                "timestamp_source": tick.timestamp_source,
+            },
         )
 
     def _run_gap_handler(self, event: dict[str, Any]) -> None:
@@ -1046,14 +1320,17 @@ class KiteWebSocketPriceFeed:
             for recorded in reversed(self._gap_events):
                 if (
                     recorded.get("type") == event.get("type")
-                    and recorded.get("instrument_token") == event.get("instrument_token")
+                    and recorded.get("instrument_token")
+                    == event.get("instrument_token")
                     and recorded.get("gap_start") == event.get("gap_start")
                     and recorded.get("gap_end") == event.get("gap_end")
                 ):
                     recorded["backfill_status"] = status
                     break
 
-    def _is_auth_failure(self, code: int | None, reason: str | None, *, exc: BaseException | None = None) -> bool:
+    def _is_auth_failure(
+        self, code: int | None, reason: str | None, *, exc: BaseException | None = None
+    ) -> bool:
         if exc is not None and is_kite_token_exception(exc):
             return True
         if code in {401, 403}:
@@ -1080,7 +1357,10 @@ class KiteWebSocketPriceFeed:
         kite_auth_state.mark_auth_failed(message)
 
     def _auth_recovery_hint(self) -> str | None:
-        if self.websocket_status != "AUTH_FAILED" and not kite_auth_state.relogin_required:
+        if (
+            self.websocket_status != "AUTH_FAILED"
+            and not kite_auth_state.relogin_required
+        ):
             return None
         if not self.api_key or not self.access_token:
             return "Configure KITE_API_KEY and complete Kite login to create today's KITE_ACCESS_TOKEN."
@@ -1111,7 +1391,9 @@ class KiteWebSocketPriceFeed:
                 return None
         if not isinstance(payload, dict):
             return None
-        order_payload = payload.get("order") if isinstance(payload.get("order"), dict) else payload
+        order_payload = (
+            payload.get("order") if isinstance(payload.get("order"), dict) else payload
+        )
         if not isinstance(order_payload, dict):
             return None
         if order_payload.get("order_id") or order_payload.get("order_id_value"):
@@ -1128,7 +1410,9 @@ class KiteWebSocketPriceFeed:
                 groups: dict[str, list[int]] = {}
                 with self._lock:
                     for token in tokens:
-                        groups.setdefault(self._effective_mode_locked(token), []).append(token)
+                        groups.setdefault(
+                            self._effective_mode_locked(token), []
+                        ).append(token)
                 for mode, mode_tokens in groups.items():
                     sdk_mode = getattr(self._ticker, f"MODE_{mode.upper()}", mode)
                     set_mode(sdk_mode, mode_tokens)
@@ -1147,7 +1431,11 @@ class KiteWebSocketPriceFeed:
                 for token in tokens:
                     self._subscription_errors[token] = str(exc)
             logger.warning("Kite WebSocket subscribe failed: %s", exc)
-            return {"subscribed": [], "reason": "subscription_failed", "message": str(exc)}
+            return {
+                "subscribed": [],
+                "reason": "subscription_failed",
+                "message": str(exc),
+            }
 
     def _normalize_mode(self, mode: str) -> str:
         normalized = str(mode or "quote").lower()
@@ -1156,7 +1444,11 @@ class KiteWebSocketPriceFeed:
     def _effective_mode_locked(self, token: int) -> str:
         priority = {"ltp": 0, "quote": 1, "full": 2}
         modes = self._subscription_owner_modes.get(int(token), {}).values()
-        return max((self._normalize_mode(mode) for mode in modes), key=lambda mode: priority[mode], default="full")
+        return max(
+            (self._normalize_mode(mode) for mode in modes),
+            key=lambda mode: priority[mode],
+            default="full",
+        )
 
     def _rebuild_desired_tokens_locked(self, now: datetime) -> set[int]:
         previous = set(self._desired_tokens)
@@ -1174,7 +1466,9 @@ class KiteWebSocketPriceFeed:
 
     def _parse_tick(self, payload: dict[str, Any]) -> WebSocketTick | None:
         token = self._safe_int(payload.get("instrument_token"))
-        price = self._safe_float(payload.get("last_price") or payload.get("last_traded_price"))
+        price = self._safe_float(
+            payload.get("last_price") or payload.get("last_traded_price")
+        )
         if token is None or price is None or price <= 0:
             return None
         depth = payload.get("depth") if isinstance(payload.get("depth"), dict) else {}
@@ -1182,32 +1476,52 @@ class KiteWebSocketPriceFeed:
         sell_depth = depth.get("sell", []) if isinstance(depth, dict) else []
         bid = self._safe_float(buy_depth[0].get("price")) if buy_depth else None
         ask = self._safe_float(sell_depth[0].get("price")) if sell_depth else None
-        timestamp_value = payload.get("exchange_timestamp") or payload.get("last_trade_time")
+        timestamp_value = payload.get("exchange_timestamp") or payload.get(
+            "last_trade_time"
+        )
         timestamp = self._safe_datetime(timestamp_value)
-        timestamp_source = "exchange_timestamp" if timestamp is not None and payload.get("exchange_timestamp") else "last_trade_time" if timestamp is not None else "local_receive_time"
-        packet_type = "option_full" if bid is not None or ask is not None else "index_or_ltp"
+        timestamp_source = (
+            "exchange_timestamp"
+            if timestamp is not None and payload.get("exchange_timestamp")
+            else "last_trade_time"
+            if timestamp is not None
+            else "local_receive_time"
+        )
+        packet_type = (
+            "option_full" if bid is not None or ask is not None else "index_or_ltp"
+        )
         return WebSocketTick(
             instrument_token=token,
             price=price,
             timestamp=(timestamp or self._now()).replace(tzinfo=None),
-            volume=self._safe_float(payload.get("volume") or payload.get("volume_traded")),
+            volume=self._safe_float(
+                payload.get("volume") or payload.get("volume_traded")
+            ),
             bid=bid,
             ask=ask,
-            buy_depth=tuple(dict(level) for level in buy_depth if isinstance(level, dict)),
-            sell_depth=tuple(dict(level) for level in sell_depth if isinstance(level, dict)),
+            buy_depth=tuple(
+                dict(level) for level in buy_depth if isinstance(level, dict)
+            ),
+            sell_depth=tuple(
+                dict(level) for level in sell_depth if isinstance(level, dict)
+            ),
             receive_timestamp=self._now(),
             timestamp_source=timestamp_source,
             packet_type=packet_type,
             raw=dict(payload),
         )
 
-    def get_recent_premium_candles(self, instrument_token: int, limit: int = 10) -> list[WebSocketPremiumCandle]:
+    def get_recent_premium_candles(
+        self, instrument_token: int, limit: int = 10
+    ) -> list[WebSocketPremiumCandle]:
         with self._lock:
             rows = list(self._premium_candles.get(int(instrument_token), {}).values())
         rows = sorted(rows, key=lambda candle: candle.timestamp)
         return rows[-limit:]
 
-    def get_current_session_premium_candles(self, instrument_token: int, limit: int | None = None) -> list[WebSocketPremiumCandle]:
+    def get_current_session_premium_candles(
+        self, instrument_token: int, limit: int | None = None
+    ) -> list[WebSocketPremiumCandle]:
         with self._lock:
             rows = self._current_session_candles_locked(int(instrument_token))
         rows = sorted(rows, key=lambda candle: candle.timestamp)
@@ -1215,7 +1529,10 @@ class KiteWebSocketPriceFeed:
 
     def is_subscribed(self, instrument_token: int) -> bool:
         with self._lock:
-            return int(instrument_token) in self._subscribed_tokens or int(instrument_token) in self._desired_tokens
+            return (
+                int(instrument_token) in self._subscribed_tokens
+                or int(instrument_token) in self._desired_tokens
+            )
 
     def is_live_verified(self, instrument_token: int) -> bool:
         token = int(instrument_token)
@@ -1229,7 +1546,9 @@ class KiteWebSocketPriceFeed:
 
     def premium_candle_status(self, instrument_token: int) -> dict[str, Any]:
         with self._lock:
-            return self._premium_candle_status_locked(int(instrument_token), ist_now_naive())
+            return self._premium_candle_status_locked(
+                int(instrument_token), ist_now_naive()
+            )
 
     def recover_premium_candle_context(
         self,
@@ -1249,18 +1568,35 @@ class KiteWebSocketPriceFeed:
         if token is None or token <= 0:
             return {"status": "skipped", "reason": "instrument_token_unavailable"}
         if not settings.enable_websocket_candle_context_recovery:
-            return {"status": "skipped", "reason": "websocket_candle_context_recovery_disabled"}
+            return {
+                "status": "skipped",
+                "reason": "websocket_candle_context_recovery_disabled",
+            }
         if not settings.enable_websocket_premium_candle_builder:
-            return {"status": "skipped", "reason": "websocket_premium_candle_builder_disabled"}
+            return {
+                "status": "skipped",
+                "reason": "websocket_premium_candle_builder_disabled",
+            }
         selected_timeframe = timeframe or settings.websocket_premium_candle_timeframe
         normalized_symbol = str(tradingsymbol or "").upper().strip() or None
         recovery_key = (int(token), normalized_symbol)
         with self._lock:
             if not force and recovery_key in self._context_recovered_tokens:
-                return {"status": "skipped", "reason": "already_recovered", "instrument_token": int(token), "tradingsymbol": normalized_symbol}
+                return {
+                    "status": "skipped",
+                    "reason": "already_recovered",
+                    "instrument_token": int(token),
+                    "tradingsymbol": normalized_symbol,
+                }
         now = self._now().replace(second=0, microsecond=0)
         today_start = datetime.combine(now.date(), time.min)
-        lookback = max(5, int(lookback_minutes or settings.websocket_candle_context_recovery_lookback_minutes))
+        lookback = max(
+            5,
+            int(
+                lookback_minutes
+                or settings.websocket_candle_context_recovery_lookback_minutes
+            ),
+        )
         since = max(today_start, now - timedelta(minutes=lookback))
         symbols = [self._storage_symbol(int(token))]
         if normalized_symbol:
@@ -1282,13 +1618,19 @@ class KiteWebSocketPriceFeed:
             with self._lock:
                 bucket = self._premium_candles.setdefault(int(token), {})
                 for row in rows:
-                    timestamp = row.timestamp.replace(second=0, microsecond=0, tzinfo=None)
+                    timestamp = row.timestamp.replace(
+                        second=0, microsecond=0, tzinfo=None
+                    )
                     existing = bucket.get(timestamp)
                     row_symbol = str(row.symbol or "").upper()
                     is_ws_token = row_symbol == self._storage_symbol(int(token))
                     if existing is not None and not is_ws_token:
                         continue
-                    source = "websocket_builder_rehydrated" if is_ws_token else "kite_historical_context_recovered"
+                    source = (
+                        "websocket_builder_rehydrated"
+                        if is_ws_token
+                        else "kite_historical_context_recovered"
+                    )
                     if existing is None:
                         inserted += 1
                     bucket[timestamp] = WebSocketPremiumCandle(
@@ -1317,8 +1659,17 @@ class KiteWebSocketPriceFeed:
                     "force": force,
                 }
         except Exception as exc:
-            logger.warning("WebSocket candle context recovery failed token=%s symbol=%s error=%s", token, normalized_symbol, exc)
-            return {"status": "error", "reason": "context_recovery_failed", "message": str(exc)}
+            logger.warning(
+                "WebSocket candle context recovery failed token=%s symbol=%s error=%s",
+                token,
+                normalized_symbol,
+                exc,
+            )
+            return {
+                "status": "error",
+                "reason": "context_recovery_failed",
+                "message": str(exc),
+            }
         finally:
             session.close()
         return {
@@ -1330,7 +1681,9 @@ class KiteWebSocketPriceFeed:
             "to": now.isoformat(sep=" "),
             "candidate_candles": candidate_count,
             "inserted_candles": inserted,
-            "current_session_candle_count": len(self.get_current_session_premium_candles(int(token))),
+            "current_session_candle_count": len(
+                self.get_current_session_premium_candles(int(token))
+            ),
             "tick_replay": False,
         }
 
@@ -1341,7 +1694,9 @@ class KiteWebSocketPriceFeed:
         token = int(tick.instrument_token)
         bucket = self._premium_candles.setdefault(token, {})
         self._fill_premium_candle_gaps_locked(token=token, minute=minute)
-        volume_increment = self._volume_increment_locked(token=token, cumulative_volume=tick.volume)
+        volume_increment = self._volume_increment_locked(
+            token=token, cumulative_volume=tick.volume
+        )
         candle = bucket.get(minute)
         if candle is None:
             candle = WebSocketPremiumCandle(
@@ -1365,7 +1720,9 @@ class KiteWebSocketPriceFeed:
         self._queue_premium_candle_persist(self._copy_premium_candle(candle))
         self._trim_premium_candles(token)
 
-    def _volume_increment_locked(self, *, token: int, cumulative_volume: float | None) -> float:
+    def _volume_increment_locked(
+        self, *, token: int, cumulative_volume: float | None
+    ) -> float:
         current = max(0.0, float(cumulative_volume or 0.0))
         previous = self._last_cumulative_volume.get(int(token))
         self._last_cumulative_volume[int(token)] = current
@@ -1397,7 +1754,9 @@ class KiteWebSocketPriceFeed:
             )
             cursor += timedelta(minutes=1)
 
-    def _copy_premium_candle(self, candle: WebSocketPremiumCandle) -> WebSocketPremiumCandle:
+    def _copy_premium_candle(
+        self, candle: WebSocketPremiumCandle
+    ) -> WebSocketPremiumCandle:
         return WebSocketPremiumCandle(
             instrument_token=int(candle.instrument_token),
             timeframe=str(candle.timeframe),
@@ -1433,12 +1792,17 @@ class KiteWebSocketPriceFeed:
             with self._lock:
                 self._queued_candle_persist_keys.discard(key)
             self.candle_persist_queue_dropped_count += 1
-            logger.warning("Kite WebSocket candle persistence queue full; dropped token=%s", candle.instrument_token)
+            logger.warning(
+                "Kite WebSocket candle persistence queue full; dropped token=%s",
+                candle.instrument_token,
+            )
 
     def _storage_symbol(self, token: int) -> str:
         return f"{settings.websocket_candle_storage_prefix}:{int(token)}".upper()
 
-    def _candle_persist_key(self, candle: WebSocketPremiumCandle) -> tuple[int, str, datetime]:
+    def _candle_persist_key(
+        self, candle: WebSocketPremiumCandle
+    ) -> tuple[int, str, datetime]:
         return (
             int(candle.instrument_token),
             str(candle.timeframe),
@@ -1479,7 +1843,11 @@ class KiteWebSocketPriceFeed:
             session.commit()
             self._persisted_candle_writes += 1
         except Exception as exc:
-            logger.warning("WebSocket premium candle persistence failed token=%s error=%s", candle.instrument_token, exc)
+            logger.warning(
+                "WebSocket premium candle persistence failed token=%s error=%s",
+                candle.instrument_token,
+                exc,
+            )
         finally:
             session.close()
 
@@ -1487,12 +1855,24 @@ class KiteWebSocketPriceFeed:
         now = self._now()
         cleanup_day = now.date()
         if not settings.enable_websocket_candle_persistence:
-            return {"cleanup_enabled": False, "deleted": 0, "reason": "websocket_candle_persistence_disabled"}
+            return {
+                "cleanup_enabled": False,
+                "deleted": 0,
+                "reason": "websocket_candle_persistence_disabled",
+            }
         if not settings.enable_websocket_candle_daily_cleanup:
-            return {"cleanup_enabled": False, "deleted": 0, "reason": "websocket_candle_daily_cleanup_disabled"}
+            return {
+                "cleanup_enabled": False,
+                "deleted": 0,
+                "reason": "websocket_candle_daily_cleanup_disabled",
+            }
         prefix = str(settings.websocket_candle_storage_prefix or "").strip().upper()
         if not prefix:
-            return {"cleanup_enabled": False, "deleted": 0, "reason": "websocket_candle_storage_prefix_missing"}
+            return {
+                "cleanup_enabled": False,
+                "deleted": 0,
+                "reason": "websocket_candle_storage_prefix_missing",
+            }
         with self._lock:
             if not force and self._last_candle_cleanup_date == cleanup_day:
                 return {
@@ -1504,10 +1884,7 @@ class KiteWebSocketPriceFeed:
                 }
         storage_prefix = f"{prefix}:"
         escaped_prefix = (
-            storage_prefix
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
+            storage_prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         )
         cutoff = datetime.combine(cleanup_day, time.min)
         session = get_session()
@@ -1524,7 +1901,12 @@ class KiteWebSocketPriceFeed:
         except Exception as exc:
             session.rollback()
             logger.warning("WebSocket old candle cleanup failed error=%s", exc)
-            return {"cleanup_enabled": True, "deleted": 0, "reason": "cleanup_failed", "message": str(exc)}
+            return {
+                "cleanup_enabled": True,
+                "deleted": 0,
+                "reason": "cleanup_failed",
+                "message": str(exc),
+            }
         finally:
             session.close()
         with self._lock:
@@ -1553,19 +1935,28 @@ class KiteWebSocketPriceFeed:
         }
 
     def _rehydrate_premium_candles(self, tokens: set[int]) -> None:
-        if not settings.enable_websocket_candle_persistence or not settings.enable_websocket_premium_candle_builder:
+        if (
+            not settings.enable_websocket_candle_persistence
+            or not settings.enable_websocket_premium_candle_builder
+        ):
             return
-        pending = {int(token) for token in tokens if int(token) not in self._rehydrated_tokens}
+        pending = {
+            int(token) for token in tokens if int(token) not in self._rehydrated_tokens
+        }
         if not pending:
             return
         session = get_session()
         try:
-            since = self._now().replace(second=0, microsecond=0) - timedelta(minutes=max(5, settings.websocket_premium_candle_retention_minutes))
+            since = self._now().replace(second=0, microsecond=0) - timedelta(
+                minutes=max(5, settings.websocket_premium_candle_retention_minutes)
+            )
             for token in pending:
                 rows = (
                     session.query(Candle)
                     .filter(Candle.symbol == self._storage_symbol(token))
-                    .filter(Candle.timeframe == settings.websocket_premium_candle_timeframe)
+                    .filter(
+                        Candle.timeframe == settings.websocket_premium_candle_timeframe
+                    )
                     .filter(Candle.timestamp >= since)
                     .order_by(Candle.timestamp.asc())
                     .all()
@@ -1590,17 +1981,31 @@ class KiteWebSocketPriceFeed:
                 self._trim_premium_candles(token)
                 self._rehydrated_tokens.add(token)
         except Exception as exc:
-            logger.warning("WebSocket premium candle rehydrate failed tokens=%s error=%s", sorted(pending), exc)
+            logger.warning(
+                "WebSocket premium candle rehydrate failed tokens=%s error=%s",
+                sorted(pending),
+                exc,
+            )
         finally:
             session.close()
 
-    def _detect_gap_locked(self, tick: WebSocketTick, previous: WebSocketTick | None) -> dict[str, Any] | None:
-        if not settings.enable_market_data_gap_detection or self.market_session() != "REGULAR_MARKET":
+    def _detect_gap_locked(
+        self, tick: WebSocketTick, previous: WebSocketTick | None
+    ) -> dict[str, Any] | None:
+        if (
+            not settings.enable_market_data_gap_detection
+            or self.market_session() != "REGULAR_MARKET"
+        ):
             return None
-        max_gap = max(settings.websocket_price_stale_seconds + 1, settings.max_websocket_gap_seconds)
+        max_gap = max(
+            settings.websocket_price_stale_seconds + 1,
+            settings.max_websocket_gap_seconds,
+        )
         if previous is None:
             return None
-        previous_time = (previous.receive_timestamp or previous.timestamp).replace(tzinfo=None)
+        previous_time = (previous.receive_timestamp or previous.timestamp).replace(
+            tzinfo=None
+        )
         current_time = (tick.receive_timestamp or tick.timestamp).replace(tzinfo=None)
         gap_seconds = max(0.0, (current_time - previous_time).total_seconds())
         if gap_seconds <= max_gap:
@@ -1615,13 +2020,18 @@ class KiteWebSocketPriceFeed:
             "scope": "token",
             "entry_blocking": False,
             "diagnostic_only": True,
-            "backfill_status": "queued" if settings.enable_websocket_gap_backfill else "disabled",
+            "backfill_status": "queued"
+            if settings.enable_websocket_gap_backfill
+            else "disabled",
         }
         self._record_gap_locked(event)
         return event
 
     def _start_global_gap(self, reason: str) -> None:
-        if not settings.enable_market_data_gap_detection or self.market_session() != "REGULAR_MARKET":
+        if (
+            not settings.enable_market_data_gap_detection
+            or self.market_session() != "REGULAR_MARKET"
+        ):
             return
         with self._lock:
             self._active_gap_started_at = self._active_gap_started_at or self._now()
@@ -1666,10 +2076,16 @@ class KiteWebSocketPriceFeed:
             self._record_gap_locked(event)
         self._dispatch_gap(event)
 
-    def _can_recover_from_verified_tick_locked(self, ticks: list[WebSocketTick]) -> bool:
+    def _can_recover_from_verified_tick_locked(
+        self, ticks: list[WebSocketTick]
+    ) -> bool:
         if not self.running or self.market_session() != "REGULAR_MARKET":
             return False
-        if self.websocket_status in {"AUTH_FAILED", "RATE_LIMIT_COOLDOWN", "MAX_RETRIES_EXCEEDED"}:
+        if self.websocket_status in {
+            "AUTH_FAILED",
+            "RATE_LIMIT_COOLDOWN",
+            "MAX_RETRIES_EXCEEDED",
+        }:
             return False
         now = self._now()
         max_age = max(1.0, float(settings.websocket_price_stale_seconds))
@@ -1694,10 +2110,14 @@ class KiteWebSocketPriceFeed:
             from app.providers.kite_provider import KiteProvider
 
             provider = KiteProvider()
-            fetched = provider.historical_data(int(token), start, end, settings.websocket_premium_candle_timeframe)
+            fetched = provider.historical_data(
+                int(token), start, end, settings.websocket_premium_candle_timeframe
+            )
             inserted = 0
             for item in fetched or []:
-                timestamp = self._safe_datetime(item.get("date") or item.get("timestamp"))
+                timestamp = self._safe_datetime(
+                    item.get("date") or item.get("timestamp")
+                )
                 close = self._safe_float(item.get("close"))
                 if timestamp is None or close is None or close <= 0:
                     continue
@@ -1714,7 +2134,9 @@ class KiteWebSocketPriceFeed:
                     source="kite_historical_backfill",
                 )
                 with self._lock:
-                    self._premium_candles.setdefault(int(token), {})[candle.timestamp] = candle
+                    self._premium_candles.setdefault(int(token), {})[
+                        candle.timestamp
+                    ] = candle
                 self._persist_premium_candle(candle)
                 inserted += 1
             if inserted:
@@ -1724,7 +2146,9 @@ class KiteWebSocketPriceFeed:
             return "partial_or_empty"
         except Exception as exc:
             self._gap_backfill_failure_count += 1
-            logger.warning("WebSocket gap backfill failed token=%s error=%s", token, exc)
+            logger.warning(
+                "WebSocket gap backfill failed token=%s error=%s", token, exc
+            )
             return "failed"
 
     def _gap_status_locked(self, now: datetime) -> dict[str, Any]:
@@ -1737,12 +2161,16 @@ class KiteWebSocketPriceFeed:
             "enabled": settings.enable_market_data_gap_detection,
             "data_gap_detected": bool(self._gap_events),
             "active_gap": self._active_gap_started_at is not None,
-            "active_gap_started_at": self._active_gap_started_at.isoformat(sep=" ") if self._active_gap_started_at else None,
+            "active_gap_started_at": self._active_gap_started_at.isoformat(sep=" ")
+            if self._active_gap_started_at
+            else None,
             "active_gap_duration_seconds": active_seconds,
             "max_gap_seconds": settings.max_websocket_gap_seconds,
             "gap_count": len(self._gap_events),
             "recovery_count": self._gap_recovery_count,
-            "last_recovery_at": self._last_gap_recovery_at.isoformat(sep=" ") if self._last_gap_recovery_at else None,
+            "last_recovery_at": self._last_gap_recovery_at.isoformat(sep=" ")
+            if self._last_gap_recovery_at
+            else None,
             "last_recovery_reason": self._last_gap_recovery_reason,
             "latest_gap": self._gap_events[-1] if self._gap_events else None,
             "recent_gaps": list(self._gap_events[-10:]),
@@ -1762,18 +2190,34 @@ class KiteWebSocketPriceFeed:
             if key not in keep:
                 bucket.pop(key, None)
 
-    def _current_session_candles_locked(self, token: int) -> list[WebSocketPremiumCandle]:
+    def _current_session_candles_locked(
+        self, token: int
+    ) -> list[WebSocketPremiumCandle]:
         today = self._now().date()
         rows = list(self._premium_candles.get(int(token), {}).values())
-        return [candle for candle in rows if candle.timestamp.replace(tzinfo=None).date() == today]
+        return [
+            candle
+            for candle in rows
+            if candle.timestamp.replace(tzinfo=None).date() == today
+        ]
 
-    def _premium_candle_status_locked(self, token: int, now: datetime) -> dict[str, Any]:
-        candles = sorted(self._current_session_candles_locked(int(token)), key=lambda candle: candle.timestamp)
+    def _premium_candle_status_locked(
+        self, token: int, now: datetime
+    ) -> dict[str, Any]:
+        candles = sorted(
+            self._current_session_candles_locked(int(token)),
+            key=lambda candle: candle.timestamp,
+        )
         current = candles[-1] if candles else None
         completed = candles[-2] if len(candles) >= 2 else None
-        age = max(0.0, (now - current.timestamp.replace(tzinfo=None)).total_seconds()) if current else None
+        age = (
+            max(0.0, (now - current.timestamp.replace(tzinfo=None)).total_seconds())
+            if current
+            else None
+        )
         return {
-            "subscribed": int(token) in self._subscribed_tokens or int(token) in self._desired_tokens,
+            "subscribed": int(token) in self._subscribed_tokens
+            or int(token) in self._desired_tokens,
             "ticks_seen": int(self._ticks_seen.get(int(token), 0)),
             "current_session_candle_count": len(candles),
             "current_building_candle": self._candle_payload(current),
@@ -1782,7 +2226,9 @@ class KiteWebSocketPriceFeed:
             "minimum_required_premium_candles": settings.min_websocket_premium_candles,
         }
 
-    def _candle_payload(self, candle: WebSocketPremiumCandle | None) -> dict[str, Any] | None:
+    def _candle_payload(
+        self, candle: WebSocketPremiumCandle | None
+    ) -> dict[str, Any] | None:
         if candle is None:
             return None
         return {

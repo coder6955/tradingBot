@@ -43,7 +43,12 @@ class OpportunityRepositoryTests(unittest.TestCase):
         )
 
         record = repo.save_opportunity(signal)
-        updated = repo.update_outcome(record.id, outcome="stop_loss", exit_price=1.87, review_notes="expiry-day false signal")
+        updated = repo.update_outcome(
+            record.id,
+            outcome="stop_loss",
+            exit_price=1.87,
+            review_notes="expiry-day false signal",
+        )
         summary = repo.summarize_performance()
 
         self.assertEqual(updated.outcome, "stop_loss")

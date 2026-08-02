@@ -29,7 +29,10 @@ class KiteProvider:
 
     def _kite_client(self) -> Any:
         try:
-            return KiteConnect(api_key=settings.kite_api_key, timeout=max(1, int(settings.kite_api_timeout_seconds)))
+            return KiteConnect(
+                api_key=settings.kite_api_key,
+                timeout=max(1, int(settings.kite_api_timeout_seconds)),
+            )
         except TypeError:
             return KiteConnect(api_key=settings.kite_api_key)
 
@@ -48,7 +51,9 @@ class KiteProvider:
         return {"status": "not-configured", "token": bool(self.access_token)}
 
     def is_ready(self) -> bool:
-        return bool(settings.kite_api_key and (self.access_token or load_access_token()))
+        return bool(
+            settings.kite_api_key and (self.access_token or load_access_token())
+        )
 
     def generate_session(self, request_token: str) -> Dict[str, Any]:
         """Exchange a request_token for an access token using the API secret.
@@ -59,7 +64,11 @@ class KiteProvider:
             raise RuntimeError("KITE_API_SECRET is not configured")
         if self.client is None:
             raise RuntimeError("kiteconnect is not installed")
-        data = self._call(self.client.generate_session, request_token, api_secret=settings.kite_api_secret)
+        data = self._call(
+            self.client.generate_session,
+            request_token,
+            api_secret=settings.kite_api_secret,
+        )
         access_token = data.get("access_token")
         if access_token:
             # persist in memory for this process
@@ -105,9 +114,17 @@ class KiteProvider:
             return {}
         return self._call(self.client.ltp, list(instruments))  # type: ignore
 
-    def historical_data(self, instrument_token: int, from_dt: datetime, to_dt: datetime, interval: str) -> List[Dict[str, Any]]:
+    def historical_data(
+        self, instrument_token: int, from_dt: datetime, to_dt: datetime, interval: str
+    ) -> List[Dict[str, Any]]:
         self._ensure_ready()
-        return self._call(self.client.historical_data, instrument_token, from_dt, to_dt, self._broker_interval(interval))  # type: ignore
+        return self._call(
+            self.client.historical_data,
+            instrument_token,
+            from_dt,
+            to_dt,
+            self._broker_interval(interval),
+        )  # type: ignore
 
     def _broker_interval(self, interval: str) -> str:
         internal = str(interval or "").strip().lower()
@@ -167,7 +184,9 @@ class KiteProvider:
 
     def cancel_order(self, order_id: str, variety: str = "regular") -> Dict[str, Any]:
         self._ensure_ready()
-        cancelled = self._call(self.client.cancel_order, variety=variety, order_id=order_id)  # type: ignore
+        cancelled = self._call(
+            self.client.cancel_order, variety=variety, order_id=order_id
+        )  # type: ignore
         self._invalidate_funds_cache()
         return {"status": "cancelled", "order_id": cancelled or order_id}
 
@@ -182,7 +201,9 @@ class KiteProvider:
         if not settings.kite_api_key:
             raise RuntimeError("KITE_API_KEY is not configured")
         if not self.access_token:
-            raise RuntimeError("KITE_ACCESS_TOKEN is not configured; complete /kite/auth first")
+            raise RuntimeError(
+                "KITE_ACCESS_TOKEN is not configured; complete /kite/auth first"
+            )
         if self.client is None:
             raise RuntimeError("kiteconnect is not installed")
 

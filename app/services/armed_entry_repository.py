@@ -16,9 +16,15 @@ class ArmedEntryRepository:
         setup_id = str(payload["setup_id"])
         session = get_session()
         try:
-            row = session.query(ArmedEntryRecord).filter(ArmedEntryRecord.setup_id == setup_id).one_or_none()
+            row = (
+                session.query(ArmedEntryRecord)
+                .filter(ArmedEntryRecord.setup_id == setup_id)
+                .one_or_none()
+            )
             values = {
-                "strategy_version": str(payload.get("strategy_version") or settings.strategy_version),
+                "strategy_version": str(
+                    payload.get("strategy_version") or settings.strategy_version
+                ),
                 "symbol": str(payload.get("symbol") or "BANKNIFTY"),
                 "tradingsymbol": str(payload.get("tradingsymbol") or ""),
                 "instrument_token": int(payload.get("instrument_token") or 0),
@@ -27,7 +33,9 @@ class ArmedEntryRepository:
                 "armed_at": self._datetime(payload.get("armed_at")),
                 "valid_until": self._datetime(payload.get("valid_until")),
                 "updated_at": ist_now_naive(),
-                "payload_json": json.dumps(payload, default=self._json_default, separators=(",", ":")),
+                "payload_json": json.dumps(
+                    payload, default=self._json_default, separators=(",", ":")
+                ),
             }
             if row is None:
                 row = ArmedEntryRecord(setup_id=setup_id, **values)
@@ -47,7 +55,9 @@ class ArmedEntryRepository:
                 session.query(ArmedEntryRecord)
                 .filter(
                     ArmedEntryRecord.strategy_version == settings.strategy_version,
-                    ArmedEntryRecord.state.in_(("ARMED_FOR_ENTRY", "ENTER_NOW", "ORDER_PENDING")),
+                    ArmedEntryRecord.state.in_(
+                        ("ARMED_FOR_ENTRY", "ENTER_NOW", "ORDER_PENDING")
+                    ),
                     ArmedEntryRecord.valid_until >= point,
                 )
                 .order_by(ArmedEntryRecord.armed_at.asc())

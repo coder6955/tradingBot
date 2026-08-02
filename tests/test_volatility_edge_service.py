@@ -108,7 +108,9 @@ class VolatilityEdgeServiceTests(unittest.TestCase):
         finally:
             session.close()
 
-    def _quality(self, iv: float = 0.20, delta: float = 0.50, dte: int = 30) -> dict[str, object]:
+    def _quality(
+        self, iv: float = 0.20, delta: float = 0.50, dte: int = 30
+    ) -> dict[str, object]:
         return {
             "score": 90,
             "passed": True,
@@ -123,7 +125,9 @@ class VolatilityEdgeServiceTests(unittest.TestCase):
             },
         }
 
-    def _evaluate(self, *, iv: float = 0.20, prices: dict[str, float] | None = None) -> dict[str, object]:
+    def _evaluate(
+        self, *, iv: float = 0.20, prices: dict[str, float] | None = None
+    ) -> dict[str, object]:
         return VolatilityEdgeService().evaluate(
             symbol="BANKNIFTY",
             contract=self.contract,
@@ -141,11 +145,28 @@ class VolatilityEdgeServiceTests(unittest.TestCase):
         result = self._evaluate()
 
         self.assertFalse(result["passed"])
-        self.assertIn("UNKNOWN_DATA_MISSING: insufficient IV history", result["reasons"])
-        self.assertEqual(result["details"]["iv_history_data_quality"], "UNKNOWN_DATA_MISSING")
+        self.assertIn(
+            "UNKNOWN_DATA_MISSING: insufficient IV history", result["reasons"]
+        )
+        self.assertEqual(
+            result["details"]["iv_history_data_quality"], "UNKNOWN_DATA_MISSING"
+        )
 
     def test_realized_volatility_is_calculated_from_banknifty_candles(self) -> None:
-        closes = [58000, 58100, 57950, 58200, 58050, 58300, 58100, 58400, 58200, 58500, 58300, 58600]
+        closes = [
+            58000,
+            58100,
+            57950,
+            58200,
+            58050,
+            58300,
+            58100,
+            58400,
+            58200,
+            58500,
+            58300,
+            58600,
+        ]
         self._insert_banknifty_candles(closes)
         self._insert_option_iv_snapshots([0.18 + idx * 0.001 for idx in range(35)])
 
@@ -172,8 +193,13 @@ class VolatilityEdgeServiceTests(unittest.TestCase):
 
         result = self._evaluate(iv=0.10)
 
-        self.assertEqual(result["details"]["iv_vs_realized_label"], "IV_CHEAP_RELATIVE_TO_RV")
-        self.assertIn(result["classification"], {"cheap_relative_to_realized", "iv_expansion_supported", "fair"})
+        self.assertEqual(
+            result["details"]["iv_vs_realized_label"], "IV_CHEAP_RELATIVE_TO_RV"
+        )
+        self.assertIn(
+            result["classification"],
+            {"cheap_relative_to_realized", "iv_expansion_supported", "fair"},
+        )
 
     def test_iv_expansion_and_premium_range_support_option_buying(self) -> None:
         self._insert_banknifty_candles([58000 + idx * 20 for idx in range(40)])
@@ -187,7 +213,9 @@ class VolatilityEdgeServiceTests(unittest.TestCase):
 
     def test_high_iv_without_expansion_warns_about_crush_risk(self) -> None:
         self._insert_banknifty_candles([58000 + idx for idx in range(40)])
-        high_but_falling_iv = [0.10 + idx * 0.008 for idx in range(25)] + [0.30 - idx * 0.001 for idx in range(10)]
+        high_but_falling_iv = [0.10 + idx * 0.008 for idx in range(25)] + [
+            0.30 - idx * 0.001 for idx in range(10)
+        ]
         self._insert_option_iv_snapshots(high_but_falling_iv)
         self._insert_option_candles([6, 6, 6, 2, 2, 2])
 

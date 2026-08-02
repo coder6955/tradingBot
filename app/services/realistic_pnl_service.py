@@ -63,9 +63,26 @@ class RealisticPnlService:
         sebi = total_turnover * (settings.estimated_sebi_pct / 100)
         gst = (brokerage + exchange_txn + sebi) * (settings.estimated_gst_pct / 100)
         stamp = buy_turnover * (settings.estimated_stamp_buy_pct / 100)
-        slippage_cost = total_turnover * (settings.paper_slippage_pct_per_side / 100) if include_slippage else 0.0
-        spread_cost = total_turnover * (settings.paper_spread_impact_pct_per_side / 100) if include_spread else 0.0
-        charges = brokerage + stt + exchange_txn + sebi + gst + stamp + slippage_cost + spread_cost
+        slippage_cost = (
+            total_turnover * (settings.paper_slippage_pct_per_side / 100)
+            if include_slippage
+            else 0.0
+        )
+        spread_cost = (
+            total_turnover * (settings.paper_spread_impact_pct_per_side / 100)
+            if include_spread
+            else 0.0
+        )
+        charges = (
+            brokerage
+            + stt
+            + exchange_txn
+            + sebi
+            + gst
+            + stamp
+            + slippage_cost
+            + spread_cost
+        )
         net = gross - charges
         return PnlBreakdown(
             gross_pnl=gross,
@@ -81,8 +98,12 @@ class RealisticPnlService:
             spread_cost=spread_cost,
         )
 
-    def net_exit_price_for_backtest(self, *, raw_exit_price: float, side: str = "BUY") -> float:
-        friction = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
+    def net_exit_price_for_backtest(
+        self, *, raw_exit_price: float, side: str = "BUY"
+    ) -> float:
+        friction = (
+            settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
+        )
         if str(side).upper() == "BUY":
             return raw_exit_price * (1 - friction / 100)
         return raw_exit_price * (1 + friction / 100)

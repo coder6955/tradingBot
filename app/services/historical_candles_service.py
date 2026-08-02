@@ -6,7 +6,9 @@ from typing import Any, Dict, List
 class HistoricalCandlesService:
     """Generate simple synthetic historical candles for development and dashboarding."""
 
-    def generate_candles(self, symbol: str, count: int, base_price: float) -> List[Dict[str, Any]]:
+    def generate_candles(
+        self, symbol: str, count: int, base_price: float
+    ) -> List[Dict[str, Any]]:
         candles: List[Dict[str, Any]] = []
         price = float(base_price)
         for idx in range(count):

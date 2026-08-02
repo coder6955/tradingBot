@@ -25,14 +25,26 @@ class FakeWebSocketFeed:
 
 class FailingWebSocketFeed(FakeWebSocketFeed):
     def subscribe(self, tokens):
-        return {"subscribed": [], "reason": "subscription_failed", "message": "test failure"}
+        return {
+            "subscribed": [],
+            "reason": "subscription_failed",
+            "message": "test failure",
+        }
 
 
 class FakeOrderService:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def place_signal_order(self, signal, confirm_live=False, order_mode="paper", metadata=None, execution_quality_override=None, **kwargs):
+    def place_signal_order(
+        self,
+        signal,
+        confirm_live=False,
+        order_mode="paper",
+        metadata=None,
+        execution_quality_override=None,
+        **kwargs,
+    ):
         self.calls.append(
             {
                 "signal": signal,
@@ -42,7 +54,11 @@ class FakeOrderService:
                 "execution_quality": execution_quality_override,
             }
         )
-        return {"status": "paper", "trade_id": 101, "trade": {"metadata": metadata, "entry_price": signal.entry_price}}
+        return {
+            "status": "paper",
+            "trade_id": 101,
+            "trade": {"metadata": metadata, "entry_price": signal.entry_price},
+        }
 
 
 class PassingRiskService:
@@ -66,7 +82,11 @@ class InMemoryArmedEntryRepository:
         self.rows[str(payload["setup_id"])] = dict(payload)
 
     def active(self, *, now=None):
-        return [dict(payload) for payload in self.rows.values() if payload["valid_until"] >= now]
+        return [
+            dict(payload)
+            for payload in self.rows.values()
+            if payload["valid_until"] >= now
+        ]
 
 
 class ArmedEntryTrackerServiceTests(unittest.TestCase):
@@ -141,19 +161,32 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
             103,
         )
 
-    def _register(self, *, order_mode: str = "paper", prices: dict[str, float] | None = None) -> str:
+    def _register(
+        self, *, order_mode: str = "paper", prices: dict[str, float] | None = None
+    ) -> str:
         result = self.tracker.register_from_scan(
             symbol="BANKNIFTY",
             action="BUY_CE",
             side="BUY",
             contract=self._contract(),
-            prices=prices or {"entry_price": 103, "stop_loss": 90, "target_1": 130, "target_2": 145, "target_3": 160, "risk_reward": 2.0},
+            prices=prices
+            or {
+                "entry_price": 103,
+                "stop_loss": 90,
+                "target_1": 130,
+                "target_2": 145,
+                "target_3": 160,
+                "risk_reward": 2.0,
+            },
             entry_timing={
                 "entry_timing_state": EntryTimingService.ARMED_FOR_ENTRY,
                 "entry_trigger_price": 105,
                 "current_premium": 103,
                 "spread_pct": 1.0,
-                "reasons": ["waiting_for_entry_trigger", "premium_trigger_not_broken_yet"],
+                "reasons": [
+                    "waiting_for_entry_trigger",
+                    "premium_trigger_not_broken_yet",
+                ],
             },
             score=86,
             probability=0.78,
@@ -171,7 +204,9 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
         self.assertTrue(result["registered"])
         return str(result["setup_id"])
 
-    def _tick(self, price: float, *, bid: float | None = 104, ask: float | None = None) -> WebSocketTick:
+    def _tick(
+        self, price: float, *, bid: float | None = 104, ask: float | None = None
+    ) -> WebSocketTick:
         return WebSocketTick(
             instrument_token=580001,
             price=price,
@@ -200,8 +235,19 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
             action="BUY_CE",
             side="BUY",
             contract=self._contract(),
-            prices={"entry_price": 103, "stop_loss": 90, "target_1": 130, "target_2": 145, "target_3": 160, "risk_reward": 2.0},
-            entry_timing={"entry_trigger_price": 105, "current_premium": 103, "spread_pct": 1.0},
+            prices={
+                "entry_price": 103,
+                "stop_loss": 90,
+                "target_1": 130,
+                "target_2": 145,
+                "target_3": 160,
+                "risk_reward": 2.0,
+            },
+            entry_timing={
+                "entry_trigger_price": 105,
+                "current_premium": 103,
+                "spread_pct": 1.0,
+            },
             score=86,
             probability=None,
             confidence=0.86,
@@ -215,7 +261,9 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
         self.assertEqual(result["subscription_health"]["state"], "failed")
         self.assertEqual(tracker.active_tokens(), set())
 
-    def test_armed_entry_is_persisted_and_recovered_with_subscription_owner(self) -> None:
+    def test_armed_entry_is_persisted_and_recovered_with_subscription_owner(
+        self,
+    ) -> None:
         durable = InMemoryArmedEntryRepository()
         first = ArmedEntryTrackerService(
             websocket_price_feed=self.websocket,
@@ -229,8 +277,20 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
             action="BUY_CE",
             side="BUY",
             contract=self._contract(),
-            prices={"entry_price": 103, "stop_loss": 90, "target_1": 130, "target_2": 145, "target_3": 160, "risk_reward": 2.0},
-            entry_timing={"entry_trigger_price": 105, "current_premium": 103, "spread_pct": 1.0, "reasons": ["waiting_for_entry_trigger"]},
+            prices={
+                "entry_price": 103,
+                "stop_loss": 90,
+                "target_1": 130,
+                "target_2": 145,
+                "target_3": 160,
+                "risk_reward": 2.0,
+            },
+            entry_timing={
+                "entry_trigger_price": 105,
+                "current_premium": 103,
+                "spread_pct": 1.0,
+                "reasons": ["waiting_for_entry_trigger"],
+            },
             score=86,
             probability=None,
             confidence=0.86,
@@ -262,12 +322,18 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
         self.assertEqual(result["latest_state"], EntryTimingService.ARMED_FOR_ENTRY)
         self.assertEqual(len(self.order_service.calls), 0)
 
-    def test_websocket_tick_crossing_trigger_waits_for_tick_quality_then_creates_paper_order(self) -> None:
+    def test_websocket_tick_crossing_trigger_waits_for_tick_quality_then_creates_paper_order(
+        self,
+    ) -> None:
         setup_id = self._register()
 
-        first = self.tracker.evaluate_tick(setup_id, self._tick(105, bid=105.0, ask=105.1))
+        first = self.tracker.evaluate_tick(
+            setup_id, self._tick(105, bid=105.0, ask=105.1)
+        )
         self.clock.now = self.clock.now + timedelta(seconds=1.1)
-        result = self.tracker.evaluate_tick(setup_id, self._tick(105.2, bid=105.1, ask=105.2))
+        result = self.tracker.evaluate_tick(
+            setup_id, self._tick(105.2, bid=105.1, ask=105.2)
+        )
 
         self.assertEqual(first["latest_state"], EntryTimingService.ARMED_FOR_ENTRY)
         self.assertIn("tick_quality", first)
@@ -281,11 +347,20 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
         self.assertEqual(call["metadata"]["armed_setup_id"], setup_id)
         self.assertTrue(call["metadata"]["tick_quality"]["confirmed"])
         self.assertEqual(call["signal"].entry_price, 105.2)
-        self.assertTrue(call["signal"].factor_scores["decision_policy"]["primary_gates_passed"])
-        self.assertTrue(call["signal"].factor_scores["decision_policy"]["event_confirmation_passed"])
-        self.assertEqual(call["signal"].factor_scores["decision_policy"]["score_role"], "ranking_only")
+        self.assertTrue(
+            call["signal"].factor_scores["decision_policy"]["primary_gates_passed"]
+        )
+        self.assertTrue(
+            call["signal"].factor_scores["decision_policy"]["event_confirmation_passed"]
+        )
+        self.assertEqual(
+            call["signal"].factor_scores["decision_policy"]["score_role"],
+            "ranking_only",
+        )
 
-    def test_deterministic_fast_rally_replay_enters_after_dense_tick_confirmation(self) -> None:
+    def test_deterministic_fast_rally_replay_enters_after_dense_tick_confirmation(
+        self,
+    ) -> None:
         setup_id = self._register()
         start = self.clock.now
 
@@ -295,15 +370,41 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
 
         replay = TickReplayService(handle).replay(
             [
-                {"instrument_token": 580001, "price": 105.00, "bid": 105.00, "ask": 105.10, "timestamp": start},
-                {"instrument_token": 580001, "price": 105.10, "bid": 105.05, "ask": 105.15, "timestamp": start + timedelta(seconds=0.10)},
-                {"instrument_token": 580001, "price": 105.20, "bid": 105.10, "ask": 105.20, "timestamp": start + timedelta(seconds=0.20)},
-                {"instrument_token": 580001, "price": 105.30, "bid": 105.20, "ask": 105.30, "timestamp": start + timedelta(seconds=0.30)},
+                {
+                    "instrument_token": 580001,
+                    "price": 105.00,
+                    "bid": 105.00,
+                    "ask": 105.10,
+                    "timestamp": start,
+                },
+                {
+                    "instrument_token": 580001,
+                    "price": 105.10,
+                    "bid": 105.05,
+                    "ask": 105.15,
+                    "timestamp": start + timedelta(seconds=0.10),
+                },
+                {
+                    "instrument_token": 580001,
+                    "price": 105.20,
+                    "bid": 105.10,
+                    "ask": 105.20,
+                    "timestamp": start + timedelta(seconds=0.20),
+                },
+                {
+                    "instrument_token": 580001,
+                    "price": 105.30,
+                    "bid": 105.20,
+                    "ask": 105.30,
+                    "timestamp": start + timedelta(seconds=0.30),
+                },
             ]
         )
 
         self.assertEqual(replay["ticks_replayed"], 4)
-        self.assertEqual(self.tracker.list_entries()["entered_paper"][0]["setup_id"], setup_id)
+        self.assertEqual(
+            self.tracker.list_entries()["entered_paper"][0]["setup_id"], setup_id
+        )
         self.assertEqual(len(self.order_service.calls), 1)
 
     def test_tick_quality_requires_bid_progress_before_entry(self) -> None:
@@ -311,9 +412,13 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
 
         self.tracker.evaluate_tick(setup_id, self._tick(105.2, bid=105.2, ask=105.3))
         self.clock.now = self.clock.now + timedelta(seconds=1.1)
-        waiting = self.tracker.evaluate_tick(setup_id, self._tick(105.1, bid=105.1, ask=105.2))
+        waiting = self.tracker.evaluate_tick(
+            setup_id, self._tick(105.1, bid=105.1, ask=105.2)
+        )
         self.clock.now = self.clock.now + timedelta(seconds=0.2)
-        entered = self.tracker.evaluate_tick(setup_id, self._tick(105.3, bid=105.3, ask=105.4))
+        entered = self.tracker.evaluate_tick(
+            setup_id, self._tick(105.3, bid=105.3, ask=105.4)
+        )
 
         self.assertEqual(waiting["latest_state"], EntryTimingService.ARMED_FOR_ENTRY)
         self.assertIn("tick_quality_bid_not_rising", waiting["latest_reason"])
@@ -325,7 +430,9 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
 
         self.tracker.evaluate_tick(setup_id, self._tick(105, bid=105.0, ask=105.1))
         self.clock.now = self.clock.now + timedelta(seconds=1.1)
-        result = self.tracker.evaluate_tick(setup_id, self._tick(105.2, bid=105.1, ask=105.2))
+        result = self.tracker.evaluate_tick(
+            setup_id, self._tick(105.2, bid=105.1, ask=105.2)
+        )
 
         self.assertTrue(result["live_event_entry_blocked"])
         self.assertEqual(result["reason"], "live_trading_not_enabled_for_event_entry")
@@ -334,11 +441,15 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
     def test_premium_far_above_trigger_marks_too_late_and_saves_rejection(self) -> None:
         setup_id = self._register()
 
-        result = self.tracker.evaluate_tick(setup_id, self._tick(108, bid=107.5, ask=108))
+        result = self.tracker.evaluate_tick(
+            setup_id, self._tick(108, bid=107.5, ask=108)
+        )
 
         self.assertEqual(result["latest_state"], "TOO_LATE")
         self.assertIn("chase_risk_high", result["latest_reason"])
-        self.assertEqual(self.repo.analyze(symbol="BANKNIFTY")["sample"]["total_rejected"], 1)
+        self.assertEqual(
+            self.repo.analyze(symbol="BANKNIFTY")["sample"]["total_rejected"], 1
+        )
 
     def test_data_gap_cancels_armed_setup_before_entry(self) -> None:
         setup_id = self._register()
@@ -356,23 +467,37 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
         setup_id = self._register()
 
         quiet = self.tracker.cancel_for_data_gap(
-            {"reason": "token_tick_inactivity_detected", "instrument_token": 580001, "entry_blocking": False}
+            {
+                "reason": "token_tick_inactivity_detected",
+                "instrument_token": 580001,
+                "entry_blocking": False,
+            }
         )
-        recovered = self.tracker.cancel_for_data_gap({"reason": "websocket_reconnect", "recovered": True})
+        recovered = self.tracker.cancel_for_data_gap(
+            {"reason": "websocket_reconnect", "recovered": True}
+        )
 
         self.assertEqual(quiet["cancelled"], 0)
         self.assertEqual(recovered["cancelled"], 0)
-        self.assertIn(setup_id, {row["setup_id"] for row in self.tracker.list_entries()["active"]})
+        self.assertIn(
+            setup_id, {row["setup_id"] for row in self.tracker.list_entries()["active"]}
+        )
 
     def test_token_scoped_gap_only_cancels_matching_setup(self) -> None:
         setup_id = self._register()
 
         result = self.tracker.cancel_for_data_gap(
-            {"reason": "selected_option_feed_unavailable", "instrument_token": 999999, "entry_blocking": True}
+            {
+                "reason": "selected_option_feed_unavailable",
+                "instrument_token": 999999,
+                "entry_blocking": True,
+            }
         )
 
         self.assertEqual(result["cancelled"], 0)
-        self.assertIn(setup_id, {row["setup_id"] for row in self.tracker.list_entries()["active"]})
+        self.assertIn(
+            setup_id, {row["setup_id"] for row in self.tracker.list_entries()["active"]}
+        )
 
     def test_setup_expiry_marks_expired(self) -> None:
         setup_id = self._register()
@@ -392,7 +517,16 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
         self.assertIn("spread_widened_after_trigger", result["latest_reason"])
 
     def test_remaining_rr_compression_blocks_entry(self) -> None:
-        setup_id = self._register(prices={"entry_price": 103, "stop_loss": 50, "target_1": 120, "target_2": 135, "target_3": 150, "risk_reward": 0.5})
+        setup_id = self._register(
+            prices={
+                "entry_price": 103,
+                "stop_loss": 50,
+                "target_1": 120,
+                "target_2": 135,
+                "target_3": 150,
+                "risk_reward": 0.5,
+            }
+        )
 
         result = self.tracker.evaluate_tick(setup_id, self._tick(105, ask=105))
 
@@ -400,7 +534,16 @@ class ArmedEntryTrackerServiceTests(unittest.TestCase):
         self.assertIn("remaining_rr_compressed", result["latest_reason"])
 
     def test_target1_room_too_small_blocks_entry(self) -> None:
-        setup_id = self._register(prices={"entry_price": 103, "stop_loss": 100, "target_1": 110, "target_2": 120, "target_3": 130, "risk_reward": 1.5})
+        setup_id = self._register(
+            prices={
+                "entry_price": 103,
+                "stop_loss": 100,
+                "target_1": 110,
+                "target_2": 120,
+                "target_3": 130,
+                "risk_reward": 1.5,
+            }
+        )
 
         result = self.tracker.evaluate_tick(setup_id, self._tick(105, ask=105))
 

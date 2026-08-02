@@ -27,14 +27,20 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
         object.__setattr__(settings, "enable_raw_tick_capture", True)
 
     def tearDown(self) -> None:
-        object.__setattr__(settings, "enable_underlying_candle_pipeline", self.original_candle_pipeline)
-        object.__setattr__(settings, "enable_raw_tick_capture", self.original_raw_capture)
+        object.__setattr__(
+            settings, "enable_underlying_candle_pipeline", self.original_candle_pipeline
+        )
+        object.__setattr__(
+            settings, "enable_raw_tick_capture", self.original_raw_capture
+        )
         try:
             os.remove(self.temp_db.name)
         except PermissionError:
             pass
 
-    def _tick(self, minute: int, price: float, *, token: int = 260105, volume: float = 1000) -> WebSocketTick:
+    def _tick(
+        self, minute: int, price: float, *, token: int = 260105, volume: float = 1000
+    ) -> WebSocketTick:
         stamp = datetime(2026, 7, 3, 9, minute, 5)
         return WebSocketTick(
             instrument_token=token,
@@ -51,13 +57,25 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
         service.set_underlying_token(260105)
         service.start()
         for offset, minute in enumerate(range(15, 22)):
-            service.on_tick(self._tick(minute, 58000 + offset, volume=1000 + (offset * 10)))
+            service.on_tick(
+                self._tick(minute, 58000 + offset, volume=1000 + (offset * 10))
+            )
         service.stop()
 
         session = get_session()
         try:
-            one_minute = session.query(Candle).filter(Candle.symbol == "BANKNIFTY", Candle.timeframe == "1minute").order_by(Candle.timestamp).all()
-            five_minute = session.query(Candle).filter(Candle.symbol == "BANKNIFTY", Candle.timeframe == "5minute").order_by(Candle.timestamp).all()
+            one_minute = (
+                session.query(Candle)
+                .filter(Candle.symbol == "BANKNIFTY", Candle.timeframe == "1minute")
+                .order_by(Candle.timestamp)
+                .all()
+            )
+            five_minute = (
+                session.query(Candle)
+                .filter(Candle.symbol == "BANKNIFTY", Candle.timeframe == "5minute")
+                .order_by(Candle.timestamp)
+                .all()
+            )
         finally:
             session.close()
         self.assertEqual(len(one_minute), 6)
@@ -77,7 +95,12 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
 
         session = get_session()
         try:
-            rows = session.query(Candle).filter(Candle.timeframe == "1minute").order_by(Candle.timestamp).all()
+            rows = (
+                session.query(Candle)
+                .filter(Candle.timeframe == "1minute")
+                .order_by(Candle.timestamp)
+                .all()
+            )
         finally:
             session.close()
         self.assertEqual([row.timestamp.minute for row in rows], [15, 16, 17])
@@ -87,7 +110,9 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
         service = UnderlyingCandleService()
         service.set_underlying_token(260105)
         tick = self._tick(15, 58000)
-        local_tick = WebSocketTick(**{**tick.__dict__, "timestamp_source": "local_receive_time"})
+        local_tick = WebSocketTick(
+            **{**tick.__dict__, "timestamp_source": "local_receive_time"}
+        )
         result = service.on_tick(local_tick)
         self.assertFalse(result["accepted"])
         self.assertEqual(result["reason"], "exchange_timestamp_provenance_required")
@@ -96,7 +121,10 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
         class Client:
             def quote(self, instruments):
                 stamp = datetime(2026, 7, 3, 10, 30)
-                return {item: {"last_price": 58000, "exchange_timestamp": stamp} for item in instruments}
+                return {
+                    item: {"last_price": 58000, "exchange_timestamp": stamp}
+                    for item in instruments
+                }
 
         feed = KiteFeed()
         feed.client = Client()
@@ -112,8 +140,12 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
 
         service = RawTickCaptureService(queue_size=1)
         service._worker = AliveWorker()  # type: ignore[assignment]
-        warm = service.capture(self._tick(15, 100, token=1), symbol="WARM", owners=["banknifty_prewarm"])
-        risk = service.capture(self._tick(15, 101, token=2), symbol="RISK", owners=["active_trade"])
+        warm = service.capture(
+            self._tick(15, 100, token=1), symbol="WARM", owners=["banknifty_prewarm"]
+        )
+        risk = service.capture(
+            self._tick(15, 101, token=2), symbol="RISK", owners=["active_trade"]
+        )
         self.assertTrue(warm["captured"])
         self.assertTrue(risk["captured"])
         self.assertEqual(service.evicted_warm_count, 1)
@@ -128,7 +160,10 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
                 **self._tick(15, 100, token=123).__dict__,
                 "bid": 99.5,
                 "ask": 100.5,
-                "buy_depth": ({"price": 99.5, "quantity": 15}, {"price": 99.0, "quantity": 30}),
+                "buy_depth": (
+                    {"price": 99.5, "quantity": 15},
+                    {"price": 99.0, "quantity": 30},
+                ),
                 "sell_depth": ({"price": 100.5, "quantity": 15},),
             }
         )
@@ -144,44 +179,104 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
         self.assertEqual(depth["buy"][1]["quantity"], 30)
         self.assertEqual(depth["sell"][0]["price"], 100.5)
 
-    def test_canonical_historical_bootstrap_filters_after_hours_and_is_idempotent(self) -> None:
+    def test_canonical_historical_bootstrap_filters_after_hours_and_is_idempotent(
+        self,
+    ) -> None:
         class Provider:
             def instruments(self, exchange=None):
-                return [{"tradingsymbol": "NIFTY BANK", "name": "NIFTY BANK", "instrument_token": 260105}]
+                return [
+                    {
+                        "tradingsymbol": "NIFTY BANK",
+                        "name": "NIFTY BANK",
+                        "instrument_token": 260105,
+                    }
+                ]
 
             def historical_data(self, token, from_dt, to_dt, timeframe):
                 minute = 1 if timeframe == "1minute" else 5
                 return [
-                    {"date": datetime(2026, 7, 3, 8, 59), "open": 57900, "high": 57910, "low": 57890, "close": 57900, "volume": 10},
-                    {"date": datetime(2026, 7, 3, 9, 15), "open": 58000, "high": 58020, "low": 57990, "close": 58010, "volume": 100},
-                    {"date": datetime(2026, 7, 3, 9, 15) + timedelta(minutes=minute), "open": 58010, "high": 58030, "low": 58000, "close": 58020, "volume": 120},
-                    {"date": datetime(2026, 7, 3, 15, 30), "open": 58100, "high": 58110, "low": 58090, "close": 58100, "volume": 50},
+                    {
+                        "date": datetime(2026, 7, 3, 8, 59),
+                        "open": 57900,
+                        "high": 57910,
+                        "low": 57890,
+                        "close": 57900,
+                        "volume": 10,
+                    },
+                    {
+                        "date": datetime(2026, 7, 3, 9, 15),
+                        "open": 58000,
+                        "high": 58020,
+                        "low": 57990,
+                        "close": 58010,
+                        "volume": 100,
+                    },
+                    {
+                        "date": datetime(2026, 7, 3, 9, 15) + timedelta(minutes=minute),
+                        "open": 58010,
+                        "high": 58030,
+                        "low": 58000,
+                        "close": 58020,
+                        "volume": 120,
+                    },
+                    {
+                        "date": datetime(2026, 7, 3, 15, 30),
+                        "open": 58100,
+                        "high": 58110,
+                        "low": 58090,
+                        "close": 58100,
+                        "volume": 50,
+                    },
                 ]
 
         service = DataIngestionService(kite_provider_factory=Provider)
-        kwargs = {"from_date": "2026-07-03 09:15:00", "to_date": "2026-07-03 15:31:00", "use_checkpoint": False}
+        kwargs = {
+            "from_date": "2026-07-03 09:15:00",
+            "to_date": "2026-07-03 15:31:00",
+            "use_checkpoint": False,
+        }
         first = service.bootstrap_canonical_banknifty(**kwargs)
         second = service.bootstrap_canonical_banknifty(**kwargs)
 
         session = get_session()
         try:
-            rows = session.query(Candle).filter(Candle.symbol == "BANKNIFTY").order_by(Candle.timeframe, Candle.timestamp).all()
+            rows = (
+                session.query(Candle)
+                .filter(Candle.symbol == "BANKNIFTY")
+                .order_by(Candle.timeframe, Candle.timestamp)
+                .all()
+            )
         finally:
             session.close()
         self.assertEqual(first["status"], "ok")
         self.assertEqual(second["status"], "ok")
         self.assertEqual(len(rows), 5)
         self.assertEqual({row.timeframe for row in rows}, {"1minute", "5minute"})
-        self.assertTrue(all(row.timestamp_source == "broker_exchange_timestamp" for row in rows))
-        self.assertTrue(all(row.data_quality == "broker_historical_complete" for row in rows))
-        self.assertTrue(all(row.timestamp.time() >= datetime(2026, 7, 3, 9, 15).time() for row in rows))
+        self.assertTrue(
+            all(row.timestamp_source == "broker_exchange_timestamp" for row in rows)
+        )
+        self.assertTrue(
+            all(row.data_quality == "broker_historical_complete" for row in rows)
+        )
+        self.assertTrue(
+            all(
+                row.timestamp.time() >= datetime(2026, 7, 3, 9, 15).time()
+                for row in rows
+            )
+        )
 
     def test_one_minute_bootstrap_chunks_ranges_below_broker_limit(self) -> None:
         calls = []
 
         class Provider:
             def instruments(self, exchange=None):
-                return [{"tradingsymbol": "NIFTY BANK", "name": "NIFTY BANK", "instrument_token": 260105}]
+                return [
+                    {
+                        "tradingsymbol": "NIFTY BANK",
+                        "name": "NIFTY BANK",
+                        "instrument_token": 260105,
+                    }
+                ]
 
             def historical_data(self, token, from_dt, to_dt, timeframe):
                 calls.append((from_dt, to_dt, timeframe))
@@ -214,22 +309,40 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
         self.assertEqual(metric["p99_ms"], 10.0)
         self.assertEqual(metric["max_ms"], 10.0)
 
-    def test_latency_report_exposes_all_required_metrics_and_missing_samples(self) -> None:
+    def test_latency_report_exposes_all_required_metrics_and_missing_samples(
+        self,
+    ) -> None:
         service = LatencyMetricsService(sample_limit=20)
-        service.record_missing("exchange_tick_to_application_receive", detail={"reason": "exchange_timestamp_unavailable"})
+        service.record_missing(
+            "exchange_tick_to_application_receive",
+            detail={"reason": "exchange_timestamp_unavailable"},
+        )
 
         report = service.report()
 
-        self.assertTrue(set(LatencyMetricsService.REQUIRED_METRICS).issubset(report["metrics"]))
-        self.assertEqual(report["metrics"]["exchange_tick_to_application_receive"]["sample_count"], 0)
-        self.assertEqual(report["metrics"]["exchange_tick_to_application_receive"]["missing_sample_count"], 1)
+        self.assertTrue(
+            set(LatencyMetricsService.REQUIRED_METRICS).issubset(report["metrics"])
+        )
+        self.assertEqual(
+            report["metrics"]["exchange_tick_to_application_receive"]["sample_count"], 0
+        )
+        self.assertEqual(
+            report["metrics"]["exchange_tick_to_application_receive"][
+                "missing_sample_count"
+            ],
+            1,
+        )
         self.assertIsNone(report["metrics"]["exit_trigger_to_fill"]["p99_ms"])
 
     def test_persisted_tick_replay_preserves_capture_sequence(self) -> None:
         stamp = datetime(2026, 7, 3, 10, 0)
         session = get_session()
         try:
-            for sequence, price, receive_offset in [(30, 103.0, 1), (10, 101.0, 3), (20, 102.0, 2)]:
+            for sequence, price, receive_offset in [
+                (30, 103.0, 1),
+                (10, 101.0, 3),
+                (20, 102.0, 2),
+            ]:
                 session.add(
                     RawTickRecord(
                         session_date="2026-07-03",
@@ -250,7 +363,9 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
         finally:
             session.close()
         seen = []
-        result = TickReplayService(lambda tick: seen.append(tick.price)).replay_persisted(session_date="2026-07-03")
+        result = TickReplayService(
+            lambda tick: seen.append(tick.price)
+        ).replay_persisted(session_date="2026-07-03")
         self.assertEqual(seen, [101.0, 102.0, 103.0])
         self.assertFalse(result["mixed_lineage"])
 
@@ -271,7 +386,9 @@ class CanonicalMarketPipelineTests(unittest.TestCase):
         client = Client()
         provider.client = client
         provider.access_token = "mock-token"
-        provider.historical_data(260105, datetime(2026, 7, 3, 9, 15), datetime(2026, 7, 3, 10, 15), "1minute")
+        provider.historical_data(
+            260105, datetime(2026, 7, 3, 9, 15), datetime(2026, 7, 3, 10, 15), "1minute"
+        )
         self.assertEqual(client.interval, "minute")
         self.assertEqual(provider._broker_interval("1minute"), "minute")
         self.assertEqual(provider._broker_interval("5minute"), "5minute")

@@ -69,7 +69,12 @@ class ExecutionRealismService:
             quoted = float(bid or 0.0)
             synthetic = intended * (1 - friction_pct / 100)
             fill = min(intended, quoted if quoted > 0 else synthetic, synthetic)
-        return self._fill(intended=intended, fill=max(0.05, fill), reason="entry_buy_near_ask", components=components)
+        return self._fill(
+            intended=intended,
+            fill=max(0.05, fill),
+            reason="entry_buy_near_ask",
+            components=components,
+        )
 
     def exit_fill(
         self,
@@ -89,7 +94,11 @@ class ExecutionRealismService:
             return self._empty(intended, "exit_price_invalid")
         outcome_key = str(outcome or "").lower()
         buffer_pct = settings.realism_no_fill_touch_buffer_pct
-        if "target" in outcome_key and candle is not None and str(side).upper() == "BUY":
+        if (
+            "target" in outcome_key
+            and candle is not None
+            and str(side).upper() == "BUY"
+        ):
             candle_high = self._candle_value(candle, "high_price", "high")
             if candle_high > 0 and candle_high < intended * (1 + buffer_pct / 100):
                 return ExecutionFill(
@@ -100,7 +109,10 @@ class ExecutionRealismService:
                     reason="target_touch_not_enough_for_realistic_fill",
                     price_impact=0.0,
                     price_impact_pct=0.0,
-                    components={"no_fill_touch_buffer_pct": buffer_pct, "candle_high": round(candle_high, 2)},
+                    components={
+                        "no_fill_touch_buffer_pct": buffer_pct,
+                        "candle_high": round(candle_high, 2),
+                    },
                     no_fill_reason="target_barely_touched",
                 )
         base_pct = (
@@ -121,13 +133,22 @@ class ExecutionRealismService:
             quoted = float(bid or 0.0)
             synthetic = intended * (1 - friction_pct / 100)
             fill = min(intended, quoted if quoted > 0 else synthetic, synthetic)
-            reason = "stop_overshoot_sell_near_bid" if "stop" in outcome_key else "target_sell_near_bid"
+            reason = (
+                "stop_overshoot_sell_near_bid"
+                if "stop" in outcome_key
+                else "target_sell_near_bid"
+            )
         else:
             quoted = float(ask or 0.0)
             synthetic = intended * (1 + friction_pct / 100)
             fill = max(intended, quoted, synthetic)
             reason = "short_exit_buy_near_ask"
-        return self._fill(intended=intended, fill=max(0.05, fill), reason=reason, components=components)
+        return self._fill(
+            intended=intended,
+            fill=max(0.05, fill),
+            reason=reason,
+            components=components,
+        )
 
     def assumptions(self) -> dict[str, Any]:
         return {
@@ -156,7 +177,9 @@ class ExecutionRealismService:
             no_fill_reason=reason,
         )
 
-    def _fill(self, *, intended: float, fill: float, reason: str, components: dict[str, Any]) -> ExecutionFill:
+    def _fill(
+        self, *, intended: float, fill: float, reason: str, components: dict[str, Any]
+    ) -> ExecutionFill:
         impact = fill - intended
         return ExecutionFill(
             intended_price=intended,
@@ -182,10 +205,18 @@ class ExecutionRealismService:
         spread_pct = self._spread_pct(bid=bid, ask=ask)
         return {
             "base_pct": max(0.0, float(base_pct or 0.0)),
-            "first_15_min_extra_pct": settings.realism_first_15_min_extra_slippage_pct if self._is_first_15_min(timestamp) else 0.0,
-            "expiry_day_extra_pct": settings.realism_expiry_day_extra_slippage_pct if self._is_expiry_day(timestamp, expiry) else 0.0,
-            "high_iv_extra_pct": settings.realism_high_iv_extra_slippage_pct if iv_rank is not None and float(iv_rank) >= 75 else 0.0,
-            "wide_spread_extra_pct": settings.realism_wide_spread_extra_slippage_pct if spread_pct >= settings.max_execution_spread_pct else 0.0,
+            "first_15_min_extra_pct": settings.realism_first_15_min_extra_slippage_pct
+            if self._is_first_15_min(timestamp)
+            else 0.0,
+            "expiry_day_extra_pct": settings.realism_expiry_day_extra_slippage_pct
+            if self._is_expiry_day(timestamp, expiry)
+            else 0.0,
+            "high_iv_extra_pct": settings.realism_high_iv_extra_slippage_pct
+            if iv_rank is not None and float(iv_rank) >= 75
+            else 0.0,
+            "wide_spread_extra_pct": settings.realism_wide_spread_extra_slippage_pct
+            if spread_pct >= settings.max_execution_spread_pct
+            else 0.0,
             "spread_pct": round(spread_pct, 3),
             "bid": float(bid) if bid else None,
             "ask": float(ask) if ask else None,
@@ -194,7 +225,13 @@ class ExecutionRealismService:
     def _total_pct(self, components: dict[str, Any]) -> float:
         return sum(
             float(components.get(key) or 0.0)
-            for key in ("base_pct", "first_15_min_extra_pct", "expiry_day_extra_pct", "high_iv_extra_pct", "wide_spread_extra_pct")
+            for key in (
+                "base_pct",
+                "first_15_min_extra_pct",
+                "expiry_day_extra_pct",
+                "high_iv_extra_pct",
+                "wide_spread_extra_pct",
+            )
         )
 
     def _is_first_15_min(self, timestamp: datetime | None) -> bool:
@@ -203,7 +240,9 @@ class ExecutionRealismService:
         value = timestamp.time()
         return time(9, 15) <= value < time(9, 30)
 
-    def _is_expiry_day(self, timestamp: datetime | None, expiry: str | date | None) -> bool:
+    def _is_expiry_day(
+        self, timestamp: datetime | None, expiry: str | date | None
+    ) -> bool:
         if timestamp is None or expiry is None:
             return False
         expiry_date: date | None = None

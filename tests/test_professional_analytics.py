@@ -29,10 +29,19 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
 
     def test_opportunity_analytics_segments_closed_signals(self) -> None:
         repo = OpportunityRepository()
-        winner = repo.save_opportunity(self._signal("BUY_CE", "BANKNIFTY26JUL58000CE", 100, 80, 140))
-        loser = repo.save_opportunity(self._signal("BUY_PE", "BANKNIFTY26JUL57000PE", 100, 80, 140))
+        winner = repo.save_opportunity(
+            self._signal("BUY_CE", "BANKNIFTY26JUL58000CE", 100, 80, 140)
+        )
+        loser = repo.save_opportunity(
+            self._signal("BUY_PE", "BANKNIFTY26JUL57000PE", 100, 80, 140)
+        )
         repo.update_outcome(winner.id, outcome="target_1", exit_price=140)
-        repo.update_outcome(loser.id, outcome="stop_loss", exit_price=80, failure_tags=["spread_slippage_drag"])
+        repo.update_outcome(
+            loser.id,
+            outcome="stop_loss",
+            exit_price=80,
+            failure_tags=["spread_slippage_drag"],
+        )
 
         result = OpportunityAnalyticsService().analyze(symbol="BANKNIFTY", limit=100)
 
@@ -58,7 +67,13 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             requested_quantity=30,
             placed_quantity=15,
         )
-        repo.update_broker_status(live.id, status="filled", broker_payload={"status": "COMPLETE"}, filled_quantity=15, average_price=101)
+        repo.update_broker_status(
+            live.id,
+            status="filled",
+            broker_payload={"status": "COMPLETE"},
+            filled_quantity=15,
+            average_price=101,
+        )
         repo.close_trade(paper.id, outcome="target_1", exit_price=140)
         repo.close_trade(live.id, outcome="stop_loss", exit_price=80)
 
@@ -68,12 +83,16 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
         self.assertEqual(result["sample"]["live"], 1)
         self.assertEqual(result["segments"]["mode"]["paper"]["wins"], 1)
         self.assertEqual(result["segments"]["mode"]["live"]["losses"], 1)
-        self.assertEqual(result["execution_quality"]["avg_requested_fill_ratio_pct"], 50.0)
+        self.assertEqual(
+            result["execution_quality"]["avg_requested_fill_ratio_pct"], 50.0
+        )
 
     def test_professional_insights_compare_accepted_and_rejected_setups(self) -> None:
         opportunity_repo = OpportunityRepository()
         rejected_repo = RejectedOpportunityRepository()
-        winner = opportunity_repo.save_opportunity(self._signal("BUY_CE", "BANKNIFTY26JUL58000CE", 100, 80, 140))
+        winner = opportunity_repo.save_opportunity(
+            self._signal("BUY_CE", "BANKNIFTY26JUL58000CE", 100, 80, 140)
+        )
         opportunity_repo.update_outcome(winner.id, outcome="target_1", exit_price=140)
         rejection = rejected_repo.save_rejection(
             symbol="BANKNIFTY",
@@ -90,22 +109,31 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             ),
             factor_scores={
                 "prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80},
-                "option_premium_confirmation": {"passed": False, "source": "stored_candles"},
+                "option_premium_confirmation": {
+                    "passed": False,
+                    "source": "stored_candles",
+                },
                 "strategy_metadata": {"strategy_version": "test_strategy"},
             },
             score_breakdown={"score": 78},
             market_session="REGULAR_MARKET",
         )
-        rejected_repo.mark_later_outcome(rejection.id, outcome="would_have_hit_target", exit_price=130)
+        rejected_repo.mark_later_outcome(
+            rejection.id, outcome="would_have_hit_target", exit_price=130
+        )
 
         result = ProfessionalInsightsService().analyze(symbol="BANKNIFTY", limit=100)
 
         self.assertEqual(result["accepted_vs_rejected"]["accepted"]["wins"], 1)
-        self.assertEqual(result["accepted_vs_rejected"]["rejected"]["missed_winners"], 1)
+        self.assertEqual(
+            result["accepted_vs_rejected"]["rejected"]["missed_winners"], 1
+        )
         self.assertIn("rejection_gate:entry_too_late", result["factor_attribution"])
         self.assertIn("test_strategy", result["strategy_versions"]["versions"])
 
-    def test_gate_effectiveness_report_separates_missed_saved_unresolved_and_ambiguous(self) -> None:
+    def test_gate_effectiveness_report_separates_missed_saved_unresolved_and_ambiguous(
+        self,
+    ) -> None:
         rejected_repo = RejectedOpportunityRepository()
         missed = rejected_repo.save_rejection(
             symbol="BANKNIFTY",
@@ -113,8 +141,16 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             action="BUY_CE",
             score=78,
             reasons=["premium confirmation failed"],
-            contract=SimpleNamespace(tradingsymbol="BANKNIFTY26JUL58000CE", exchange="NFO", expiry="2026-07-26", strike=58000, option_type="CE"),
-            factor_scores={"prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}},
+            contract=SimpleNamespace(
+                tradingsymbol="BANKNIFTY26JUL58000CE",
+                exchange="NFO",
+                expiry="2026-07-26",
+                strike=58000,
+                option_type="CE",
+            ),
+            factor_scores={
+                "prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}
+            },
             market_session="REGULAR_MARKET",
             learning_eligible=True,
         )
@@ -124,8 +160,16 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             action="BUY_PE",
             score=75,
             reasons=["premium confirmation failed"],
-            contract=SimpleNamespace(tradingsymbol="BANKNIFTY26JUL57000PE", exchange="NFO", expiry="2026-07-26", strike=57000, option_type="PE"),
-            factor_scores={"prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}},
+            contract=SimpleNamespace(
+                tradingsymbol="BANKNIFTY26JUL57000PE",
+                exchange="NFO",
+                expiry="2026-07-26",
+                strike=57000,
+                option_type="PE",
+            ),
+            factor_scores={
+                "prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}
+            },
             market_session="REGULAR_MARKET",
             learning_eligible=True,
         )
@@ -135,8 +179,16 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             action="BUY_CE",
             score=74,
             reasons=["premium confirmation failed"],
-            contract=SimpleNamespace(tradingsymbol="BANKNIFTY26JUL58100CE", exchange="NFO", expiry="2026-07-26", strike=58100, option_type="CE"),
-            factor_scores={"prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}},
+            contract=SimpleNamespace(
+                tradingsymbol="BANKNIFTY26JUL58100CE",
+                exchange="NFO",
+                expiry="2026-07-26",
+                strike=58100,
+                option_type="CE",
+            ),
+            factor_scores={
+                "prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}
+            },
             market_session="REGULAR_MARKET",
             learning_eligible=True,
         )
@@ -146,13 +198,35 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             action="BUY_CE",
             score=73,
             reasons=["premium confirmation failed"],
-            contract=SimpleNamespace(tradingsymbol="BANKNIFTY26JUL58200CE", exchange="NFO", expiry="2026-07-26", strike=58200, option_type="CE"),
-            factor_scores={"prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}},
+            contract=SimpleNamespace(
+                tradingsymbol="BANKNIFTY26JUL58200CE",
+                exchange="NFO",
+                expiry="2026-07-26",
+                strike=58200,
+                option_type="CE",
+            ),
+            factor_scores={
+                "prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}
+            },
             market_session="REGULAR_MARKET",
             learning_eligible=True,
         )
-        rejected_repo.mark_later_outcome(missed.id, outcome="would_have_hit_target_1", exit_price=130, outcome_minutes=3, outcome_source="candle_replay", outcome_timeframe="1minute")
-        rejected_repo.mark_later_outcome(saved.id, outcome="would_have_hit_stop_loss", exit_price=80, outcome_minutes=5, outcome_source="candle_replay", outcome_timeframe="1minute")
+        rejected_repo.mark_later_outcome(
+            missed.id,
+            outcome="would_have_hit_target_1",
+            exit_price=130,
+            outcome_minutes=3,
+            outcome_source="candle_replay",
+            outcome_timeframe="1minute",
+        )
+        rejected_repo.mark_later_outcome(
+            saved.id,
+            outcome="would_have_hit_stop_loss",
+            exit_price=80,
+            outcome_minutes=5,
+            outcome_source="candle_replay",
+            outcome_timeframe="1minute",
+        )
         rejected_repo.mark_later_outcome(
             ambiguous.id,
             outcome="ambiguous_stop_and_target_same_candle",
@@ -163,8 +237,12 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             ambiguous=True,
         )
 
-        result = ProfessionalInsightsService().gate_effectiveness_report(symbol="BANKNIFTY", limit=100)
-        gate = {row["gate_or_reason"]: row for row in result["gates"]}["premium_confirmation_failed"]
+        result = ProfessionalInsightsService().gate_effectiveness_report(
+            symbol="BANKNIFTY", limit=100
+        )
+        gate = {row["gate_or_reason"]: row for row in result["gates"]}[
+            "premium_confirmation_failed"
+        ]
 
         self.assertEqual(result["rejected_summary"]["missed_winners"], 1)
         self.assertEqual(result["rejected_summary"]["saved_losers"], 1)
@@ -176,7 +254,9 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
         self.assertEqual(gate["unresolved"], 1)
         self.assertEqual(gate["avg_minutes_to_outcome"], 3.33)
 
-    def test_gate_effectiveness_summary_only_avoids_full_comparison_payload(self) -> None:
+    def test_gate_effectiveness_summary_only_avoids_full_comparison_payload(
+        self,
+    ) -> None:
         rejected_repo = RejectedOpportunityRepository()
         rejected = rejected_repo.save_rejection(
             symbol="BANKNIFTY",
@@ -184,14 +264,26 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             action="BUY_CE",
             score=78,
             reasons=["premium confirmation failed"],
-            contract=SimpleNamespace(tradingsymbol="BANKNIFTY26JUL58000CE", exchange="NFO", expiry="2026-07-26", strike=58000, option_type="CE"),
-            factor_scores={"prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}},
+            contract=SimpleNamespace(
+                tradingsymbol="BANKNIFTY26JUL58000CE",
+                exchange="NFO",
+                expiry="2026-07-26",
+                strike=58000,
+                option_type="CE",
+            ),
+            factor_scores={
+                "prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80}
+            },
             market_session="REGULAR_MARKET",
             learning_eligible=True,
         )
-        rejected_repo.mark_later_outcome(rejected.id, outcome="would_have_hit_stop_loss", exit_price=80)
+        rejected_repo.mark_later_outcome(
+            rejected.id, outcome="would_have_hit_stop_loss", exit_price=80
+        )
 
-        result = ProfessionalInsightsService().gate_effectiveness_report(symbol="BANKNIFTY", limit=100, summary_only=True, top_n=1)
+        result = ProfessionalInsightsService().gate_effectiveness_report(
+            symbol="BANKNIFTY", limit=100, summary_only=True, top_n=1
+        )
 
         self.assertTrue(result["summary_only"])
         self.assertEqual(len(result["gates"]), 1)
@@ -210,7 +302,10 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
                 80,
                 140,
                 factor_scores={
-                    "volatility_edge": {"classification": "iv_expansion_supported", "details": {"iv_rank": 45}},
+                    "volatility_edge": {
+                        "classification": "iv_expansion_supported",
+                        "details": {"iv_rank": 45},
+                    },
                     "day_type": {"details": {"day_type": "trend_expansion"}},
                 },
             )
@@ -223,19 +318,28 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
                 80,
                 140,
                 factor_scores={
-                    "volatility_edge": {"classification": "iv_crush_risk", "main_risk": "iv_crush", "details": {"iv_rank": 88}},
+                    "volatility_edge": {
+                        "classification": "iv_crush_risk",
+                        "main_risk": "iv_crush",
+                        "details": {"iv_rank": 88},
+                    },
                     "day_type": {"details": {"day_type": "rotation_range"}},
                 },
             )
         )
-        opportunity_repo.update_outcome(ce_winner.id, outcome="target_1", exit_price=140)
+        opportunity_repo.update_outcome(
+            ce_winner.id, outcome="target_1", exit_price=140
+        )
         opportunity_repo.update_outcome(pe_loser.id, outcome="stop_loss", exit_price=80)
         missed = rejected_repo.save_rejection(
             symbol="BANKNIFTY",
             side="BUY",
             action="BUY_CE",
             score=76,
-            reasons=["range_compression_without_expansion", "option premium has not broken recent high"],
+            reasons=[
+                "range_compression_without_expansion",
+                "option premium has not broken recent high",
+            ],
             contract=SimpleNamespace(
                 tradingsymbol="BANKNIFTY26JUL58100CE",
                 exchange="NFO",
@@ -245,7 +349,10 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             ),
             factor_scores={
                 "prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80},
-                "volatility_edge": {"classification": "iv_expansion_supported", "details": {"iv_rank": 50}},
+                "volatility_edge": {
+                    "classification": "iv_expansion_supported",
+                    "details": {"iv_rank": 50},
+                },
                 "day_type": {"details": {"day_type": "trend_expansion"}},
             },
             market_session="REGULAR_MARKET",
@@ -266,25 +373,44 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             ),
             factor_scores={
                 "prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80},
-                "volatility_edge": {"classification": "iv_crush_risk", "main_risk": "iv_crush", "details": {"iv_rank": 90}},
+                "volatility_edge": {
+                    "classification": "iv_crush_risk",
+                    "main_risk": "iv_crush",
+                    "details": {"iv_rank": 90},
+                },
                 "day_type": {"details": {"day_type": "rotation_range"}},
             },
             market_session="REGULAR_MARKET",
             learning_eligible=True,
         )
-        rejected_repo.mark_later_outcome(missed.id, outcome="would_have_hit_target_1", exit_price=130)
-        rejected_repo.mark_later_outcome(saved.id, outcome="would_have_hit_stop_loss", exit_price=80)
+        rejected_repo.mark_later_outcome(
+            missed.id, outcome="would_have_hit_target_1", exit_price=130
+        )
+        rejected_repo.mark_later_outcome(
+            saved.id, outcome="would_have_hit_stop_loss", exit_price=80
+        )
 
-        result = ProfessionalInsightsService().research_engine_report(symbol="BANKNIFTY", limit=100)
+        result = ProfessionalInsightsService().research_engine_report(
+            symbol="BANKNIFTY", limit=100
+        )
 
         self.assertEqual(result["sample"]["closed_accepted_opportunities"], 2)
         self.assertEqual(result["sample"]["reviewed_rejections_with_later_outcome"], 2)
-        filters = {row["filter_name"]: row for row in result["filter_rejection_quality"]["filters"]}
-        self.assertEqual(filters["range_compression_without_expansion"]["later_winner_count"], 1)
-        self.assertEqual(filters["late_day_premium_decay_environment"]["later_loser_count"], 1)
+        filters = {
+            row["filter_name"]: row
+            for row in result["filter_rejection_quality"]["filters"]
+        }
+        self.assertEqual(
+            filters["range_compression_without_expansion"]["later_winner_count"], 1
+        )
+        self.assertEqual(
+            filters["late_day_premium_decay_environment"]["later_loser_count"], 1
+        )
         self.assertEqual(result["accepted_trade_loss_impact"]["losing_count"], 1)
         self.assertIn("buy_ce", result["segment_expectancy"]["setup_family"])
-        self.assertIn("iv:iv_expansion_supported", result["segment_expectancy"]["iv_regime"])
+        self.assertIn(
+            "iv:iv_expansion_supported", result["segment_expectancy"]["iv_regime"]
+        )
         self.assertIn("trend_expansion", result["segment_expectancy"]["trend_regime"])
         self.assertEqual(result["setup_family_ranking"][0]["setup_family"], "buy_ce")
         self.assertFalse(result["research_readiness"]["safe_to_enable_live"])
@@ -307,16 +433,33 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             },
         )
         opportunity = opportunity_repo.save_opportunity(signal)
-        opportunity_repo.update_outcome(opportunity.id, outcome="target_1", exit_price=140)
-        trade = trade_repo.create_trade(signal, mode="paper", status="filled", requested_quantity=15, placed_quantity=15)
+        opportunity_repo.update_outcome(
+            opportunity.id, outcome="target_1", exit_price=140
+        )
+        trade = trade_repo.create_trade(
+            signal,
+            mode="paper",
+            status="filled",
+            requested_quantity=15,
+            placed_quantity=15,
+        )
         trade_repo.close_trade(trade.id, outcome="target_1", exit_price=140)
 
-        result = ProfessionalInsightsService().research_engine_report(symbol="BANKNIFTY", limit=100)
+        result = ProfessionalInsightsService().research_engine_report(
+            symbol="BANKNIFTY", limit=100
+        )
 
-        self.assertIn("vwap_reclaim_continuation", result["segment_expectancy"]["setup_family"])
-        self.assertEqual(result["setup_family_ranking"][0]["setup_family"], "vwap_reclaim_continuation")
+        self.assertIn(
+            "vwap_reclaim_continuation", result["segment_expectancy"]["setup_family"]
+        )
+        self.assertEqual(
+            result["setup_family_ranking"][0]["setup_family"],
+            "vwap_reclaim_continuation",
+        )
 
-    def test_threshold_validation_report_scores_rejections_and_sensitivity(self) -> None:
+    def test_threshold_validation_report_scores_rejections_and_sensitivity(
+        self,
+    ) -> None:
         opportunity_repo = OpportunityRepository()
         trade_repo = TradeRepository()
         rejected_repo = RejectedOpportunityRepository()
@@ -327,11 +470,24 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             100,
             80,
             140,
-            factor_scores={"setup_family": {"name": "opening_drive_continuation", "group": "opening_drive"}},
+            factor_scores={
+                "setup_family": {
+                    "name": "opening_drive_continuation",
+                    "group": "opening_drive",
+                }
+            },
         )
         opportunity = opportunity_repo.save_opportunity(signal)
-        opportunity_repo.update_outcome(opportunity.id, outcome="target_1", exit_price=140)
-        trade = trade_repo.create_trade(signal, mode="paper", status="filled", requested_quantity=15, placed_quantity=15)
+        opportunity_repo.update_outcome(
+            opportunity.id, outcome="target_1", exit_price=140
+        )
+        trade = trade_repo.create_trade(
+            signal,
+            mode="paper",
+            status="filled",
+            requested_quantity=15,
+            placed_quantity=15,
+        )
         trade_repo.update_mfe_mae(trade.id, price=150)
         trade_repo.close_trade(trade.id, outcome="target_1", exit_price=135)
         rejected = rejected_repo.save_rejection(
@@ -349,32 +505,63 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             ),
             factor_scores={
                 "prices": {"entry_price": 100, "target_1": 130, "stop_loss": 80},
-                "setup_family": {"name": "opening_drive_continuation", "group": "opening_drive"},
+                "setup_family": {
+                    "name": "opening_drive_continuation",
+                    "group": "opening_drive",
+                },
             },
             market_session="REGULAR_MARKET",
             learning_eligible=True,
         )
-        rejected_repo.mark_later_outcome(rejected.id, outcome="would_have_hit_stop_loss", exit_price=80)
+        rejected_repo.mark_later_outcome(
+            rejected.id, outcome="would_have_hit_stop_loss", exit_price=80
+        )
 
-        result = ProfessionalInsightsService().threshold_validation_report(symbol="BANKNIFTY", limit=100)
+        result = ProfessionalInsightsService().threshold_validation_report(
+            symbol="BANKNIFTY", limit=100
+        )
 
         self.assertEqual(result["status"], "ok")
         self.assertIn("threshold_inventory", result)
-        self.assertTrue(any(item["threshold_name"] == "min_signal_score" for item in result["threshold_inventory"]))
+        self.assertTrue(
+            any(
+                item["threshold_name"] == "min_signal_score"
+                for item in result["threshold_inventory"]
+            )
+        )
         self.assertIn("high_score", result["score_threshold_validation"]["buckets"])
-        self.assertGreaterEqual(result["score_threshold_validation"]["buckets"]["high_score"]["accepted_count"], 1)
-        reasons = {row["gate_or_reason"]: row for row in result["rejection_threshold_validation"]["rows"]}
+        self.assertGreaterEqual(
+            result["score_threshold_validation"]["buckets"]["high_score"][
+                "accepted_count"
+            ],
+            1,
+        )
+        reasons = {
+            row["gate_or_reason"]: row
+            for row in result["rejection_threshold_validation"]["rows"]
+        }
         self.assertIn("option_premium_has_not_broken_recent_high", reasons)
-        self.assertEqual(reasons["option_premium_has_not_broken_recent_high"]["later_loser_count"], 1)
-        self.assertIn("opening_drive_continuation", result["setup_family_threshold_validation"])
+        self.assertEqual(
+            reasons["option_premium_has_not_broken_recent_high"]["later_loser_count"], 1
+        )
+        self.assertIn(
+            "opening_drive_continuation", result["setup_family_threshold_validation"]
+        )
         self.assertTrue(result["threshold_sensitivity"]["minimum_score"])
         self.assertEqual(original_min_score, signal.score)
 
     def test_threshold_validation_empty_report_is_clean_and_inconclusive(self) -> None:
-        result = ProfessionalInsightsService().threshold_validation_report(symbol="BANKNIFTY", limit=100)
+        result = ProfessionalInsightsService().threshold_validation_report(
+            symbol="BANKNIFTY", limit=100
+        )
 
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["score_threshold_validation"]["buckets"]["below_threshold"]["trades"], 0)
+        self.assertEqual(
+            result["score_threshold_validation"]["buckets"]["below_threshold"][
+                "trades"
+            ],
+            0,
+        )
         self.assertFalse(result["data_support"]["accepted_vs_rejected"])
         self.assertTrue(result["threshold_sensitivity"]["minimum_score"])
         self.assertTrue(result["not_measurable_yet"])
@@ -385,18 +572,28 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
         signal = self._signal("BUY_CE", "BANKNIFTY26JUL58000CE", 100, 80, 140)
         opportunity = repo.save_opportunity(signal)
         repo.update_outcome(opportunity.id, outcome="stop_loss", exit_price=80)
-        trade = trade_repo.create_trade(signal, mode="paper", status="filled", requested_quantity=15, placed_quantity=15)
+        trade = trade_repo.create_trade(
+            signal,
+            mode="paper",
+            status="filled",
+            requested_quantity=15,
+            placed_quantity=15,
+        )
         trade_repo.close_trade(trade.id, outcome="target_1", exit_price=140)
 
         service = ProfessionalInsightsService()
-        review = service.daily_review(symbol="BANKNIFTY", review_date=datetime.now().date(), limit=100)
+        review = service.daily_review(
+            symbol="BANKNIFTY", review_date=datetime.now().date(), limit=100
+        )
         journal = service.trade_journal(symbol="BANKNIFTY", limit=100)
 
         self.assertEqual(review["sample"]["accepted_opportunities"], 1)
         self.assertEqual(review["sample"]["trades"], 1)
         self.assertGreaterEqual(len(journal["timeline"]), 2)
 
-    def test_daily_banknifty_summary_groups_rejections_and_warns_on_low_sample(self) -> None:
+    def test_daily_banknifty_summary_groups_rejections_and_warns_on_low_sample(
+        self,
+    ) -> None:
         trade_repo = TradeRepository()
         rejected_repo = RejectedOpportunityRepository()
         winner = trade_repo.create_trade(
@@ -434,7 +631,9 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
             ],
         )
 
-        result = ProfessionalInsightsService().daily_banknifty_summary(summary_date=datetime.now().date())
+        result = ProfessionalInsightsService().daily_banknifty_summary(
+            summary_date=datetime.now().date()
+        )
 
         self.assertEqual(result["total_paper_trades"], 3)
         self.assertEqual(result["total_closed_paper_trades"], 2)
@@ -446,13 +645,18 @@ class ProfessionalAnalyticsTests(unittest.TestCase):
         self.assertGreater(result["average_win"], 0)
         self.assertGreater(result["average_loss"], 0)
         self.assertEqual(result["total_rejected_opportunities"], 1)
-        self.assertEqual(result["rejection_reasons_count"]["premium_candles_stale_or_missing"], 1)
+        self.assertEqual(
+            result["rejection_reasons_count"]["premium_candles_stale_or_missing"], 1
+        )
         self.assertEqual(result["rejection_reasons_count"]["top_banks_mixed"], 1)
         self.assertEqual(result["rejection_reasons_count"]["quote_invalid"], 1)
         self.assertTrue(result["low_sample_warning"])
         self.assertFalse(result["recommendation"]["safe_to_change_strategy"])
         self.assertFalse(result["recommendation"]["safe_to_enable_live"])
-        self.assertIn("Premium confirmation candles were stale or missing.", result["data_health_warnings"])
+        self.assertIn(
+            "Premium confirmation candles were stale or missing.",
+            result["data_health_warnings"],
+        )
 
     def test_professional_data_completeness_reports_stored_market_data(self) -> None:
         session = get_session()

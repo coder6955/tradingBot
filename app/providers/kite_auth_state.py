@@ -32,7 +32,9 @@ class KiteAuthState:
 
     def clear(self) -> None:
         with self._lock:
-            self._snapshot = KiteAuthSnapshot(status="OK", relogin_required=False, last_error=None)
+            self._snapshot = KiteAuthSnapshot(
+                status="OK", relogin_required=False, last_error=None
+            )
 
     def status(self) -> dict[str, Any]:
         with self._lock:

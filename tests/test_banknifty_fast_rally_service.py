@@ -25,7 +25,14 @@ class BankNiftyFastRallyServiceTests(unittest.TestCase):
         service.set_underlying_token(260105)
         start = datetime(2026, 7, 17, 14, 10, 0)
 
-        service.on_tick(WebSocketTick(instrument_token=260105, price=58100, timestamp=start, receive_timestamp=start))
+        service.on_tick(
+            WebSocketTick(
+                instrument_token=260105,
+                price=58100,
+                timestamp=start,
+                receive_timestamp=start,
+            )
+        )
         event = service.on_tick(
             WebSocketTick(
                 instrument_token=260105,
@@ -43,7 +50,13 @@ class BankNiftyFastRallyServiceTests(unittest.TestCase):
         service = BankNiftyFastRallyService()
         service.set_underlying_token(260105)
 
-        event = service.on_tick(WebSocketTick(instrument_token=580001, price=120, timestamp=datetime(2026, 7, 17, 14, 10)))
+        event = service.on_tick(
+            WebSocketTick(
+                instrument_token=580001,
+                price=120,
+                timestamp=datetime(2026, 7, 17, 14, 10),
+            )
+        )
 
         self.assertIsNone(event)
 
@@ -52,7 +65,14 @@ class BankNiftyFastRallyServiceTests(unittest.TestCase):
         service.set_underlying_token(260105)
         start = datetime(2026, 7, 17, 14, 10, 0)
 
-        service.on_tick(WebSocketTick(instrument_token=260105, price=58100, timestamp=start, receive_timestamp=start))
+        service.on_tick(
+            WebSocketTick(
+                instrument_token=260105,
+                price=58100,
+                timestamp=start,
+                receive_timestamp=start,
+            )
+        )
         event = service.on_tick(
             WebSocketTick(
                 instrument_token=260105,
@@ -71,12 +91,23 @@ class BankNiftyFastRallyServiceTests(unittest.TestCase):
 
     def test_callback_suppression_is_visible_on_trigger_event(self) -> None:
         service = BankNiftyFastRallyService(
-            lambda event: {"scheduled": False, "reason": "fast_rescan_cooldown", "event": event["type"]}
+            lambda event: {
+                "scheduled": False,
+                "reason": "fast_rescan_cooldown",
+                "event": event["type"],
+            }
         )
         service.set_underlying_token(260105)
         start = datetime(2026, 7, 17, 14, 10, 0)
 
-        service.on_tick(WebSocketTick(instrument_token=260105, price=58100, timestamp=start, receive_timestamp=start))
+        service.on_tick(
+            WebSocketTick(
+                instrument_token=260105,
+                price=58100,
+                timestamp=start,
+                receive_timestamp=start,
+            )
+        )
         event = service.on_tick(
             WebSocketTick(
                 instrument_token=260105,
@@ -99,7 +130,14 @@ class BankNiftyFastRallyServiceTests(unittest.TestCase):
         service.set_underlying_token(260105)
         start = datetime(2026, 7, 17, 14, 10, 0)
 
-        service.on_tick(WebSocketTick(instrument_token=260105, price=58100, timestamp=start, receive_timestamp=start))
+        service.on_tick(
+            WebSocketTick(
+                instrument_token=260105,
+                price=58100,
+                timestamp=start,
+                receive_timestamp=start,
+            )
+        )
         event = service.on_tick(
             WebSocketTick(
                 instrument_token=260105,

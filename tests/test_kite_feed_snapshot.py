@@ -26,7 +26,9 @@ class HistoricalBlockingClient:
 
     def historical_data(self, *args, **kwargs):
         self.historical_calls += 1
-        raise AssertionError("historical_data should not be called when stored candles are available")
+        raise AssertionError(
+            "historical_data should not be called when stored candles are available"
+        )
 
 
 class InstrumentClient:
@@ -37,8 +39,16 @@ class InstrumentClient:
     def instruments(self, exchange):
         self.calls += 1
         if self.should_fail:
-            raise AssertionError("instrument master should be loaded from persistent cache")
-        return [{"tradingsymbol": "BANKNIFTY26JUL58000CE", "exchange": exchange, "instrument_token": 580001}]
+            raise AssertionError(
+                "instrument master should be loaded from persistent cache"
+            )
+        return [
+            {
+                "tradingsymbol": "BANKNIFTY26JUL58000CE",
+                "exchange": exchange,
+                "instrument_token": 580001,
+            }
+        ]
 
 
 class KiteFeedSnapshotTests(unittest.TestCase):
@@ -101,23 +111,31 @@ class KiteFeedSnapshotTests(unittest.TestCase):
         self.assertTrue(snapshot["is_real_data"])
         self.assertEqual(client.historical_calls, 0)
 
-    def test_snapshot_does_not_call_kite_historical_when_fallback_disabled(self) -> None:
+    def test_snapshot_does_not_call_kite_historical_when_fallback_disabled(
+        self,
+    ) -> None:
         original = settings.kite_snapshot_historical_fallback_enabled
         client = HistoricalBlockingClient()
         try:
-            object.__setattr__(settings, "kite_snapshot_historical_fallback_enabled", False)
+            object.__setattr__(
+                settings, "kite_snapshot_historical_fallback_enabled", False
+            )
             feed = KiteFeed()
             feed.client = client
 
             snapshot = feed.get_snapshot("BANKNIFTY")
         finally:
-            object.__setattr__(settings, "kite_snapshot_historical_fallback_enabled", original)
+            object.__setattr__(
+                settings, "kite_snapshot_historical_fallback_enabled", original
+            )
 
         self.assertEqual(snapshot["source"], "kite")
         self.assertTrue(snapshot["is_real_data"])
         self.assertEqual(client.historical_calls, 0)
 
-    def test_six_completed_candles_make_structure_ready_without_legacy_indicators(self) -> None:
+    def test_six_completed_candles_make_structure_ready_without_legacy_indicators(
+        self,
+    ) -> None:
         now = ist_now_naive().replace(second=0, microsecond=0)
         session_day = now.date() - timedelta(days=1)
         while session_day.weekday() >= 5:
@@ -130,7 +148,8 @@ class KiteFeedSnapshotTests(unittest.TestCase):
                     Candle(
                         symbol="BANKNIFTY",
                         timeframe="5minute",
-                        timestamp=datetime.combine(session_day, time(9, 15)) + timedelta(minutes=index * 5),
+                        timestamp=datetime.combine(session_day, time(9, 15))
+                        + timedelta(minutes=index * 5),
                         open_price=price - 10,
                         high_price=price + 15,
                         low_price=price - 15,
@@ -146,7 +165,8 @@ class KiteFeedSnapshotTests(unittest.TestCase):
         feed.client = HistoricalBlockingClient()
         stored_candles = [
             {
-                "date": datetime.combine(session_day, time(9, 15)) + timedelta(minutes=index * 5),
+                "date": datetime.combine(session_day, time(9, 15))
+                + timedelta(minutes=index * 5),
                 "open": 58000 + index * 25 - 10,
                 "high": 58000 + index * 25 + 15,
                 "low": 58000 + index * 25 - 15,
@@ -164,9 +184,14 @@ class KiteFeedSnapshotTests(unittest.TestCase):
         self.assertFalse(snapshot["indicators_available"])
         self.assertIsNone(snapshot["ema_21"])
         self.assertIsNone(snapshot["macd"])
-        self.assertEqual(snapshot["legacy_indicator_shadow"]["active_decision_role"], "diagnostic_only")
+        self.assertEqual(
+            snapshot["legacy_indicator_shadow"]["active_decision_role"],
+            "diagnostic_only",
+        )
 
-    def test_fewer_than_six_completed_candles_report_exact_structure_shortfall(self) -> None:
+    def test_fewer_than_six_completed_candles_report_exact_structure_shortfall(
+        self,
+    ) -> None:
         now = ist_now_naive().replace(second=0, microsecond=0)
         session_day = now.date() - timedelta(days=1)
         while session_day.weekday() >= 5:
@@ -179,7 +204,8 @@ class KiteFeedSnapshotTests(unittest.TestCase):
                     Candle(
                         symbol="BANKNIFTY",
                         timeframe="5minute",
-                        timestamp=datetime.combine(session_day, time(9, 15)) + timedelta(minutes=index * 5),
+                        timestamp=datetime.combine(session_day, time(9, 15))
+                        + timedelta(minutes=index * 5),
                         open_price=price - 5,
                         high_price=price + 10,
                         low_price=price - 10,
@@ -195,7 +221,8 @@ class KiteFeedSnapshotTests(unittest.TestCase):
         feed.client = HistoricalBlockingClient()
         stored_candles = [
             {
-                "date": datetime.combine(session_day, time(9, 15)) + timedelta(minutes=index * 5),
+                "date": datetime.combine(session_day, time(9, 15))
+                + timedelta(minutes=index * 5),
                 "open": 58000 + index * 20 - 5,
                 "high": 58000 + index * 20 + 10,
                 "low": 58000 + index * 20 - 10,
@@ -210,7 +237,10 @@ class KiteFeedSnapshotTests(unittest.TestCase):
         self.assertFalse(snapshot["analysis_ready"])
         self.assertEqual(snapshot["canonical_candle_count"], 5)
         self.assertEqual(snapshot["required_structure_candle_count"], 6)
-        self.assertIn("insufficient_completed_5minute_structure_candles", snapshot["data_quality_reasons"])
+        self.assertIn(
+            "insufficient_completed_5minute_structure_candles",
+            snapshot["data_quality_reasons"],
+        )
 
     def test_instruments_use_persistent_cache_after_restart(self) -> None:
         original_file = settings.kite_instrument_cache_file

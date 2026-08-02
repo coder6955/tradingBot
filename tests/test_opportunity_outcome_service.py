@@ -5,10 +5,18 @@ from datetime import date, timedelta
 
 from app.models import Signal
 from app.config import settings
-from app.services.database import Candle, RawTickRecord, SetupEpisodeRecord, get_session, init_db
+from app.services.database import (
+    Candle,
+    RawTickRecord,
+    SetupEpisodeRecord,
+    get_session,
+    init_db,
+)
 from app.services.opportunity_outcome_service import OpportunityOutcomeService
 from app.services.opportunity_repository import OpportunityRepository
-from app.services.rejected_opportunity_outcome_service import RejectedOpportunityOutcomeService
+from app.services.rejected_opportunity_outcome_service import (
+    RejectedOpportunityOutcomeService,
+)
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
 from app.services.trade_setup_service import OptionContract
 
@@ -68,7 +76,9 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
         finally:
             session.close()
 
-    def _save_raw_tick(self, *, token: int, symbol: str, price: float, timestamp) -> None:
+    def _save_raw_tick(
+        self, *, token: int, symbol: str, price: float, timestamp
+    ) -> None:
         session = get_session()
         try:
             session.add(
@@ -112,12 +122,19 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             score=86,
             factor_scores={
                 "price_action": {"details": {"room_to_level_pct": 0.33}},
-                "option_chain": {"details": {"pcr_volume": 0.53}, "reasons": ["selected option spread is acceptable but not ideal"]},
+                "option_chain": {
+                    "details": {"pcr_volume": 0.53},
+                    "reasons": ["selected option spread is acceptable but not ideal"],
+                },
                 "contract": {"bid": 2.3, "ask": 2.4, "last_price": 2.4},
             },
         )
         record = repo.save_opportunity(signal)
-        service = OpportunityOutcomeService(repo, kite_provider_factory=lambda: FakeKiteProvider(), market_session_provider=lambda: "AFTER_MARKET")  # type: ignore[arg-type]
+        service = OpportunityOutcomeService(
+            repo,
+            kite_provider_factory=lambda: FakeKiteProvider(),
+            market_session_provider=lambda: "AFTER_MARKET",
+        )  # type: ignore[arg-type]
 
         result = service.evaluate_once()
         updated = repo.get_opportunity(record.id)
@@ -127,7 +144,9 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
         self.assertIsNotNone(updated)
         self.assertEqual(updated.outcome, "stop_loss")
         self.assertIn("low_premium_option_noise", analysis["top_failure_tags"])
-        self.assertIn("insufficient_room_to_nearest_level", analysis["top_failure_tags"])
+        self.assertIn(
+            "insufficient_room_to_nearest_level", analysis["top_failure_tags"]
+        )
 
     def test_evaluate_once_also_marks_rejected_later_outcomes(self) -> None:
         repo = OpportunityRepository()
@@ -154,11 +173,26 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             score=82,
             reasons=["final weighted score is below threshold"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120, "target_2": 130, "target_3": 140}},
+            factor_scores={
+                "prices": {
+                    "entry_price": 100,
+                    "stop_loss": 90,
+                    "target_1": 120,
+                    "target_2": 130,
+                    "target_3": 140,
+                }
+            },
             market_session="REGULAR_MARKET",
         )
-        self._save_raw_tick(token=580001, symbol=contract.tradingsymbol, price=121, timestamp=rejected.created_at + timedelta(seconds=10))
-        rejected_service = RejectedOpportunityOutcomeService(rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=121))  # type: ignore[arg-type]
+        self._save_raw_tick(
+            token=580001,
+            symbol=contract.tradingsymbol,
+            price=121,
+            timestamp=rejected.created_at + timedelta(seconds=10),
+        )
+        rejected_service = RejectedOpportunityOutcomeService(
+            rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=121)
+        )  # type: ignore[arg-type]
         service = OpportunityOutcomeService(
             repo,
             kite_provider_factory=lambda: FakeKiteProvider(),
@@ -172,7 +206,9 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
         self.assertEqual(result["rejected_opportunities"]["updated"], 1)
         self.assertEqual(analysis["sample"]["with_later_outcome"], 1)
         self.assertEqual(analysis["examples"][0]["id"], rejected.id)
-        self.assertEqual(analysis["examples"][0]["later_outcome"], "would_have_hit_target_1")
+        self.assertEqual(
+            analysis["examples"][0]["later_outcome"], "would_have_hit_target_1"
+        )
 
     def test_rejected_later_outcomes_skip_non_learning_rows_by_default(self) -> None:
         rejected_repo = RejectedOpportunityRepository()
@@ -198,12 +234,21 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             score=82,
             reasons=["selected_option_quote_invalid"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            factor_scores={
+                "prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}
+            },
             rejection_source="manual_diagnostic",
             market_session="REGULAR_MARKET",
         )
-        self._save_raw_tick(token=580001, symbol=contract.tradingsymbol, price=121, timestamp=rejected.created_at + timedelta(seconds=10))
-        service = RejectedOpportunityOutcomeService(rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=121))  # type: ignore[arg-type]
+        self._save_raw_tick(
+            token=580001,
+            symbol=contract.tradingsymbol,
+            price=121,
+            timestamp=rejected.created_at + timedelta(seconds=10),
+        )
+        service = RejectedOpportunityOutcomeService(
+            rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=121)
+        )  # type: ignore[arg-type]
 
         default_result = service.evaluate_once()
         explicit_result = service.evaluate_once(learning_only=False)
@@ -233,10 +278,22 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             ask=101,
         )
         first = repository.save_rejection(
-            symbol="BANKNIFTY", side="BUY", action="BUY_CE", score=80, reasons=["waiting"], contract=contract, market_session="REGULAR_MARKET"
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=80,
+            reasons=["waiting"],
+            contract=contract,
+            market_session="REGULAR_MARKET",
         )
         second = repository.save_rejection(
-            symbol="BANKNIFTY", side="BUY", action="BUY_CE", score=81, reasons=["waiting"], contract=contract, market_session="REGULAR_MARKET"
+            symbol="BANKNIFTY",
+            side="BUY",
+            action="BUY_CE",
+            score=81,
+            reasons=["waiting"],
+            contract=contract,
+            market_session="REGULAR_MARKET",
         )
         session = get_session()
         try:
@@ -247,7 +304,9 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
         finally:
             session.close()
 
-    def test_missing_chronological_path_is_censored_not_inferred_from_current_quote(self) -> None:
+    def test_missing_chronological_path_is_censored_not_inferred_from_current_quote(
+        self,
+    ) -> None:
         repository = RejectedOpportunityRepository()
         contract = OptionContract(
             tradingsymbol="BANKNIFTY26JUL58000CE",
@@ -271,20 +330,28 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             score=80,
             reasons=["waiting"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            factor_scores={
+                "prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}
+            },
             market_session="REGULAR_MARKET",
         )
         session = get_session()
         try:
             stored = session.get(type(record), record.id)
-            stored.created_at = stored.created_at - timedelta(minutes=settings.rejected_outcome_horizon_minutes + 5)
+            stored.created_at = stored.created_at - timedelta(
+                minutes=settings.rejected_outcome_horizon_minutes + 5
+            )
             session.commit()
         finally:
             session.close()
-        result = RejectedOpportunityOutcomeService(repository, kite_provider_factory=lambda: FakeKiteProvider(price=121)).evaluate_once()  # type: ignore[arg-type]
+        result = RejectedOpportunityOutcomeService(
+            repository, kite_provider_factory=lambda: FakeKiteProvider(price=121)
+        ).evaluate_once()  # type: ignore[arg-type]
         updated = repository.list_rejections(symbol="BANKNIFTY", limit=1)[0]
         self.assertEqual(result["updated"], 1)
-        self.assertEqual(updated.later_outcome, "censored_chronological_data_unavailable")
+        self.assertEqual(
+            updated.later_outcome, "censored_chronological_data_unavailable"
+        )
         self.assertEqual(updated.later_outcome_source, "censored")
         self.assertFalse(bool(updated.learning_eligible))
 
@@ -312,7 +379,14 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             score=82,
             reasons=["final weighted score is below threshold"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120, "target_2": 130}},
+            factor_scores={
+                "prices": {
+                    "entry_price": 100,
+                    "stop_loss": 90,
+                    "target_1": 120,
+                    "target_2": 130,
+                }
+            },
             market_session="REGULAR_MARKET",
         )
         self._save_candle(
@@ -324,7 +398,9 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             low_price=98,
             close_price=105,
         )
-        service = RejectedOpportunityOutcomeService(rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=105))  # type: ignore[arg-type]
+        service = RejectedOpportunityOutcomeService(
+            rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=105)
+        )  # type: ignore[arg-type]
 
         result = service.evaluate_once()
         updated = rejected_repo.list_rejections(symbol="BANKNIFTY", limit=1)[0]
@@ -339,7 +415,9 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
         self.assertIsNotNone(updated.later_outcome_at)
         self.assertIn("source=candle_replay", updated.later_notes or "")
 
-    def test_rejected_later_outcome_replay_uses_first_stop_before_later_target(self) -> None:
+    def test_rejected_later_outcome_replay_uses_first_stop_before_later_target(
+        self,
+    ) -> None:
         rejected_repo = RejectedOpportunityRepository()
         contract = OptionContract(
             tradingsymbol="BANKNIFTY26JUL58000CE",
@@ -363,7 +441,14 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             score=82,
             reasons=["final weighted score is below threshold"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120, "target_2": 130}},
+            factor_scores={
+                "prices": {
+                    "entry_price": 100,
+                    "stop_loss": 90,
+                    "target_1": 120,
+                    "target_2": 130,
+                }
+            },
             market_session="REGULAR_MARKET",
         )
         self._save_candle(
@@ -384,7 +469,9 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             low_price=91,
             close_price=125,
         )
-        service = RejectedOpportunityOutcomeService(rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=125))  # type: ignore[arg-type]
+        service = RejectedOpportunityOutcomeService(
+            rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=125)
+        )  # type: ignore[arg-type]
 
         result = service.evaluate_once()
         updated = rejected_repo.list_rejections(symbol="BANKNIFTY", limit=1)[0]
@@ -432,7 +519,9 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             low_price=99,
             close_price=121,
         )
-        service = RejectedOpportunityOutcomeService(rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=105))  # type: ignore[arg-type]
+        service = RejectedOpportunityOutcomeService(
+            rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=105)
+        )  # type: ignore[arg-type]
 
         result = service.evaluate_once()
         updated = rejected_repo.list_rejections(symbol="BANKNIFTY", limit=1)[0]
@@ -465,7 +554,9 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             score=82,
             reasons=["option premium has not broken recent high"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            factor_scores={
+                "prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}
+            },
             market_session="REGULAR_MARKET",
         )
         self._save_candle(
@@ -477,7 +568,9 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             low_price=89,
             close_price=101,
         )
-        service = RejectedOpportunityOutcomeService(rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=101))  # type: ignore[arg-type]
+        service = RejectedOpportunityOutcomeService(
+            rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=101)
+        )  # type: ignore[arg-type]
 
         result = service.evaluate_once()
         updated = rejected_repo.list_rejections(symbol="BANKNIFTY", limit=1)[0]
@@ -525,7 +618,9 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
                 bid=99,
                 ask=101,
             ),
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            factor_scores={
+                "prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}
+            },
             market_session="REGULAR_MARKET",
         )
         second = rejected_repo.save_rejection(
@@ -535,7 +630,9 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             score=82,
             reasons=["second hits target"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            factor_scores={
+                "prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}
+            },
             market_session="REGULAR_MARKET",
         )
         self._save_candle(
@@ -547,10 +644,15 @@ class OpportunityOutcomeServiceTests(unittest.TestCase):
             low_price=99,
             close_price=120,
         )
-        service = RejectedOpportunityOutcomeService(rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=100))  # type: ignore[arg-type]
+        service = RejectedOpportunityOutcomeService(
+            rejected_repo, kite_provider_factory=lambda: FakeKiteProvider(price=100)
+        )  # type: ignore[arg-type]
 
         result = service.evaluate_batches(batch_limit=1, max_batches=3, delay_seconds=0)
-        rows = {row.id: row for row in rejected_repo.list_rejections(symbol="BANKNIFTY", limit=10)}
+        rows = {
+            row.id: row
+            for row in rejected_repo.list_rejections(symbol="BANKNIFTY", limit=10)
+        }
 
         self.assertEqual(result["evaluated"], 2)
         self.assertEqual(result["updated"], 1)

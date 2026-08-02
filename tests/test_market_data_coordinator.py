@@ -11,7 +11,9 @@ from app.services.database import init_db
 from app.services.market_data_coordinator import MarketDataCoordinator
 from app.services.opportunity_outcome_service import OpportunityOutcomeService
 from app.services.opportunity_repository import OpportunityRepository
-from app.services.rejected_opportunity_outcome_service import RejectedOpportunityOutcomeService
+from app.services.rejected_opportunity_outcome_service import (
+    RejectedOpportunityOutcomeService,
+)
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
 from app.services.trade_setup_service import OptionContract
 
@@ -35,8 +37,20 @@ class CountingProvider:
         with self.lock:
             self.instrument_count += 1
         if exchange == "NSE":
-            return [{"tradingsymbol": "NIFTY BANK", "name": "NIFTY BANK", "instrument_token": 260105}]
-        return [{"tradingsymbol": "BANKNIFTY26JUL58000CE", "exchange": exchange or "NFO", "instrument_token": 123}]
+            return [
+                {
+                    "tradingsymbol": "NIFTY BANK",
+                    "name": "NIFTY BANK",
+                    "instrument_token": 260105,
+                }
+            ]
+        return [
+            {
+                "tradingsymbol": "BANKNIFTY26JUL58000CE",
+                "exchange": exchange or "NFO",
+                "instrument_token": 123,
+            }
+        ]
 
 
 class MarketDataCoordinatorTests(unittest.TestCase):
@@ -89,11 +103,15 @@ class MarketDataCoordinatorTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=5) as executor:
             results = list(executor.map(call_quote, range(5)))
 
-        self.assertTrue(all(result[instrument]["last_price"] == 121.0 for result in results))
+        self.assertTrue(
+            all(result[instrument]["last_price"] == 121.0 for result in results)
+        )
         self.assertEqual(provider.quote_count, 1)
         self.assertGreaterEqual(coordinator.status()["quote_inflight_reused"], 1)
 
-    def test_rejected_outcome_does_not_infer_first_touch_from_shared_current_quote(self) -> None:
+    def test_rejected_outcome_does_not_infer_first_touch_from_shared_current_quote(
+        self,
+    ) -> None:
         provider = CountingProvider(price=121.0)
         coordinator = MarketDataCoordinator(lambda: provider, quote_ttl_seconds=5)
         opportunity_repo = OpportunityRepository()
@@ -113,7 +131,16 @@ class MarketDataCoordinatorTests(unittest.TestCase):
             score=85,
         )
         opportunity_repo.save_opportunity(signal)
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", date.today().isoformat(), 58000, "CE", 15)
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            date.today().isoformat(),
+            58000,
+            "CE",
+            15,
+        )
         rejected_repo.save_rejection(
             symbol="BANKNIFTY",
             side="BUY",
@@ -121,7 +148,9 @@ class MarketDataCoordinatorTests(unittest.TestCase):
             score=82,
             reasons=["final weighted score is below threshold"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            factor_scores={
+                "prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}
+            },
             market_session="REGULAR_MARKET",
         )
         rejected_service = RejectedOpportunityOutcomeService(
@@ -141,7 +170,10 @@ class MarketDataCoordinatorTests(unittest.TestCase):
 
         self.assertEqual(result["closed"], 1)
         self.assertEqual(result["rejected_opportunities"]["updated"], 0)
-        self.assertEqual(result["rejected_opportunities"]["results"][0]["reason"], "chronological_outcome_pending")
+        self.assertEqual(
+            result["rejected_opportunities"]["results"][0]["reason"],
+            "chronological_outcome_pending",
+        )
         self.assertEqual(provider.quote_count, 1)
 
 

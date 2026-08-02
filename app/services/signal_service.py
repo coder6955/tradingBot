@@ -41,7 +41,9 @@ class SignalService:
         enforce_score_threshold: bool = True,
     ) -> Signal:
         if enforce_score_threshold and score < settings.min_signal_score:
-            raise ValueError(f"score must be at least {settings.min_signal_score} to qualify")
+            raise ValueError(
+                f"score must be at least {settings.min_signal_score} to qualify"
+            )
 
         bullish = trend.lower() == "bullish"
         if side.upper() == "SELL":
@@ -49,14 +51,26 @@ class SignalService:
         else:
             option_type = "CE" if bullish else "PE"
         action = f"{side.upper()}_{option_type}"
-        strike = strike if strike is not None else (20000.0 if symbol.upper() == "NIFTY" else 50000.0)
+        strike = (
+            strike
+            if strike is not None
+            else (20000.0 if symbol.upper() == "NIFTY" else 50000.0)
+        )
         expiry = expiry or "weekly"
-        entry_price = entry_price if entry_price is not None else (150.0 if symbol.upper() == "NIFTY" else 200.0)
+        entry_price = (
+            entry_price
+            if entry_price is not None
+            else (150.0 if symbol.upper() == "NIFTY" else 200.0)
+        )
         stop_loss = stop_loss if stop_loss is not None else entry_price * 0.9
         target_1 = target_1 if target_1 is not None else entry_price * 1.12
         target_2 = target_2 if target_2 is not None else entry_price * 1.2
         target_3 = target_3 if target_3 is not None else entry_price * 1.3
-        probability_text = f"calibrated probability estimate of {probability:.0%}" if probability is not None else "an uncalibrated heuristic confidence score"
+        probability_text = (
+            f"calibrated probability estimate of {probability:.0%}"
+            if probability is not None
+            else "an uncalibrated heuristic confidence score"
+        )
         if enforce_score_threshold:
             qualification_text = f"The score of {score}/100 and {probability_text} exceed the configured threshold."
         else:
@@ -96,18 +110,40 @@ class SignalService:
             liquidity_score=liquidity_score,
             factor_scores=factor_scores or {},
             risk_notes=risk_notes or [],
-            bankNiftySpecificScore=int(banknifty_fields.get("bankNiftySpecificScore") or 0),
-            topBankAlignment=banknifty_fields.get("topBankAlignment") if isinstance(banknifty_fields.get("topBankAlignment"), dict) else None,
-            privateBankStrength=float(banknifty_fields.get("privateBankStrength") or 0.0),
+            bankNiftySpecificScore=int(
+                banknifty_fields.get("bankNiftySpecificScore") or 0
+            ),
+            topBankAlignment=banknifty_fields.get("topBankAlignment")
+            if isinstance(banknifty_fields.get("topBankAlignment"), dict)
+            else None,
+            privateBankStrength=float(
+                banknifty_fields.get("privateBankStrength") or 0.0
+            ),
             psuBankStrength=float(banknifty_fields.get("psuBankStrength") or 0.0),
-            relativeStrengthVsNifty=banknifty_fields.get("relativeStrengthVsNifty") if isinstance(banknifty_fields.get("relativeStrengthVsNifty"), dict) else None,
-            openingRangeStatus=banknifty_fields.get("openingRangeStatus") if isinstance(banknifty_fields.get("openingRangeStatus"), dict) else None,
-            optionPremiumConfirmation=banknifty_fields.get("optionPremiumConfirmation") if isinstance(banknifty_fields.get("optionPremiumConfirmation"), dict) else None,
-            expectedMoveCheck=banknifty_fields.get("expectedMoveCheck") if isinstance(banknifty_fields.get("expectedMoveCheck"), dict) else None,
-            dteMode=banknifty_fields.get("dteMode") if isinstance(banknifty_fields.get("dteMode"), dict) else None,
-            eventDayMode=banknifty_fields.get("eventDayMode") if isinstance(banknifty_fields.get("eventDayMode"), dict) else None,
-            nearestMajorZone=banknifty_fields.get("nearestMajorZone") if isinstance(banknifty_fields.get("nearestMajorZone"), dict) else None,
-            optionChainNearAtmSignal=banknifty_fields.get("optionChainNearAtmSignal") if isinstance(banknifty_fields.get("optionChainNearAtmSignal"), dict) else None,
+            relativeStrengthVsNifty=banknifty_fields.get("relativeStrengthVsNifty")
+            if isinstance(banknifty_fields.get("relativeStrengthVsNifty"), dict)
+            else None,
+            openingRangeStatus=banknifty_fields.get("openingRangeStatus")
+            if isinstance(banknifty_fields.get("openingRangeStatus"), dict)
+            else None,
+            optionPremiumConfirmation=banknifty_fields.get("optionPremiumConfirmation")
+            if isinstance(banknifty_fields.get("optionPremiumConfirmation"), dict)
+            else None,
+            expectedMoveCheck=banknifty_fields.get("expectedMoveCheck")
+            if isinstance(banknifty_fields.get("expectedMoveCheck"), dict)
+            else None,
+            dteMode=banknifty_fields.get("dteMode")
+            if isinstance(banknifty_fields.get("dteMode"), dict)
+            else None,
+            eventDayMode=banknifty_fields.get("eventDayMode")
+            if isinstance(banknifty_fields.get("eventDayMode"), dict)
+            else None,
+            nearestMajorZone=banknifty_fields.get("nearestMajorZone")
+            if isinstance(banknifty_fields.get("nearestMajorZone"), dict)
+            else None,
+            optionChainNearAtmSignal=banknifty_fields.get("optionChainNearAtmSignal")
+            if isinstance(banknifty_fields.get("optionChainNearAtmSignal"), dict)
+            else None,
             dayType=str(banknifty_fields.get("dayType") or ""),
             noTradeReasons=list(banknifty_fields.get("noTradeReasons") or []),
             tradeQuality=str(banknifty_fields.get("tradeQuality") or ""),

@@ -72,26 +72,49 @@ class EpisodeReservationService:
         EXPIRED: "EXPIRED",
     }
 
-    def identity(self, signal: Signal, *, metadata: dict[str, Any] | None = None) -> dict[str, str]:
+    def identity(
+        self, signal: Signal, *, metadata: dict[str, Any] | None = None
+    ) -> dict[str, str]:
         details = dict(metadata or {})
         factors = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
-        strategy = factors.get("strategy_metadata") if isinstance(factors.get("strategy_metadata"), dict) else {}
-        family = factors.get("setup_family") if isinstance(factors.get("setup_family"), dict) else {}
+        strategy = (
+            factors.get("strategy_metadata")
+            if isinstance(factors.get("strategy_metadata"), dict)
+            else {}
+        )
+        family = (
+            factors.get("setup_family")
+            if isinstance(factors.get("setup_family"), dict)
+            else {}
+        )
         lineage = current_strategy_lineage()
-        strategy_version = str(strategy.get("strategy_version") or lineage["strategy_version"])
+        strategy_version = str(
+            strategy.get("strategy_version") or lineage["strategy_version"]
+        )
         config_hash = str(strategy.get("config_hash") or lineage["config_hash"])
         setup_family = str(family.get("name") or signal.setup_type or "unclassified")
-        trigger_price = self._float(details.get("trigger_price") or factors.get("entry_trigger_price") or signal.entry_price)
+        trigger_price = self._float(
+            details.get("trigger_price")
+            or factors.get("entry_trigger_price")
+            or signal.entry_price
+        )
         trigger_identifier = str(
             details.get("trigger_identifier")
             or details.get("armed_setup_id")
             or details.get("setup_id")
             or f"{setup_family}:{round(trigger_price, 2)}"
         )
-        generated_at = self._datetime(details.get("setup_generated_at") or details.get("armed_at")) or ist_now_naive()
+        generated_at = (
+            self._datetime(details.get("setup_generated_at") or details.get("armed_at"))
+            or ist_now_naive()
+        )
         window = max(1, int(settings.setup_episode_window_seconds))
         bucket = int(generated_at.timestamp()) // window
-        token = signal.instrument_token or (factors.get("contract", {}).get("instrument_token") if isinstance(factors.get("contract"), dict) else None)
+        token = signal.instrument_token or (
+            factors.get("contract", {}).get("instrument_token")
+            if isinstance(factors.get("contract"), dict)
+            else None
+        )
         raw = "|".join(
             [
                 str(details.get("trading_date") or generated_at.date().isoformat()),
@@ -123,7 +146,9 @@ class EpisodeReservationService:
     ) -> dict[str, Any]:
         identity = identity_override or self.identity(signal, metadata=metadata)
         now = ist_now_naive()
-        expires = now + timedelta(seconds=max(1, int(settings.setup_episode_reservation_seconds)))
+        expires = now + timedelta(
+            seconds=max(1, int(settings.setup_episode_reservation_seconds))
+        )
         reservation_token = uuid.uuid4().hex
         target_state = self.ORDER_PENDING if order_intent is not None else self.RESERVED
         intent_values = self._intent_values(order_intent, now=now)
@@ -143,7 +168,9 @@ class EpisodeReservationService:
                 tradingsymbol=signal.tradingsymbol,
                 expiry=signal.expiry,
                 strike=signal.strike,
-                trigger_price=self._float((metadata or {}).get("trigger_price") or signal.entry_price),
+                trigger_price=self._float(
+                    (metadata or {}).get("trigger_price") or signal.entry_price
+                ),
                 strategy_version=identity["strategy_version"],
                 config_hash=identity["config_hash"],
                 setup_family=identity["setup_family"],
@@ -162,11 +189,23 @@ class EpisodeReservationService:
                 return self._result(record, acquired=True)
             except IntegrityError:
                 session.rollback()
-                record = session.query(SetupEpisodeRecord).filter(SetupEpisodeRecord.episode_key == identity["episode_key"]).first()
+                record = (
+                    session.query(SetupEpisodeRecord)
+                    .filter(SetupEpisodeRecord.episode_key == identity["episode_key"])
+                    .first()
+                )
 
             if record is None:
-                return {**identity, "acquired": False, "reason": "EPISODE_RESERVATION_FAILED"}
-            expired_reservation = record.state == self.RESERVED and record.reservation_expires_at and record.reservation_expires_at <= now
+                return {
+                    **identity,
+                    "acquired": False,
+                    "reason": "EPISODE_RESERVATION_FAILED",
+                }
+            expired_reservation = (
+                record.state == self.RESERVED
+                and record.reservation_expires_at
+                and record.reservation_expires_at <= now
+            )
             reservable = record.state == self.AVAILABLE or expired_reservation
             if reservable:
                 previous_state = record.state
@@ -176,42 +215,55 @@ class EpisodeReservationService:
                 )
                 if expired_reservation:
                     reservation_query = reservation_query.filter(
-                        SetupEpisodeRecord.reservation_token == record.reservation_token,
-                        SetupEpisodeRecord.reservation_expires_at == record.reservation_expires_at,
+                        SetupEpisodeRecord.reservation_token
+                        == record.reservation_token,
+                        SetupEpisodeRecord.reservation_expires_at
+                        == record.reservation_expires_at,
                     )
-                updated = (
-                    reservation_query
-                    .update(
-                        {
-                            SetupEpisodeRecord.state: target_state,
-                            SetupEpisodeRecord.reservation_token: reservation_token,
-                            SetupEpisodeRecord.reserved_at: now,
-                            SetupEpisodeRecord.reservation_expires_at: expires,
-                            SetupEpisodeRecord.updated_at: now,
-                            SetupEpisodeRecord.last_transition_reason: "expired_reservation_reclaimed" if expired_reservation else "pre_order_reservation",
-                            **intent_values,
-                        },
-                        synchronize_session=False,
-                    )
+                updated = reservation_query.update(
+                    {
+                        SetupEpisodeRecord.state: target_state,
+                        SetupEpisodeRecord.reservation_token: reservation_token,
+                        SetupEpisodeRecord.reserved_at: now,
+                        SetupEpisodeRecord.reservation_expires_at: expires,
+                        SetupEpisodeRecord.updated_at: now,
+                        SetupEpisodeRecord.last_transition_reason: "expired_reservation_reclaimed"
+                        if expired_reservation
+                        else "pre_order_reservation",
+                        **intent_values,
+                    },
+                    synchronize_session=False,
                 )
                 session.commit()
                 if updated == 1:
                     refreshed = session.get(SetupEpisodeRecord, record.id)
                     return self._result(refreshed, acquired=True)
-            return self._result(record, acquired=False, reason=f"DUPLICATE_EPISODE_{record.state}")
+            return self._result(
+                record, acquired=False, reason=f"DUPLICATE_EPISODE_{record.state}"
+            )
         finally:
             session.close()
 
     def status(self, episode_key: str) -> dict[str, Any] | None:
         session = get_session()
         try:
-            record = session.query(SetupEpisodeRecord).filter(SetupEpisodeRecord.episode_key == episode_key).first()
+            record = (
+                session.query(SetupEpisodeRecord)
+                .filter(SetupEpisodeRecord.episode_key == episode_key)
+                .first()
+            )
             return self._result(record, acquired=False) if record is not None else None
         finally:
             session.close()
 
     def mark_order_pending(self, episode_key: str, reservation_token: str) -> bool:
-        return self._transition(episode_key, self.RESERVED, self.ORDER_PENDING, reservation_token, "order_submission_started")
+        return self._transition(
+            episode_key,
+            self.RESERVED,
+            self.ORDER_PENDING,
+            reservation_token,
+            "order_submission_started",
+        )
 
     def reserve_order_intent(
         self,
@@ -235,11 +287,18 @@ class EpisodeReservationService:
             "risk_policy_version": risk_decision.get("risk_policy_version"),
             "approved_risk_tier": risk_decision.get("approved_tier"),
             "approved_risk_amount": risk_decision.get("approved_risk_amount"),
-            "estimated_total_loss_at_stop": risk_decision.get("estimated_total_loss_at_stop"),
+            "estimated_total_loss_at_stop": risk_decision.get(
+                "estimated_total_loss_at_stop"
+            ),
             "evidence_event_id": evidence_event_id,
             "metadata": metadata or {},
         }
-        return self.reserve(signal, metadata=metadata, order_intent=intent, identity_override=identity_override)
+        return self.reserve(
+            signal,
+            metadata=metadata,
+            order_intent=intent,
+            identity_override=identity_override,
+        )
 
     def mark_submitted(
         self,
@@ -274,7 +333,9 @@ class EpisodeReservationService:
         finally:
             session.close()
 
-    def mark_evidence_status(self, episode_key: str, evidence_event_id: str, status: str) -> bool:
+    def mark_evidence_status(
+        self, episode_key: str, evidence_event_id: str, status: str
+    ) -> bool:
         session = get_session()
         try:
             updated = (
@@ -299,12 +360,18 @@ class EpisodeReservationService:
     def recoverable_order_intents(self) -> list[dict[str, Any]]:
         session = get_session()
         try:
-            rows = session.query(SetupEpisodeRecord).filter(SetupEpisodeRecord.state == self.ORDER_PENDING).all()
+            rows = (
+                session.query(SetupEpisodeRecord)
+                .filter(SetupEpisodeRecord.state == self.ORDER_PENDING)
+                .all()
+            )
             return [self._result(row, acquired=False) for row in rows]
         finally:
             session.close()
 
-    def mark_open(self, episode_key: str, reservation_token: str, *, trade_id: int | None = None) -> bool:
+    def mark_open(
+        self, episode_key: str, reservation_token: str, *, trade_id: int | None = None
+    ) -> bool:
         return self._transition(
             episode_key,
             self.ORDER_PENDING,
@@ -352,7 +419,9 @@ class EpisodeReservationService:
 
     def canonical_state(self, persisted_state: str) -> str:
         """Map transitional persisted labels into the shared lifecycle vocabulary."""
-        return self.PERSISTED_TO_CANONICAL.get(str(persisted_state), str(persisted_state))
+        return self.PERSISTED_TO_CANONICAL.get(
+            str(persisted_state), str(persisted_state)
+        )
 
     def validate_canonical_transition(self, current: str, target: str) -> bool:
         return str(target) in self.CANONICAL_TRANSITIONS.get(str(current), set())
@@ -372,9 +441,14 @@ class EpisodeReservationService:
             return False
         session = get_session()
         try:
-            query = session.query(SetupEpisodeRecord).filter(SetupEpisodeRecord.episode_key == episode_key, SetupEpisodeRecord.state == current)
+            query = session.query(SetupEpisodeRecord).filter(
+                SetupEpisodeRecord.episode_key == episode_key,
+                SetupEpisodeRecord.state == current,
+            )
             if reservation_token is not None:
-                query = query.filter(SetupEpisodeRecord.reservation_token == reservation_token)
+                query = query.filter(
+                    SetupEpisodeRecord.reservation_token == reservation_token
+                )
             values: dict[Any, Any] = {
                 SetupEpisodeRecord.state: target,
                 SetupEpisodeRecord.updated_at: ist_now_naive(),
@@ -389,13 +463,21 @@ class EpisodeReservationService:
         finally:
             session.close()
 
-    def _result(self, record: SetupEpisodeRecord | None, *, acquired: bool, reason: str | None = None) -> dict[str, Any]:
+    def _result(
+        self,
+        record: SetupEpisodeRecord | None,
+        *,
+        acquired: bool,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
         return {
             "episode_key": getattr(record, "episode_key", None),
             "episode_id": getattr(record, "id", None),
             "state": getattr(record, "state", None),
             "canonical_state": self.canonical_state(getattr(record, "state", "")),
-            "reservation_token": getattr(record, "reservation_token", None) if acquired else None,
+            "reservation_token": getattr(record, "reservation_token", None)
+            if acquired
+            else None,
             "acquired": acquired,
             "reason": reason,
             "order_mode": getattr(record, "order_mode", None),
@@ -407,7 +489,9 @@ class EpisodeReservationService:
             "order_intent": self._json(getattr(record, "order_intent_json", None)),
         }
 
-    def _intent_values(self, order_intent: dict[str, Any] | None, *, now: datetime) -> dict[Any, Any]:
+    def _intent_values(
+        self, order_intent: dict[str, Any] | None, *, now: datetime
+    ) -> dict[Any, Any]:
         if order_intent is None:
             return {}
         return {
@@ -437,7 +521,9 @@ class EpisodeReservationService:
             return value.replace(tzinfo=None)
         if value:
             try:
-                return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+                return datetime.fromisoformat(
+                    str(value).replace("Z", "+00:00")
+                ).replace(tzinfo=None)
             except ValueError:
                 return None
         return None

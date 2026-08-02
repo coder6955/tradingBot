@@ -50,9 +50,14 @@ class MarketDataRuntimeService:
         self.last_stop_result = self.active_price_feed.stop()
         return dict(self.last_stop_result)
 
-    def refresh_credentials(self, *, access_token: str | None = None, restart_if_enabled: bool = True) -> dict[str, Any]:
+    def refresh_credentials(
+        self, *, access_token: str | None = None, restart_if_enabled: bool = True
+    ) -> dict[str, Any]:
         self.websocket_feed.refresh_credentials(access_token=access_token)
-        result: dict[str, Any] = {"credentials_refreshed": True, "restart_requested": False}
+        result: dict[str, Any] = {
+            "credentials_refreshed": True,
+            "restart_requested": False,
+        }
         if restart_if_enabled and settings.enable_kite_websocket:
             result["restart_requested"] = True
             result["start"] = self.start()
@@ -80,7 +85,9 @@ class MarketDataRuntimeService:
             "running": status.get("running"),
             "connected": status.get("websocket_connected"),
             "market_session": status.get("market_session"),
-            "duplicate_start_prevented_count": status.get("duplicate_start_prevented_count"),
+            "duplicate_start_prevented_count": status.get(
+                "duplicate_start_prevented_count"
+            ),
             "reconnect_count": status.get("reconnect_count"),
             "disconnect_count": status.get("disconnect_count"),
             "last_error": status.get("last_error"),
@@ -94,7 +101,11 @@ class MarketDataRuntimeService:
 
         if not settings.enable_kite_websocket:
             return "DISABLED"
-        if not settings.kite_api_key or not (self.websocket_feed.access_token or load_access_token() or settings.kite_access_token):
+        if not settings.kite_api_key or not (
+            self.websocket_feed.access_token
+            or load_access_token()
+            or settings.kite_access_token
+        ):
             return "AUTH_REQUIRED"
         if session != "REGULAR_MARKET" and not connected:
             return "MARKET_CLOSED"
@@ -106,8 +117,16 @@ class MarketDataRuntimeService:
             return "FAILED"
         if connected:
             max_tick_age = websocket.get("max_tick_age")
-            has_tokens = bool(websocket.get("active_trade_tokens") or websocket.get("subscribed_tokens") or websocket.get("desired_tokens"))
-            if has_tokens and isinstance(max_tick_age, (int, float)) and max_tick_age > settings.websocket_price_stale_seconds:
+            has_tokens = bool(
+                websocket.get("active_trade_tokens")
+                or websocket.get("subscribed_tokens")
+                or websocket.get("desired_tokens")
+            )
+            if (
+                has_tokens
+                and isinstance(max_tick_age, (int, float))
+                and max_tick_age > settings.websocket_price_stale_seconds
+            ):
                 return "STALE"
             return "CONNECTED"
         if running:
@@ -125,5 +144,9 @@ class MarketDataRuntimeService:
         if state == "STALE":
             return "websocket_tick_stale"
         if state == "FAILED":
-            return websocket.get("last_error") or websocket.get("reconnect_skipped_reason") or "websocket_failed"
+            return (
+                websocket.get("last_error")
+                or websocket.get("reconnect_skipped_reason")
+                or "websocket_failed"
+            )
         return websocket.get("reconnect_skipped_reason") or websocket.get("last_reason")

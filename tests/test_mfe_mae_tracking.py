@@ -20,7 +20,9 @@ class MfeMaeFeed:
         self.price = price
         self.last_reason = None
 
-    def latest_price(self, *, provider, exchange, tradingsymbol, instrument_token=None, mode="paper"):
+    def latest_price(
+        self, *, provider, exchange, tradingsymbol, instrument_token=None, mode="paper"
+    ):
         return PriceTick(
             instrument=f"{exchange}:{tradingsymbol}",
             price=self.price,
@@ -46,11 +48,28 @@ class MfeMaeFeed:
 class MfeMaeProvider:
     def instruments(self, exchange=None):
         if exchange == "NFO":
-            return [{"tradingsymbol": "BANKNIFTY26JUL58000CE", "exchange": "NFO", "instrument_token": 123}]
-        return [{"tradingsymbol": "NIFTY BANK", "name": "NIFTY BANK", "instrument_token": 260105}]
+            return [
+                {
+                    "tradingsymbol": "BANKNIFTY26JUL58000CE",
+                    "exchange": "NFO",
+                    "instrument_token": 123,
+                }
+            ]
+        return [
+            {
+                "tradingsymbol": "NIFTY BANK",
+                "name": "NIFTY BANK",
+                "instrument_token": 260105,
+            }
+        ]
 
     def quote(self, instruments):
-        return {instruments[0]: {"last_price": 112.0, "depth": {"buy": [{"price": 111.5}], "sell": [{"price": 112.0}]}}}
+        return {
+            instruments[0]: {
+                "last_price": 112.0,
+                "depth": {"buy": [{"price": 111.5}], "sell": [{"price": 112.0}]},
+            }
+        }
 
 
 class MfeMaeTrackingTests(unittest.TestCase):
@@ -90,9 +109,15 @@ class MfeMaeTrackingTests(unittest.TestCase):
     def test_trade_mfe_mae_tracks_winner_multiple_updates(self) -> None:
         trade = self._create_trade()
 
-        self.repo.update_mfe_mae(trade.id, price=94.0, price_timestamp=datetime(2026, 7, 6, 9, 16))
-        self.repo.update_mfe_mae(trade.id, price=142.0, price_timestamp=datetime(2026, 7, 6, 9, 19))
-        self.repo.update_mfe_mae(trade.id, price=130.0, price_timestamp=datetime(2026, 7, 6, 9, 20))
+        self.repo.update_mfe_mae(
+            trade.id, price=94.0, price_timestamp=datetime(2026, 7, 6, 9, 16)
+        )
+        self.repo.update_mfe_mae(
+            trade.id, price=142.0, price_timestamp=datetime(2026, 7, 6, 9, 19)
+        )
+        self.repo.update_mfe_mae(
+            trade.id, price=130.0, price_timestamp=datetime(2026, 7, 6, 9, 20)
+        )
         updated = self.repo.get_trade(trade.id)
 
         self.assertIsNotNone(updated)
@@ -156,9 +181,30 @@ class MfeMaeTrackingTests(unittest.TestCase):
         ]
         option_candles = {
             "BANKNIFTY26JUL58000CE": [
-                SimpleNamespace(timestamp=start, open_price=100, high_price=101, low_price=99, close_price=100, volume=1000),
-                SimpleNamespace(timestamp=start + timedelta(minutes=5), open_price=101, high_price=112, low_price=96, close_price=108, volume=1000),
-                SimpleNamespace(timestamp=start + timedelta(minutes=10), open_price=108, high_price=118, low_price=91, close_price=110, volume=1000),
+                SimpleNamespace(
+                    timestamp=start,
+                    open_price=100,
+                    high_price=101,
+                    low_price=99,
+                    close_price=100,
+                    volume=1000,
+                ),
+                SimpleNamespace(
+                    timestamp=start + timedelta(minutes=5),
+                    open_price=101,
+                    high_price=112,
+                    low_price=96,
+                    close_price=108,
+                    volume=1000,
+                ),
+                SimpleNamespace(
+                    timestamp=start + timedelta(minutes=10),
+                    open_price=108,
+                    high_price=118,
+                    low_price=91,
+                    close_price=110,
+                    volume=1000,
+                ),
             ]
         }
 
@@ -195,7 +241,9 @@ class MfeMaeTrackingTests(unittest.TestCase):
         finally:
             session.close()
 
-        report = ProfessionalInsightsService().research_engine_report(symbol="BANKNIFTY", limit=10)
+        report = ProfessionalInsightsService().research_engine_report(
+            symbol="BANKNIFTY", limit=10
+        )
 
         self.assertEqual(report["mfe_mae"]["tracked_trades"], 0)
         self.assertEqual(report["mfe_mae"]["missing_trades"], 1)
@@ -218,7 +266,13 @@ class MfeMaeTrackingTests(unittest.TestCase):
             score=90,
             factor_scores={"setup_family": {"name": "unit_setup", "group": "unit"}},
         )
-        return self.repo.create_trade(signal, mode="paper", status="filled", requested_quantity=15, placed_quantity=15)
+        return self.repo.create_trade(
+            signal,
+            mode="paper",
+            status="filled",
+            requested_quantity=15,
+            placed_quantity=15,
+        )
 
 
 if __name__ == "__main__":

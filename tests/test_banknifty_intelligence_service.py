@@ -17,25 +17,39 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
         init_db(f"sqlite:///{self.temp_db.name}")
         from app.services import banknifty_intelligence_service
 
-        self._original_first_trade_time = banknifty_intelligence_service.settings.banknifty_first_trade_time
-        object.__setattr__(banknifty_intelligence_service.settings, "banknifty_first_trade_time", "00:00")
+        self._original_first_trade_time = (
+            banknifty_intelligence_service.settings.banknifty_first_trade_time
+        )
+        object.__setattr__(
+            banknifty_intelligence_service.settings,
+            "banknifty_first_trade_time",
+            "00:00",
+        )
         self.service = BankNiftyIntelligenceService(today=lambda: date(2026, 7, 20))
         self._seed_banknifty_candles(last_close=58220)
 
     def tearDown(self) -> None:
         from app.services import banknifty_intelligence_service
 
-        object.__setattr__(banknifty_intelligence_service.settings, "banknifty_first_trade_time", self._original_first_trade_time)
+        object.__setattr__(
+            banknifty_intelligence_service.settings,
+            "banknifty_first_trade_time",
+            self._original_first_trade_time,
+        )
         try:
             if os.path.exists(self.temp_db.name):
                 os.remove(self.temp_db.name)
         except PermissionError:
             pass
 
-    def test_ce_allowed_when_banks_relative_strength_premium_and_day_align(self) -> None:
+    def test_ce_allowed_when_banks_relative_strength_premium_and_day_align(
+        self,
+    ) -> None:
         result = self._evaluate(
             trend="bullish",
-            market_snapshots=self._market_snapshots(bank_move=0.7, nifty_move=0.2, bank_constituent_move=0.8),
+            market_snapshots=self._market_snapshots(
+                bank_move=0.7, nifty_move=0.2, bank_constituent_move=0.8
+            ),
         )
 
         self.assertTrue(result["passed"])
@@ -43,7 +57,9 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
         self.assertIn(result["details"]["tradeQuality"], {"A_PLUS", "A", "B"})
 
     def test_no_trade_when_top_banks_are_mixed(self) -> None:
-        snapshots = self._market_snapshots(bank_move=0.6, nifty_move=0.2, bank_constituent_move=0.7)
+        snapshots = self._market_snapshots(
+            bank_move=0.6, nifty_move=0.2, bank_constituent_move=0.7
+        )
         snapshots["HDFCBANK"] = self._snapshot(-0.4)
         snapshots["ICICIBANK"] = self._snapshot(-0.3)
         snapshots["AXISBANK"] = self._snapshot(-0.3)
@@ -53,13 +69,22 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
         result = self._evaluate(trend="bullish", market_snapshots=snapshots)
 
         self.assertFalse(result["passed"])
-        self.assertIn("top banks are mixed against Bank Nifty direction", result["hard_reasons"])
+        self.assertIn(
+            "top banks are mixed against Bank Nifty direction", result["hard_reasons"]
+        )
 
     def test_no_trade_when_premium_does_not_confirm(self) -> None:
         result = self._evaluate(
             trend="bullish",
-            market_snapshots=self._market_snapshots(bank_move=0.7, nifty_move=0.2, bank_constituent_move=0.8),
-            premium_eval={"passed": False, "score": 35, "reasons": ["option premium is not expanding"], "details": {}},
+            market_snapshots=self._market_snapshots(
+                bank_move=0.7, nifty_move=0.2, bank_constituent_move=0.8
+            ),
+            premium_eval={
+                "passed": False,
+                "score": 35,
+                "reasons": ["option premium is not expanding"],
+                "details": {},
+            },
         )
 
         self.assertFalse(result["passed"])
@@ -71,7 +96,9 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
         result = self._evaluate(
             trend="bullish",
             snapshot={"price": 58040, "vwap": 58035},
-            market_snapshots=self._market_snapshots(bank_move=0.7, nifty_move=0.2, bank_constituent_move=0.8),
+            market_snapshots=self._market_snapshots(
+                bank_move=0.7, nifty_move=0.2, bank_constituent_move=0.8
+            ),
         )
 
         self.assertFalse(result["passed"])
@@ -80,25 +107,47 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
     def test_no_trade_when_expected_move_is_too_small(self) -> None:
         result = self._evaluate(
             trend="bullish",
-            market_snapshots=self._market_snapshots(bank_move=0.7, nifty_move=0.2, bank_constituent_move=0.8),
-            prices={"entry_price": 500, "stop_loss": 420, "target_1": 900, "target_2": 1000, "target_3": 1100, "risk_reward": 5},
+            market_snapshots=self._market_snapshots(
+                bank_move=0.7, nifty_move=0.2, bank_constituent_move=0.8
+            ),
+            prices={
+                "entry_price": 500,
+                "stop_loss": 420,
+                "target_1": 900,
+                "target_2": 1000,
+                "target_3": 1100,
+                "risk_reward": 5,
+            },
         )
 
         self.assertTrue(result["passed"])
-        self.assertIn("expected move is smaller than option premium target requirement", result["soft_reasons"])
+        self.assertIn(
+            "expected move is smaller than option premium target requirement",
+            result["soft_reasons"],
+        )
 
     def test_event_day_downgrades_confidence(self) -> None:
         from app.services import banknifty_intelligence_service
 
         original = banknifty_intelligence_service.settings.banknifty_event_dates
         try:
-            object.__setattr__(banknifty_intelligence_service.settings, "banknifty_event_dates", ist_today().isoformat())
+            object.__setattr__(
+                banknifty_intelligence_service.settings,
+                "banknifty_event_dates",
+                ist_today().isoformat(),
+            )
             result = self._evaluate(
                 trend="bullish",
-                market_snapshots=self._market_snapshots(bank_move=0.7, nifty_move=0.2, bank_constituent_move=0.8),
+                market_snapshots=self._market_snapshots(
+                    bank_move=0.7, nifty_move=0.2, bank_constituent_move=0.8
+                ),
             )
         finally:
-            object.__setattr__(banknifty_intelligence_service.settings, "banknifty_event_dates", original)
+            object.__setattr__(
+                banknifty_intelligence_service.settings,
+                "banknifty_event_dates",
+                original,
+            )
 
         self.assertIn("eventDayMode", result["details"])
         self.assertLess(result["score"], 100)
@@ -106,8 +155,15 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
     def test_range_day_blocks_option_buying(self) -> None:
         result = self._evaluate(
             trend="bullish",
-            market_snapshots=self._market_snapshots(bank_move=0.7, nifty_move=0.2, bank_constituent_move=0.8),
-            day_type_eval={"passed": False, "score": 35, "reasons": ["range"], "details": {"day_type": "rotation_range"}},
+            market_snapshots=self._market_snapshots(
+                bank_move=0.7, nifty_move=0.2, bank_constituent_move=0.8
+            ),
+            day_type_eval={
+                "passed": False,
+                "score": 35,
+                "reasons": ["range"],
+                "details": {"day_type": "rotation_range"},
+            },
         )
 
         self.assertFalse(result["passed"])
@@ -123,7 +179,10 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
 
         self.assertLess(alignment["coverage_by_weight"], 0.70)
         self.assertFalse(alignment["hard_gate_eligible"])
-        self.assertIn("top bank constituent live weight coverage is incomplete", result["soft_reasons"])
+        self.assertIn(
+            "top bank constituent live weight coverage is incomplete",
+            result["soft_reasons"],
+        )
 
     def test_opposing_heavyweights_block_even_when_small_banks_support(self) -> None:
         snapshots = self._market_snapshots(0.6, 0.2, 0.7)
@@ -133,7 +192,10 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
         result = self._evaluate(market_snapshots=snapshots)
 
         self.assertFalse(result["passed"])
-        self.assertIn("opposing heavyweight bank participation is too large", result["hard_reasons"])
+        self.assertIn(
+            "opposing heavyweight bank participation is too large",
+            result["hard_reasons"],
+        )
 
     def test_broad_participation_reports_full_weight_coverage(self) -> None:
         result = self._evaluate(market_snapshots=self._market_snapshots(0.6, 0.2, 0.7))
@@ -152,7 +214,9 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
         alignment = result["details"]["topBankAlignment"]
         self.assertTrue(alignment["snapshot"]["stale"])
         self.assertFalse(alignment["hard_gate_eligible"])
-        self.assertIn("Bank Nifty constituent weights are stale", result["soft_reasons"])
+        self.assertIn(
+            "Bank Nifty constituent weights are stale", result["soft_reasons"]
+        )
 
     def test_snapshot_contains_current_official_constituent_change(self) -> None:
         symbols = set(self.service.constituent_symbols())
@@ -189,20 +253,37 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
             bid=179,
             ask=180,
         )
-        prices = overrides.get("prices") or {"entry_price": 180, "stop_loss": 145, "target_1": 240, "target_2": 270, "target_3": 320, "risk_reward": 1.7}
+        prices = overrides.get("prices") or {
+            "entry_price": 180,
+            "stop_loss": 145,
+            "target_1": 240,
+            "target_2": 270,
+            "target_3": 320,
+            "risk_reward": 1.7,
+        }
         premium_eval = overrides.get("premium_eval") or {
             "passed": True,
             "score": 80,
             "reasons": [],
-            "details": {"last_close": 182, "option_vwap": 175, "participation_confirmed": True},
+            "details": {
+                "last_close": 182,
+                "option_vwap": 175,
+                "participation_confirmed": True,
+            },
         }
-        day_type_eval = overrides.get("day_type_eval") or {"passed": True, "score": 90, "reasons": [], "details": {"day_type": "trend_expansion"}}
+        day_type_eval = overrides.get("day_type_eval") or {
+            "passed": True,
+            "score": 90,
+            "reasons": [],
+            "details": {"day_type": "trend_expansion"},
+        }
         snapshot = {"price": 58220, "vwap": 58120, **overrides.get("snapshot", {})}
         service = overrides.get("service") or self.service
         return service.evaluate(
             trend=overrides.get("trend", "bullish"),
             snapshot=snapshot,
-            market_snapshots=overrides.get("market_snapshots") or self._market_snapshots(0.6, 0.2, 0.7),
+            market_snapshots=overrides.get("market_snapshots")
+            or self._market_snapshots(0.6, 0.2, 0.7),
             contract=contract,
             chain_contracts=self._chain_contracts(),
             prices=prices,
@@ -210,7 +291,9 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
             day_type_eval=day_type_eval,
         )
 
-    def _market_snapshots(self, bank_move: float, nifty_move: float, bank_constituent_move: float) -> dict[str, dict[str, float]]:
+    def _market_snapshots(
+        self, bank_move: float, nifty_move: float, bank_constituent_move: float
+    ) -> dict[str, dict[str, float]]:
         snapshots = {
             "BANKNIFTY": self._snapshot(bank_move),
             "NIFTY": self._snapshot(nifty_move),
@@ -221,7 +304,11 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
 
     def _snapshot(self, move_pct: float) -> dict[str, float]:
         previous = 100.0
-        return {"price": previous * (1 + move_pct / 100), "previous_day_close": previous, "day_open": previous}
+        return {
+            "price": previous * (1 + move_pct / 100),
+            "previous_day_close": previous,
+            "day_open": previous,
+        }
 
     def _seed_banknifty_candles(self, last_close: float) -> None:
         today = ist_today().isoformat()
@@ -229,19 +316,86 @@ class BankNiftyIntelligenceServiceTests(unittest.TestCase):
             "BANKNIFTY",
             "5minute",
             [
-                {"timestamp": f"{today} 09:15:00", "open": 58000, "high": 58100, "low": 57900, "close": 58060, "volume": 1000},
-                {"timestamp": f"{today} 09:20:00", "open": 58060, "high": 58120, "low": 58020, "close": 58080, "volume": 1200},
-                {"timestamp": f"{today} 09:25:00", "open": 58080, "high": 58140, "low": 58000, "close": 58100, "volume": 1300},
-                {"timestamp": f"{today} 09:30:00", "open": 58100, "high": 58160, "low": 58060, "close": 58150, "volume": 1400},
-                {"timestamp": f"{today} 09:35:00", "open": 58150, "high": 58280, "low": 58120, "close": last_close, "volume": 2000},
+                {
+                    "timestamp": f"{today} 09:15:00",
+                    "open": 58000,
+                    "high": 58100,
+                    "low": 57900,
+                    "close": 58060,
+                    "volume": 1000,
+                },
+                {
+                    "timestamp": f"{today} 09:20:00",
+                    "open": 58060,
+                    "high": 58120,
+                    "low": 58020,
+                    "close": 58080,
+                    "volume": 1200,
+                },
+                {
+                    "timestamp": f"{today} 09:25:00",
+                    "open": 58080,
+                    "high": 58140,
+                    "low": 58000,
+                    "close": 58100,
+                    "volume": 1300,
+                },
+                {
+                    "timestamp": f"{today} 09:30:00",
+                    "open": 58100,
+                    "high": 58160,
+                    "low": 58060,
+                    "close": 58150,
+                    "volume": 1400,
+                },
+                {
+                    "timestamp": f"{today} 09:35:00",
+                    "open": 58150,
+                    "high": 58280,
+                    "low": 58120,
+                    "close": last_close,
+                    "volume": 2000,
+                },
             ],
         )
 
     def _chain_contracts(self) -> list[OptionContract]:
         rows = []
         for strike in [58000, 58100, 58200, 58300, 58400]:
-            rows.append(OptionContract("BNCE", "NFO", 1, "BANKNIFTY", "2026-07-26", strike, "CE", 15, 100, 10000, 2000, 99, 100))
-            rows.append(OptionContract("BNPE", "NFO", 1, "BANKNIFTY", "2026-07-26", strike, "PE", 15, 100, 16000, 2500, 99, 100))
+            rows.append(
+                OptionContract(
+                    "BNCE",
+                    "NFO",
+                    1,
+                    "BANKNIFTY",
+                    "2026-07-26",
+                    strike,
+                    "CE",
+                    15,
+                    100,
+                    10000,
+                    2000,
+                    99,
+                    100,
+                )
+            )
+            rows.append(
+                OptionContract(
+                    "BNPE",
+                    "NFO",
+                    1,
+                    "BANKNIFTY",
+                    "2026-07-26",
+                    strike,
+                    "PE",
+                    15,
+                    100,
+                    16000,
+                    2500,
+                    99,
+                    100,
+                )
+            )
         return rows
 
 

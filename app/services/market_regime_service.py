@@ -54,12 +54,18 @@ class MarketRegimeService:
 
         vix_value = float((vix or {}).get("price") or 0.0)
         if vix_value > 0:
-            limit = settings.max_vix_for_selling if side.upper() == "SELL" else settings.max_vix_for_buying
+            limit = (
+                settings.max_vix_for_selling
+                if side.upper() == "SELL"
+                else settings.max_vix_for_buying
+            )
             if vix_value <= limit:
                 score += 15
             else:
                 score -= 20
-                reasons.append(f"India VIX {vix_value:.2f} is above configured limit {limit:.2f}")
+                reasons.append(
+                    f"India VIX {vix_value:.2f} is above configured limit {limit:.2f}"
+                )
         else:
             reasons.append("India VIX was unavailable; regime score reduced")
             score -= 5
@@ -74,27 +80,51 @@ class MarketRegimeService:
             price_action_eval=price_action_eval or {},
             premium_eval=premium_eval or {},
         )
-        if settings.enable_hierarchical_market_state and dimensions["available_dimensions"]:
+        if (
+            settings.enable_hierarchical_market_state
+            and dimensions["available_dimensions"]
+        ):
             # Preserve the broad-market score while adding independent structure,
             # volatility, participation, location, and execution evidence.
             score = round(score * 0.45 + dimensions["score"] * 0.55)
         state = self._state(dimensions, trend)
         confidence = dimensions["confidence"]
         uncertainty = dimensions["uncertainty"]
-        option_buying_suitable = state in {
-            "trend_expansion",
-            "directional_acceptance",
-            "compression_breakout",
-            "failed_auction_reversal",
-        } and confidence >= settings.market_state_min_confidence
+        option_buying_suitable = (
+            state
+            in {
+                "trend_expansion",
+                "directional_acceptance",
+                "compression_breakout",
+                "failed_auction_reversal",
+            }
+            and confidence >= settings.market_state_min_confidence
+        )
         enriched_context_supplied = any(
             value
-            for value in (snapshot, multi_timeframe, banknifty_eval, volatility_eval, day_type_eval, price_action_eval, premium_eval)
+            for value in (
+                snapshot,
+                multi_timeframe,
+                banknifty_eval,
+                volatility_eval,
+                day_type_eval,
+                price_action_eval,
+                premium_eval,
+            )
         )
-        safety_block = enriched_context_supplied and state in {"data_uncertain", "execution_untradable"}
-        abstention_code = self._abstention_code(state, option_buying_suitable, uncertainty)
+        safety_block = enriched_context_supplied and state in {
+            "data_uncertain",
+            "execution_untradable",
+        }
+        abstention_code = self._abstention_code(
+            state, option_buying_suitable, uncertainty
+        )
 
-        passed = score >= settings.min_market_regime_score and calendar["passed"] and not safety_block
+        passed = (
+            score >= settings.min_market_regime_score
+            and calendar["passed"]
+            and not safety_block
+        )
         if score < settings.min_market_regime_score:
             reasons.append("market regime score is below threshold")
         if safety_block:
@@ -137,21 +167,43 @@ class MarketRegimeService:
         mtf_available = int(multi_timeframe.get("available_timeframes") or 0)
         structure_score = float(multi_timeframe.get("alignment_score") or 0.0)
         if not mtf_available:
-            structure_score = 65.0 if bool(snapshot.get("trend_bullish")) == desired_bullish else 35.0 if "trend_bullish" in snapshot else 50.0
+            structure_score = (
+                65.0
+                if bool(snapshot.get("trend_bullish")) == desired_bullish
+                else 35.0
+                if "trend_bullish" in snapshot
+                else 50.0
+            )
 
         volatility_score = float(volatility_eval.get("score") or 50.0)
         vol_available = bool(volatility_eval)
-        premium = premium_eval.get("details", {}) if isinstance(premium_eval.get("details"), dict) else {}
+        premium = (
+            premium_eval.get("details", {})
+            if isinstance(premium_eval.get("details"), dict)
+            else {}
+        )
         participation_score = float(premium_eval.get("score") or 50.0)
         if snapshot.get("volume_confirmed"):
             participation_score = min(100.0, participation_score + 10.0)
-        bank_details = banknifty_eval.get("details", {}) if isinstance(banknifty_eval.get("details"), dict) else {}
-        room = bank_details.get("expectedMoveCheck", {}) if isinstance(bank_details.get("expectedMoveCheck"), dict) else {}
+        bank_details = (
+            banknifty_eval.get("details", {})
+            if isinstance(banknifty_eval.get("details"), dict)
+            else {}
+        )
+        room = (
+            bank_details.get("expectedMoveCheck", {})
+            if isinstance(bank_details.get("expectedMoveCheck"), dict)
+            else {}
+        )
         location_score = 50.0
         if room:
             coverage = float(room.get("coverage") or room.get("bestCoverage") or 0.0)
             location_score = max(20.0, min(90.0, 35.0 + coverage * 35.0))
-        price_details = price_action_eval.get("details", {}) if isinstance(price_action_eval.get("details"), dict) else {}
+        price_details = (
+            price_action_eval.get("details", {})
+            if isinstance(price_action_eval.get("details"), dict)
+            else {}
+        )
         if price_details.get("hard_block"):
             location_score = min(location_score, 20.0)
 
@@ -159,8 +211,22 @@ class MarketRegimeService:
         execution_score = 70.0 if premium else 50.0
         if spread > 0:
             execution_score = max(0.0, min(100.0, 100.0 - spread * 12.0))
-        available = sum((bool(snapshot), bool(mtf_available), vol_available, bool(premium), bool(price_action_eval or banknifty_eval)))
-        values = [structure_score, volatility_score, participation_score, location_score, execution_score]
+        available = sum(
+            (
+                bool(snapshot),
+                bool(mtf_available),
+                vol_available,
+                bool(premium),
+                bool(price_action_eval or banknifty_eval),
+            )
+        )
+        values = [
+            structure_score,
+            volatility_score,
+            participation_score,
+            location_score,
+            execution_score,
+        ]
         score = sum(values) / len(values)
         dispersion = sum(abs(value - score) for value in values) / (len(values) * 100.0)
         coverage_uncertainty = 1.0 - available / 5.0
@@ -168,11 +234,28 @@ class MarketRegimeService:
         confidence = max(0.0, min(1.0, (score / 100.0) * (1.0 - uncertainty)))
         return {
             "dimensions": {
-                "structure": {"score": round(structure_score, 2), "source": "multi_timeframe" if mtf_available else "snapshot_fallback"},
-                "volatility": {"score": round(volatility_score, 2), "classification": volatility_eval.get("classification")},
-                "participation": {"score": round(participation_score, 2), "premium_breakout": bool(premium.get("breakout"))},
-                "location": {"score": round(location_score, 2), "price_action_hard_block": bool(price_details.get("hard_block"))},
-                "execution": {"score": round(execution_score, 2), "spread_pct": spread or None},
+                "structure": {
+                    "score": round(structure_score, 2),
+                    "source": "multi_timeframe"
+                    if mtf_available
+                    else "snapshot_fallback",
+                },
+                "volatility": {
+                    "score": round(volatility_score, 2),
+                    "classification": volatility_eval.get("classification"),
+                },
+                "participation": {
+                    "score": round(participation_score, 2),
+                    "premium_breakout": bool(premium.get("breakout")),
+                },
+                "location": {
+                    "score": round(location_score, 2),
+                    "price_action_hard_block": bool(price_details.get("hard_block")),
+                },
+                "execution": {
+                    "score": round(execution_score, 2),
+                    "spread_pct": spread or None,
+                },
             },
             "score": score,
             "confidence": round(confidence, 3),
@@ -181,7 +264,10 @@ class MarketRegimeService:
         }
 
     def _state(self, dimensions: Dict[str, Any], trend: str) -> str:
-        if not dimensions["available_dimensions"] or dimensions["uncertainty"] > settings.market_state_max_uncertainty:
+        if (
+            not dimensions["available_dimensions"]
+            or dimensions["uncertainty"] > settings.market_state_max_uncertainty
+        ):
             return "data_uncertain"
         values = dimensions["dimensions"]
         if values["execution"]["score"] < 35:
@@ -202,8 +288,13 @@ class MarketRegimeService:
             return "balanced_rotation"
         return "transition"
 
-    def _abstention_code(self, state: str, suitable: bool, uncertainty: float) -> str | None:
-        if state == "data_uncertain" or uncertainty > settings.market_state_max_uncertainty:
+    def _abstention_code(
+        self, state: str, suitable: bool, uncertainty: float
+    ) -> str | None:
+        if (
+            state == "data_uncertain"
+            or uncertainty > settings.market_state_max_uncertainty
+        ):
             return "MARKET_STATE_DATA_UNCERTAIN"
         if state == "execution_untradable":
             return "EXECUTION_QUALITY_UNTRADABLE"
@@ -229,11 +320,19 @@ class MarketRegimeService:
         now = datetime.now(ZoneInfo("Asia/Kolkata"))
         today = now.date().isoformat()
 
-        blocked_dates = {item.strip() for item in settings.blocked_event_dates.split(",") if item.strip()}
+        blocked_dates = {
+            item.strip()
+            for item in settings.blocked_event_dates.split(",")
+            if item.strip()
+        }
         if today in blocked_dates:
             reasons.append(f"{today} is configured as a blocked event date")
 
-        blocked_symbols = {item.strip().upper() for item in settings.blocked_symbols.split(",") if item.strip()}
+        blocked_symbols = {
+            item.strip().upper()
+            for item in settings.blocked_symbols.split(",")
+            if item.strip()
+        }
         if symbol.upper() in blocked_symbols:
             reasons.append(f"{symbol.upper()} is configured as blocked")
 

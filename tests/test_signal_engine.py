@@ -24,7 +24,9 @@ class SignalEngineTests(unittest.TestCase):
         self.assertGreater(signal.score, 80)
         self.assertGreater(signal.confidence, 0.8)
 
-    def test_ranking_only_scanner_path_can_generate_below_legacy_score_threshold(self) -> None:
+    def test_ranking_only_scanner_path_can_generate_below_legacy_score_threshold(
+        self,
+    ) -> None:
         signal_service = SignalService()
         with self.assertRaises(ValueError):
             signal_service.generate_signal(

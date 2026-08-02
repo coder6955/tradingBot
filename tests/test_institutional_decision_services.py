@@ -37,12 +37,16 @@ def candles(step: float, count: int = 30):
 
 class InstitutionalDecisionServiceTests(unittest.TestCase):
     def test_one_completed_candle_spike_cannot_choose_direction(self) -> None:
-        result = classify_completed_structure([58000, 58000, 58000, 58000, 58000, 58400])
+        result = classify_completed_structure(
+            [58000, 58000, 58000, 58000, 58000, 58400]
+        )
 
         self.assertTrue(result["ready"])
         self.assertEqual(result["direction"], "neutral")
 
-    def test_multi_timeframe_service_keeps_timeframe_responsibilities_separate(self) -> None:
+    def test_multi_timeframe_service_keeps_timeframe_responsibilities_separate(
+        self,
+    ) -> None:
         service = MultiTimeframeContextService()
         result = service.evaluate(
             symbol="BANKNIFTY",
@@ -53,14 +57,20 @@ class InstitutionalDecisionServiceTests(unittest.TestCase):
 
         self.assertTrue(result["passed"])
         self.assertEqual(result["available_timeframes"], 2)
-        self.assertEqual(result["responsibilities"]["1minute"], "entry_timing_and_fast_confirmation")
+        self.assertEqual(
+            result["responsibilities"]["1minute"], "entry_timing_and_fast_confirmation"
+        )
         self.assertEqual(
             result["responsibilities"]["5minute"],
             "setup_direction_regime_day_structure_and_completed_confirmation",
         )
-        self.assertEqual(result["responsibilities"]["tick"], "execution_and_fill_confirmation")
+        self.assertEqual(
+            result["responsibilities"]["tick"], "execution_and_fill_confirmation"
+        )
 
-    def test_hierarchical_market_state_exposes_dimensions_and_invalidation(self) -> None:
+    def test_hierarchical_market_state_exposes_dimensions_and_invalidation(
+        self,
+    ) -> None:
         result = MarketRegimeService().evaluate(
             symbol="BANKNIFTY",
             trend="bullish",
@@ -71,20 +81,33 @@ class InstitutionalDecisionServiceTests(unittest.TestCase):
             snapshot={"trend_bullish": True, "volume_confirmed": True},
             multi_timeframe={"available_timeframes": 2, "alignment_score": 82},
             volatility_eval={"score": 72, "classification": "expansion_supported"},
-            premium_eval={"score": 78, "details": {"breakout": True, "spread_pct": 0.8}},
+            premium_eval={
+                "score": 78,
+                "details": {"breakout": True, "spread_pct": 0.8},
+            },
             price_action_eval={"score": 80, "details": {}},
         )
 
         self.assertEqual(result["regime"], "trend_expansion")
         self.assertTrue(result["option_buying_suitable"])
-        self.assertEqual(set(result["dimensions"]), {"structure", "volatility", "participation", "location", "execution"})
+        self.assertEqual(
+            set(result["dimensions"]),
+            {"structure", "volatility", "participation", "location", "execution"},
+        )
         self.assertTrue(result["invalidation"])
 
     def test_momentum_phase_rejects_exhaustion_instead_of_chasing(self) -> None:
         result = MomentumPhaseService().evaluate(
             trend="bullish",
             snapshot={"rsi": 84, "adx": 34, "volume_confirmed": True},
-            premium_eval={"score": 85, "details": {"breakout": True, "volume_expansion": True, "premium_change_pct": 12}},
+            premium_eval={
+                "score": 85,
+                "details": {
+                    "breakout": True,
+                    "volume_expansion": True,
+                    "premium_change_pct": 12,
+                },
+            },
             price_action={"details": {}},
             banknifty_eval={"details": {"openingRangeStatus": {"status": "breakout"}}},
             multi_timeframe={"alignment_score": 85, "regime": "trend_expansion"},
@@ -105,8 +128,16 @@ class InstitutionalDecisionServiceTests(unittest.TestCase):
                 "market_regime": {"regime": "trend_expansion", "confidence": 0.8},
                 "multi_timeframe": {"alignment_score": 80},
                 "momentum_phase": {"phase": "confirmation"},
-                "banknifty_intelligence": {"details": {"openingRangeStatus": {"status": "breakout"}, "dteMode": {"risk": "normal"}}},
-                "option_premium_confirmation": {"score": 85, "details": {"breakout": True, "volume_expansion": True}},
+                "banknifty_intelligence": {
+                    "details": {
+                        "openingRangeStatus": {"status": "breakout"},
+                        "dteMode": {"risk": "normal"},
+                    }
+                },
+                "option_premium_confirmation": {
+                    "score": 85,
+                    "details": {"breakout": True, "volume_expansion": True},
+                },
             },
         )
 
@@ -115,9 +146,47 @@ class InstitutionalDecisionServiceTests(unittest.TestCase):
         self.assertEqual(result["exit_profile"]["target_style"], "scale_on_expansion")
 
     def test_contract_and_candidate_ranking_use_executable_costs(self) -> None:
-        good = OptionContract("BANKNIFTYGOODCE", "NFO", 1, "BANKNIFTY", (datetime.now() + timedelta(days=5)).date().isoformat(), 58000, "CE", 15, 100, 50000, 5000, 99.5, 100, bid_quantity=100, ask_quantity=100, delta=0.52, theta=-2)
-        wide = OptionContract("BANKNIFTYWIDECE", "NFO", 2, "BANKNIFTY", good.expiry, 58100, "CE", 15, 100, 50000, 5000, 92, 108, bid_quantity=2, ask_quantity=2, delta=0.20, theta=-15)
-        ranked = TradeSetupService().rank_contracts(candidates=[wide, good], spot_price=58030, target_strike=58000)
+        good = OptionContract(
+            "BANKNIFTYGOODCE",
+            "NFO",
+            1,
+            "BANKNIFTY",
+            (datetime.now() + timedelta(days=5)).date().isoformat(),
+            58000,
+            "CE",
+            15,
+            100,
+            50000,
+            5000,
+            99.5,
+            100,
+            bid_quantity=100,
+            ask_quantity=100,
+            delta=0.52,
+            theta=-2,
+        )
+        wide = OptionContract(
+            "BANKNIFTYWIDECE",
+            "NFO",
+            2,
+            "BANKNIFTY",
+            good.expiry,
+            58100,
+            "CE",
+            15,
+            100,
+            50000,
+            5000,
+            92,
+            108,
+            bid_quantity=2,
+            ask_quantity=2,
+            delta=0.20,
+            theta=-15,
+        )
+        ranked = TradeSetupService().rank_contracts(
+            candidates=[wide, good], spot_price=58030, target_strike=58000
+        )
         self.assertEqual(ranked[0]["contract"].tradingsymbol, "BANKNIFTYGOODCE")
 
         candidate = TradeCandidateRankingService().evaluate(
@@ -131,20 +200,41 @@ class InstitutionalDecisionServiceTests(unittest.TestCase):
         )
         self.assertTrue(candidate["eligible"])
         self.assertIsNone(candidate["expected_net_value"])
-        self.assertEqual(candidate["expectancy_source"], "unavailable_until_outcome_calibration")
+        self.assertEqual(
+            candidate["expectancy_source"], "unavailable_until_outcome_calibration"
+        )
 
     def test_evidence_matrix_does_not_mix_rejections_into_expectancy(self) -> None:
         service = EvidenceMatrixService()
         accepted = [
-            {"setup_family": "opening_breakout_continuation", "market_regime": "trend_expansion", "direction": "CALL", "pnl": 120},
-            {"setup_family": "opening_breakout_continuation", "market_regime": "trend_expansion", "direction": "CALL", "pnl": -40},
+            {
+                "setup_family": "opening_breakout_continuation",
+                "market_regime": "trend_expansion",
+                "direction": "CALL",
+                "pnl": 120,
+            },
+            {
+                "setup_family": "opening_breakout_continuation",
+                "market_regime": "trend_expansion",
+                "direction": "CALL",
+                "pnl": -40,
+            },
         ]
         rejected = [
-            {"setup_family": "opening_breakout_continuation", "market_regime": "trend_expansion", "direction": "CALL"}
+            {
+                "setup_family": "opening_breakout_continuation",
+                "market_regime": "trend_expansion",
+                "direction": "CALL",
+            }
             for _ in range(10)
         ]
-        with patch.object(service, "_accepted", return_value=accepted), patch.object(service, "_rejected", return_value=rejected):
-            report = service.report(group_by=["setup_family", "market_regime", "direction"])
+        with (
+            patch.object(service, "_accepted", return_value=accepted),
+            patch.object(service, "_rejected", return_value=rejected),
+        ):
+            report = service.report(
+                group_by=["setup_family", "market_regime", "direction"]
+            )
 
         row = report["groups"][0]
         self.assertEqual(row["trades"], 2)
@@ -152,9 +242,13 @@ class InstitutionalDecisionServiceTests(unittest.TestCase):
         self.assertEqual(row["expectancy_per_trade"], 40)
 
     def test_promotion_service_is_advisory_and_never_self_modifies(self) -> None:
-        evidence = SimpleNamespace(report=lambda **kwargs: {"groups": [], "accepted_outcomes": 0})
+        evidence = SimpleNamespace(
+            report=lambda **kwargs: {"groups": [], "accepted_outcomes": 0}
+        )
         validations = SimpleNamespace(recent=lambda limit=100: [])
-        result = StrategyPromotionService(evidence=evidence, validations=validations).evaluate()
+        result = StrategyPromotionService(
+            evidence=evidence, validations=validations
+        ).evaluate()
 
         self.assertFalse(result["promotion_eligible"])
         self.assertFalse(result["automatic_live_mutation"])
@@ -162,7 +256,15 @@ class InstitutionalDecisionServiceTests(unittest.TestCase):
 
     def test_exit_service_uses_setup_family_exit_profile(self) -> None:
         service = TradeExitService.__new__(TradeExitService)
-        factors = {"setup_family": {"exit_profile": {"time_stop_minutes": 7, "trail_after_r": 1.2, "target_style": "gamma_scalp"}}}
+        factors = {
+            "setup_family": {
+                "exit_profile": {
+                    "time_stop_minutes": 7,
+                    "trail_after_r": 1.2,
+                    "target_style": "gamma_scalp",
+                }
+            }
+        }
         trade = SimpleNamespace(
             side="BUY",
             average_price=100,

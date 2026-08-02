@@ -17,7 +17,10 @@ class SetupFamilyClassifierServiceTests(unittest.TestCase):
                         "dteMode": {"risk": "normal"},
                     }
                 },
-                "option_premium_confirmation": {"score": 80, "details": {"last_close": 105, "option_vwap": 101}},
+                "option_premium_confirmation": {
+                    "score": 80,
+                    "details": {"last_close": 105, "option_vwap": 101},
+                },
             },
         )
 
@@ -41,7 +44,12 @@ class SetupFamilyClassifierServiceTests(unittest.TestCase):
                 },
                 "option_premium_confirmation": {
                     "score": 80,
-                    "details": {"breakout": True, "volume_expansion": True, "last_close": 105, "option_vwap": 101},
+                    "details": {
+                        "breakout": True,
+                        "volume_expansion": True,
+                        "last_close": 105,
+                        "option_vwap": 101,
+                    },
                 },
             },
         )
@@ -57,7 +65,10 @@ class SetupFamilyClassifierServiceTests(unittest.TestCase):
             snapshot={"price": 57900, "vwap": 58020},
             factor_scores={
                 "banknifty_intelligence": {"details": {"dteMode": {"risk": "normal"}}},
-                "option_premium_confirmation": {"score": 72, "details": {"last_close": 112, "option_vwap": 110}},
+                "option_premium_confirmation": {
+                    "score": 72,
+                    "details": {"last_close": 112, "option_vwap": 110},
+                },
             },
         )
 
@@ -77,7 +88,10 @@ class SetupFamilyClassifierServiceTests(unittest.TestCase):
                         "dteMode": {"risk": "near_expiry", "mode": "gamma_scalp"},
                     }
                 },
-                "option_premium_confirmation": {"score": 82, "details": {"breakout": True}},
+                "option_premium_confirmation": {
+                    "score": 82,
+                    "details": {"breakout": True},
+                },
             },
         )
 

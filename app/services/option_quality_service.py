@@ -13,9 +13,21 @@ class OptionQualityService:
     def __init__(self, greeks_service: GreeksService | None = None) -> None:
         self.greeks_service = greeks_service or GreeksService()
 
-    def evaluate(self, *, spot_price: float, contract: OptionContract, entry_price: float, side: str) -> dict[str, Any]:
+    def evaluate(
+        self,
+        *,
+        spot_price: float,
+        contract: OptionContract,
+        entry_price: float,
+        side: str,
+    ) -> dict[str, Any]:
         if side.upper() != "BUY":
-            return {"score": 100, "passed": True, "reasons": [], "details": {"skipped": "quality gate applies to option buying"}}
+            return {
+                "score": 100,
+                "passed": True,
+                "reasons": [],
+                "details": {"skipped": "quality gate applies to option buying"},
+            }
 
         reasons: list[str] = []
         score = 100

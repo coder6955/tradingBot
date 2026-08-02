@@ -5,7 +5,9 @@ from app.services.auto_trader_service import AutoTraderService
 
 
 class FakeScanner:
-    def scan_symbols(self, symbols=None, side="BUY", order_mode="paper", rejection_source="scanner"):  # type: ignore[no-untyped-def]
+    def scan_symbols(
+        self, symbols=None, side="BUY", order_mode="paper", rejection_source="scanner"
+    ):  # type: ignore[no-untyped-def]
         return [
             Signal(
                 symbol="NIFTY",
@@ -24,13 +26,21 @@ class FakeOrderService:
     def __init__(self) -> None:
         self.calls = 0
 
-    def place_signal_order(self, signal, confirm_live=False, opportunity_id=None, order_mode="paper"):  # type: ignore[no-untyped-def]
+    def place_signal_order(
+        self, signal, confirm_live=False, opportunity_id=None, order_mode="paper"
+    ):  # type: ignore[no-untyped-def]
         self.calls += 1
-        return {"status": order_mode, "symbol": signal.tradingsymbol, "confirm_live": confirm_live}
+        return {
+            "status": order_mode,
+            "symbol": signal.tradingsymbol,
+            "confirm_live": confirm_live,
+        }
 
 
 class AutoTraderServiceTests(unittest.TestCase):
-    def test_paper_scan_once_records_repeated_qualified_signals_for_learning(self) -> None:
+    def test_paper_scan_once_records_repeated_qualified_signals_for_learning(
+        self,
+    ) -> None:
         order_service = FakeOrderService()
         service = AutoTraderService(
             scanner_factory=lambda: FakeScanner(),  # type: ignore[arg-type]

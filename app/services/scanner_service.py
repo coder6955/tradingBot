@@ -23,7 +23,9 @@ from app.providers.token_store import load_access_token
 from app.services.market_regime_service import MarketRegimeService
 from app.services.market_session_service import MarketSessionService
 from app.services.option_chain_service import OptionChainService
-from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
+from app.services.option_premium_confirmation_service import (
+    OptionPremiumConfirmationService,
+)
 from app.services.option_quality_service import OptionQualityService
 from app.services.outcome_learning_service import OutcomeLearningService
 from app.services.price_action_service import PriceActionService
@@ -62,7 +64,8 @@ class ScannerService:
         option_quality_service: OptionQualityService | None = None,
         strategy_edge_service: StrategyEdgeService | None = None,
         day_type_service: DayTypeService | None = None,
-        option_premium_confirmation_service: OptionPremiumConfirmationService | None = None,
+        option_premium_confirmation_service: OptionPremiumConfirmationService
+        | None = None,
         time_bucket_edge_service: TimeBucketEdgeService | None = None,
         outcome_learning_service: OutcomeLearningService | None = None,
         banknifty_intelligence_service: BankNiftyIntelligenceService | None = None,
@@ -92,24 +95,49 @@ class ScannerService:
         self.option_quality_service = option_quality_service or OptionQualityService()
         self.strategy_edge_service = strategy_edge_service or StrategyEdgeService()
         self.day_type_service = day_type_service or DayTypeService()
-        self.option_premium_confirmation_service = option_premium_confirmation_service or OptionPremiumConfirmationService()
-        self.time_bucket_edge_service = time_bucket_edge_service or TimeBucketEdgeService()
-        self.outcome_learning_service = outcome_learning_service or OutcomeLearningService()
-        self.banknifty_intelligence_service = banknifty_intelligence_service or BankNiftyIntelligenceService()
+        self.option_premium_confirmation_service = (
+            option_premium_confirmation_service or OptionPremiumConfirmationService()
+        )
+        self.time_bucket_edge_service = (
+            time_bucket_edge_service or TimeBucketEdgeService()
+        )
+        self.outcome_learning_service = (
+            outcome_learning_service or OutcomeLearningService()
+        )
+        self.banknifty_intelligence_service = (
+            banknifty_intelligence_service or BankNiftyIntelligenceService()
+        )
         self.data_freshness_service = data_freshness_service or DataFreshnessService()
-        self.rejected_opportunity_repository = rejected_opportunity_repository or RejectedOpportunityRepository()
-        self.decision_engine_service = decision_engine_service or DecisionEngineService()
+        self.rejected_opportunity_repository = (
+            rejected_opportunity_repository or RejectedOpportunityRepository()
+        )
+        self.decision_engine_service = (
+            decision_engine_service or DecisionEngineService()
+        )
         self.banknifty_option_prewarm_service = banknifty_option_prewarm_service
         self.entry_timing_service = entry_timing_service or EntryTimingService()
-        self.volatility_edge_service = volatility_edge_service or VolatilityEdgeService()
-        self.banknifty_regime_filter_service = banknifty_regime_filter_service or BankNiftyRegimeFilterService()
+        self.volatility_edge_service = (
+            volatility_edge_service or VolatilityEdgeService()
+        )
+        self.banknifty_regime_filter_service = (
+            banknifty_regime_filter_service or BankNiftyRegimeFilterService()
+        )
         self.armed_entry_tracker = armed_entry_tracker
-        self.setup_family_classifier = setup_family_classifier or SetupFamilyClassifierService()
+        self.setup_family_classifier = (
+            setup_family_classifier or SetupFamilyClassifierService()
+        )
         self.fast_scan_context_service = fast_scan_context_service
-        self.multi_timeframe_context_service = multi_timeframe_context_service or MultiTimeframeContextService()
+        self.multi_timeframe_context_service = (
+            multi_timeframe_context_service or MultiTimeframeContextService()
+        )
         self.momentum_phase_service = momentum_phase_service or MomentumPhaseService()
-        self.candidate_ranking_service = candidate_ranking_service or TradeCandidateRankingService()
-        self.session_eligibility_provider = session_eligibility_provider or MarketSessionService().should_run_live_modules
+        self.candidate_ranking_service = (
+            candidate_ranking_service or TradeCandidateRankingService()
+        )
+        self.session_eligibility_provider = (
+            session_eligibility_provider
+            or MarketSessionService().should_run_live_modules
+        )
         self.decision_evidence_repository = decision_evidence_repository
         self.outcome_collector = outcome_collector
         self.episode_reservation_service = EpisodeReservationService()
@@ -169,15 +197,26 @@ class ScannerService:
         trends = trends or {}
         market_contexts = market_contexts or {}
         option_instruments = self._get_option_instruments()
-        symbols = self._focus_symbols(symbols or self._derive_scan_universe(option_instruments))
+        symbols = self._focus_symbols(
+            symbols or self._derive_scan_universe(option_instruments)
+        )
         market_snapshots = self._market_snapshots(symbols)
         enforce_budget = str(order_mode).lower() == "live"
 
         for symbol in symbols:
-            snapshot = dict(market_snapshots.get(symbol) or self.feed.get_snapshot(symbol))
-            if "analysis_ready" in snapshot and not bool(snapshot.get("analysis_ready")):
-                quality_reasons = [str(item) for item in (snapshot.get("data_quality_reasons") or [])]
-                reasons = ["canonical completed-candle analysis was not ready", *quality_reasons]
+            snapshot = dict(
+                market_snapshots.get(symbol) or self.feed.get_snapshot(symbol)
+            )
+            if "analysis_ready" in snapshot and not bool(
+                snapshot.get("analysis_ready")
+            ):
+                quality_reasons = [
+                    str(item) for item in (snapshot.get("data_quality_reasons") or [])
+                ]
+                reasons = [
+                    "canonical completed-candle analysis was not ready",
+                    *quality_reasons,
+                ]
                 self._log_decision(
                     symbol=symbol,
                     accepted=False,
@@ -270,18 +309,33 @@ class ScannerService:
                     snapshot=snapshot,
                     rejection_source=rejection_source,
                 )
-                diagnostics.append(self._diagnostic(symbol, snapshot, 0, "neutral", "neutral", side, None, reasons))
+                diagnostics.append(
+                    self._diagnostic(
+                        symbol, snapshot, 0, "neutral", "neutral", side, None, reasons
+                    )
+                )
                 continue
 
-            fallback_direction = "bullish" if bool(snapshot.get("trend_bullish")) else "bearish"
-            inferred_trend = trends.get(symbol, structure_direction if structure_direction in {"bullish", "bearish"} else fallback_direction)
+            fallback_direction = (
+                "bullish" if bool(snapshot.get("trend_bullish")) else "bearish"
+            )
+            inferred_trend = trends.get(
+                symbol,
+                structure_direction
+                if structure_direction in {"bullish", "bearish"}
+                else fallback_direction,
+            )
             technical_score = self._technical_score(snapshot, inferred_trend)
             score = scores.get(symbol, technical_score)
             trend = inferred_trend
             market_context = market_contexts.get(symbol, snapshot["market_context"])
             reasons: list[str] = []
-            prewarm_eval = self._prewarm_banknifty_options(symbol, float(snapshot["price"]), option_instruments)
-            chain_quote_map = self._quote_chain_options(option_instruments, symbol, float(snapshot["price"]))
+            prewarm_eval = self._prewarm_banknifty_options(
+                symbol, float(snapshot["price"]), option_instruments
+            )
+            chain_quote_map = self._quote_chain_options(
+                option_instruments, symbol, float(snapshot["price"])
+            )
             contract = self.trade_setup_service.select_contract(
                 instruments=option_instruments,
                 underlying=symbol,
@@ -296,7 +350,16 @@ class ScannerService:
                     reasons.append("no NFO option instruments available from Kite")
                 else:
                     reasons.append("no matching option contract found")
-                self._log_decision(symbol=symbol, accepted=False, score=score, reasons=reasons, breakdown=self._empty_score_breakdown(), snapshot=snapshot, side=side, trend=trend)
+                self._log_decision(
+                    symbol=symbol,
+                    accepted=False,
+                    score=score,
+                    reasons=reasons,
+                    breakdown=self._empty_score_breakdown(),
+                    snapshot=snapshot,
+                    side=side,
+                    trend=trend,
+                )
                 self._save_rejection(
                     symbol=symbol,
                     side=side,
@@ -307,7 +370,18 @@ class ScannerService:
                     snapshot=snapshot,
                     rejection_source=rejection_source,
                 )
-                diagnostics.append(self._diagnostic(symbol, snapshot, score, trend, market_context, side, None, reasons))
+                diagnostics.append(
+                    self._diagnostic(
+                        symbol,
+                        snapshot,
+                        score,
+                        trend,
+                        market_context,
+                        side,
+                        None,
+                        reasons,
+                    )
+                )
                 continue
 
             entry_price = self._entry_price_from_contract(contract, side)
@@ -317,7 +391,9 @@ class ScannerService:
                 chain_quotes=chain_quote_map,
                 contract=contract,
             )
-            premium_eval = self.option_premium_confirmation_service.evaluate(contract=contract, side=side)
+            premium_eval = self.option_premium_confirmation_service.evaluate(
+                contract=contract, side=side
+            )
             quote_quality = self._selected_option_data_quality(
                 contract=contract,
                 side=side,
@@ -327,7 +403,9 @@ class ScannerService:
             if not quote_quality["passed"]:
                 risk_failures = list(quote_quality["reasons"])
                 if not freshness_eval.get("passed", False):
-                    risk_failures = list(freshness_eval.get("reasons", [])) + risk_failures
+                    risk_failures = (
+                        list(freshness_eval.get("reasons", [])) + risk_failures
+                    )
                 volatility_eval = self.volatility_edge_service.evaluate(
                     symbol=symbol,
                     contract=contract,
@@ -382,7 +460,19 @@ class ScannerService:
                     factor_scores=factor_scores,
                     rejection_source=rejection_source,
                 )
-                diagnostics.append(self._diagnostic(symbol, snapshot, score, trend, market_context, side, None, risk_failures, factor_scores))
+                diagnostics.append(
+                    self._diagnostic(
+                        symbol,
+                        snapshot,
+                        score,
+                        trend,
+                        market_context,
+                        side,
+                        None,
+                        risk_failures,
+                        factor_scores,
+                    )
+                )
                 continue
             prices = self.trade_setup_service.build_prices(
                 entry_price=entry_price,
@@ -390,11 +480,17 @@ class ScannerService:
                 underlying=symbol,
                 snapshot=snapshot,
                 contract=contract,
-                premium_structure=self._premium_structure_from_confirmation(premium_eval),
+                premium_structure=self._premium_structure_from_confirmation(
+                    premium_eval
+                ),
             )
             liquidity_score = self.trade_setup_service.liquidity_score(contract)
-            chain_contracts = self.trade_setup_service.build_contracts(option_instruments, symbol, chain_quote_map)
-            completed_candle_sets = self.multi_timeframe_context_service.load_completed_candles(symbol)
+            chain_contracts = self.trade_setup_service.build_contracts(
+                option_instruments, symbol, chain_quote_map
+            )
+            completed_candle_sets = (
+                self.multi_timeframe_context_service.load_completed_candles(symbol)
+            )
             multi_timeframe_eval = self.multi_timeframe_context_service.evaluate(
                 symbol=symbol,
                 trend=trend,
@@ -402,7 +498,11 @@ class ScannerService:
                 candle_sets=completed_candle_sets,
             )
             price_eval = self.price_action_service.evaluate(snapshot, trend, side)
-            day_type_eval = self.day_type_service.evaluate(symbol=symbol, trend=trend, candles=completed_candle_sets.get("5minute", []))
+            day_type_eval = self.day_type_service.evaluate(
+                symbol=symbol,
+                trend=trend,
+                candles=completed_candle_sets.get("5minute", []),
+            )
             market_eval = self.market_regime_service.evaluate(
                 symbol=symbol,
                 trend=trend,
@@ -442,7 +542,11 @@ class ScannerService:
                 day_type_eval=day_type_eval,
                 candles=completed_candle_sets.get("5minute", []),
             )
-            banknifty_details = banknifty_eval.get("details", {}) if isinstance(banknifty_eval.get("details"), dict) else {}
+            banknifty_details = (
+                banknifty_eval.get("details", {})
+                if isinstance(banknifty_eval.get("details"), dict)
+                else {}
+            )
             volatility_eval = self._shadow_diagnostic("volatility_edge")
             banknifty_regime_eval = self.banknifty_regime_filter_service.evaluate(
                 symbol=symbol,
@@ -538,7 +642,9 @@ class ScannerService:
                 contract=contract,
             )
             setup_family_eval = factor_scores.get("setup_family", {})
-            setup_family_eval = setup_family_eval if isinstance(setup_family_eval, dict) else {}
+            setup_family_eval = (
+                setup_family_eval if isinstance(setup_family_eval, dict) else {}
+            )
             setup_family_eval["active_decision_role"] = "shadow_diagnostic"
             setup_family_eval["applied_score_adjustment"] = 0
             factor_scores["setup_family"] = setup_family_eval
@@ -560,7 +666,12 @@ class ScannerService:
             factor_scores["outcome_learning"] = outcome_learning_eval
             factor_scores = self._with_strategy_metadata(factor_scores, order_mode)
             confidence = confidences.get(symbol, combined_score / 100.0)
-            heuristic_score_confidence = min(0.92, (combined_score / 100.0) * 0.72 + (liquidity_score / 100.0) * 0.12 + (int(chain_eval["score"]) / 100.0) * 0.08)
+            heuristic_score_confidence = min(
+                0.92,
+                (combined_score / 100.0) * 0.72
+                + (liquidity_score / 100.0) * 0.12
+                + (int(chain_eval["score"]) / 100.0) * 0.08,
+            )
             probability = None
             factor_scores["probability_estimate"] = {
                 "probability": None,
@@ -627,7 +738,10 @@ class ScannerService:
             if armed_entry_eval:
                 factor_scores = dict(factor_scores)
                 factor_scores["armed_entry"] = armed_entry_eval
-                if armed_entry_eval.get("registered") and armed_entry_eval.get("early_arm") is True:
+                if (
+                    armed_entry_eval.get("registered")
+                    and armed_entry_eval.get("early_arm") is True
+                ):
                     early_timing = self._early_entry_timing_payload(
                         contract=contract,
                         prices=prices,
@@ -685,53 +799,72 @@ class ScannerService:
                 "indicator_role": "diagnostic_only",
             }
             signal = self.signal_service.generate_signal(
-                    symbol=symbol,
-                    score=combined_score,
-                    confidence=confidence,
-                    trend=trend,
-                    market_context=market_context,
-                    strike=contract.strike,
-                    expiry=contract.expiry,
-                    entry_price=prices["entry_price"],
-                    stop_loss=prices["stop_loss"],
-                    target_1=prices["target_1"],
-                    target_2=prices["target_2"],
-                    target_3=prices["target_3"],
-                    side=side,
-                    tradingsymbol=contract.tradingsymbol,
-                    exchange=contract.exchange,
-                    instrument_token=contract.instrument_token,
-                    quantity=quantity,
-                    lot_size=contract.lot_size,
-                    probability=probability,
-                    risk_reward=prices["risk_reward"],
-                    setup_type=self._setup_type(side, trend),
-                    technical_score=score,
-                    market_regime_score=int(market_eval["score"]),
-                    price_action_score=int(price_eval["score"]),
-                    option_chain_score=int(chain_eval["score"]),
-                    liquidity_score=liquidity_score,
-                    factor_scores=factor_scores,
-                    risk_notes=[],
-                    banknifty_fields=banknifty_fields,
-                    enforce_score_threshold=False,
+                symbol=symbol,
+                score=combined_score,
+                confidence=confidence,
+                trend=trend,
+                market_context=market_context,
+                strike=contract.strike,
+                expiry=contract.expiry,
+                entry_price=prices["entry_price"],
+                stop_loss=prices["stop_loss"],
+                target_1=prices["target_1"],
+                target_2=prices["target_2"],
+                target_3=prices["target_3"],
+                side=side,
+                tradingsymbol=contract.tradingsymbol,
+                exchange=contract.exchange,
+                instrument_token=contract.instrument_token,
+                quantity=quantity,
+                lot_size=contract.lot_size,
+                probability=probability,
+                risk_reward=prices["risk_reward"],
+                setup_type=self._setup_type(side, trend),
+                technical_score=score,
+                market_regime_score=int(market_eval["score"]),
+                price_action_score=int(price_eval["score"]),
+                option_chain_score=int(chain_eval["score"]),
+                liquidity_score=liquidity_score,
+                factor_scores=factor_scores,
+                risk_notes=[],
+                banknifty_fields=banknifty_fields,
+                enforce_score_threshold=False,
             )
             self._log_decision(
-                    symbol=symbol,
-                    accepted=True,
-                    score=combined_score,
-                    reasons=[],
-                    breakdown=score_breakdown,
-                    snapshot=snapshot,
-                    side=side,
-                    trend=trend,
-                    contract=contract,
-                    factor_scores=factor_scores,
-                    prices=prices,
+                symbol=symbol,
+                accepted=True,
+                score=combined_score,
+                reasons=[],
+                breakdown=score_breakdown,
+                snapshot=snapshot,
+                side=side,
+                trend=trend,
+                contract=contract,
+                factor_scores=factor_scores,
+                prices=prices,
             )
-            diagnostics.append(self._diagnostic(symbol, snapshot, combined_score, trend, market_context, side, signal, [], factor_scores))
-        result = sorted(diagnostics, key=lambda item: (bool(item.get("signal")), int(item["score"])), reverse=True)
-        if self.fast_scan_context_service is not None and rejection_source != "fast_rally_candidate_validation":
+            diagnostics.append(
+                self._diagnostic(
+                    symbol,
+                    snapshot,
+                    combined_score,
+                    trend,
+                    market_context,
+                    side,
+                    signal,
+                    [],
+                    factor_scores,
+                )
+            )
+        result = sorted(
+            diagnostics,
+            key=lambda item: (bool(item.get("signal")), int(item["score"])),
+            reverse=True,
+        )
+        if (
+            self.fast_scan_context_service is not None
+            and rejection_source != "fast_rally_candidate_validation"
+        ):
             self._refresh_fast_scan_context(result, market_snapshots)
         return result
 
@@ -743,31 +876,81 @@ class ScannerService:
         candidates: dict[str, dict[str, object]] = {}
         completed: dict[str, list[dict[str, object]]] = {"1minute": [], "5minute": []}
         for row in diagnostics:
-            factors = row.get("factor_scores", {}) if isinstance(row.get("factor_scores"), dict) else {}
-            mtf = factors.get("multi_timeframe", {}) if isinstance(factors.get("multi_timeframe"), dict) else {}
-            for frame in mtf.get("frames", []) if isinstance(mtf.get("frames"), list) else []:
+            factors = (
+                row.get("factor_scores", {})
+                if isinstance(row.get("factor_scores"), dict)
+                else {}
+            )
+            mtf = (
+                factors.get("multi_timeframe", {})
+                if isinstance(factors.get("multi_timeframe"), dict)
+                else {}
+            )
+            for frame in (
+                mtf.get("frames", []) if isinstance(mtf.get("frames"), list) else []
+            ):
                 if not isinstance(frame, dict):
                     continue
                 timeframe = str(frame.get("timeframe") or "")
                 if timeframe in completed:
                     completed[timeframe] = [dict(frame)]
-            contract = factors.get("contract", {}) if isinstance(factors.get("contract"), dict) else {}
-            prices = factors.get("prices", {}) if isinstance(factors.get("prices"), dict) else {}
-            timing = factors.get("entry_timing", {}) if isinstance(factors.get("entry_timing"), dict) else {}
-            freshness = factors.get("data_freshness", {}) if isinstance(factors.get("data_freshness"), dict) else {}
-            bank = factors.get("banknifty_intelligence", {}) if isinstance(factors.get("banknifty_intelligence"), dict) else {}
-            bank_details = bank.get("details", {}) if isinstance(bank.get("details"), dict) else {}
-            participation = bank_details.get("topBankAlignment", {}) if isinstance(bank_details.get("topBankAlignment"), dict) else {}
-            armed = factors.get("armed_entry", {}) if isinstance(factors.get("armed_entry"), dict) else {}
+            contract = (
+                factors.get("contract", {})
+                if isinstance(factors.get("contract"), dict)
+                else {}
+            )
+            prices = (
+                factors.get("prices", {})
+                if isinstance(factors.get("prices"), dict)
+                else {}
+            )
+            timing = (
+                factors.get("entry_timing", {})
+                if isinstance(factors.get("entry_timing"), dict)
+                else {}
+            )
+            freshness = (
+                factors.get("data_freshness", {})
+                if isinstance(factors.get("data_freshness"), dict)
+                else {}
+            )
+            bank = (
+                factors.get("banknifty_intelligence", {})
+                if isinstance(factors.get("banknifty_intelligence"), dict)
+                else {}
+            )
+            bank_details = (
+                bank.get("details", {}) if isinstance(bank.get("details"), dict) else {}
+            )
+            participation = (
+                bank_details.get("topBankAlignment", {})
+                if isinstance(bank_details.get("topBankAlignment"), dict)
+                else {}
+            )
+            armed = (
+                factors.get("armed_entry", {})
+                if isinstance(factors.get("armed_entry"), dict)
+                else {}
+            )
             direction = str(row.get("trend") or "").lower()
             token = contract.get("instrument_token")
             if direction not in {"bullish", "bearish"} or not token:
                 continue
             reasons = [str(reason).lower() for reason in freshness.get("reasons", [])]
             participation_passed = bool(participation.get("hard_gate_eligible"))
-            participation_passed = participation_passed and float(participation.get("alignment") or 0.0) >= settings.banknifty_top_bank_min_alignment
-            participation_passed = participation_passed and float(participation.get("against_weight") or 0.0) < settings.banknifty_opposing_heavyweight_weight
-            rejection_reasons = [str(reason).lower() for reason in (row.get("reasons") or [])]
+            participation_passed = (
+                participation_passed
+                and float(participation.get("alignment") or 0.0)
+                >= settings.banknifty_top_bank_min_alignment
+            )
+            participation_passed = (
+                participation_passed
+                and float(participation.get("against_weight") or 0.0)
+                < settings.banknifty_opposing_heavyweight_weight
+            )
+            rejection_reasons = [
+                str(reason).lower() for reason in (row.get("reasons") or [])
+            ]
             fast_promotable_reasons = (
                 "waiting_for_entry_trigger",
                 "premium_trigger_not_broken_yet",
@@ -782,8 +965,16 @@ class ScannerService:
                 not any(marker in reason for marker in fast_promotable_reasons)
                 for reason in rejection_reasons
             )
-            strategy_metadata = factors.get("strategy_metadata", {}) if isinstance(factors.get("strategy_metadata"), dict) else {}
-            opportunity = timing.get("entry_opportunity", {}) if isinstance(timing.get("entry_opportunity"), dict) else {}
+            strategy_metadata = (
+                factors.get("strategy_metadata", {})
+                if isinstance(factors.get("strategy_metadata"), dict)
+                else {}
+            )
+            opportunity = (
+                timing.get("entry_opportunity", {})
+                if isinstance(timing.get("entry_opportunity"), dict)
+                else {}
+            )
             plan = {
                 "symbol": str(row.get("symbol") or "BANKNIFTY"),
                 "action": self._action("BUY", direction),
@@ -807,18 +998,27 @@ class ScannerService:
                 "entry_price": prices.get("entry_price"),
                 "stop_loss": prices.get("stop_loss"),
                 "target_1": prices.get("target_1"),
-                "entry_trigger_price": timing.get("entry_trigger_price") or prices.get("entry_price"),
+                "entry_trigger_price": timing.get("entry_trigger_price")
+                or prices.get("entry_price"),
                 "directional_agreement": bool(mtf.get("passed")),
                 "constituent_participation": participation_passed,
                 "data_fresh": bool(freshness.get("passed")),
-                "gap_safe": not any("gap" in reason or "websocket_disconnected" in reason for reason in reasons),
+                "gap_safe": not any(
+                    "gap" in reason or "websocket_disconnected" in reason
+                    for reason in reasons
+                ),
                 "risk_preflight": primary_safety_precomputed,
-                "selected_quote_timestamp": self._nested_value(factors, "data_quality", "selected_option", "quote_timestamp"),
-                "market_regime": (factors.get("market_regime") or {}).get("regime") if isinstance(factors.get("market_regime"), dict) else None,
+                "selected_quote_timestamp": self._nested_value(
+                    factors, "data_quality", "selected_option", "quote_timestamp"
+                ),
+                "market_regime": (factors.get("market_regime") or {}).get("regime")
+                if isinstance(factors.get("market_regime"), dict)
+                else None,
                 "opening_range": bank_details.get("openingRangeStatus"),
                 "participation": participation,
                 "strategy_score": row.get("score"),
-                "base_price": timing.get("current_premium") or prices.get("entry_price"),
+                "base_price": timing.get("current_premium")
+                or prices.get("entry_price"),
                 "opportunity_scale": opportunity.get("opportunity_scale"),
                 "expected_move_coverage": timing.get("expected_move_coverage"),
                 "room_to_level_pct": timing.get("room_to_level_pct"),
@@ -826,8 +1026,11 @@ class ScannerService:
                 "plan": plan,
             }
         self.fast_scan_context_service.refresh(
-            symbols=[str(row.get("symbol") or "BANKNIFTY") for row in diagnostics] or ["BANKNIFTY"],
-            market_snapshots={key: dict(value) for key, value in market_snapshots.items()},
+            symbols=[str(row.get("symbol") or "BANKNIFTY") for row in diagnostics]
+            or ["BANKNIFTY"],
+            market_snapshots={
+                key: dict(value) for key, value in market_snapshots.items()
+            },
             completed_candles=completed,
             candidates=candidates,
         )
@@ -848,7 +1051,9 @@ class ScannerService:
             "details": {},
         }
 
-    def _derive_scan_universe(self, option_instruments: List[dict[str, object]]) -> List[str]:
+    def _derive_scan_universe(
+        self, option_instruments: List[dict[str, object]]
+    ) -> List[str]:
         if not option_instruments:
             return self.DEFAULT_UNIVERSE
 
@@ -862,30 +1067,58 @@ class ScannerService:
         return (priority + remaining)[: settings.max_scan_symbols]
 
     def _focus_symbols(self, symbols: List[str]) -> List[str]:
-        focused = [symbol.upper() for symbol in symbols if symbol.upper() in self.FOCUS_UNDERLYINGS]
+        focused = [
+            symbol.upper()
+            for symbol in symbols
+            if symbol.upper() in self.FOCUS_UNDERLYINGS
+        ]
         return focused or self.DEFAULT_UNIVERSE
 
-    def _prewarm_banknifty_options(self, symbol: str, spot_price: float, option_instruments: List[dict[str, object]]) -> dict[str, object]:
-        if symbol.upper() != "BANKNIFTY" or self.banknifty_option_prewarm_service is None:
-            return {"prewarm_enabled": False, "prewarm_reason": "prewarm_service_unavailable"}
+    def _prewarm_banknifty_options(
+        self,
+        symbol: str,
+        spot_price: float,
+        option_instruments: List[dict[str, object]],
+    ) -> dict[str, object]:
+        if (
+            symbol.upper() != "BANKNIFTY"
+            or self.banknifty_option_prewarm_service is None
+        ):
+            return {
+                "prewarm_enabled": False,
+                "prewarm_reason": "prewarm_service_unavailable",
+            }
         try:
             return self.banknifty_option_prewarm_service.prewarm(
                 spot_price=spot_price,
                 option_instruments=[dict(item) for item in option_instruments],
             )
         except Exception as exc:
-            return {"prewarm_enabled": settings.enable_banknifty_option_prewarm, "prewarm_reason": "prewarm_error", "message": str(exc)}
+            return {
+                "prewarm_enabled": settings.enable_banknifty_option_prewarm,
+                "prewarm_reason": "prewarm_error",
+                "message": str(exc),
+            }
 
-    def _market_snapshots(self, symbols: List[str] | None = None) -> dict[str, dict[str, object]]:
+    def _market_snapshots(
+        self, symbols: List[str] | None = None
+    ) -> dict[str, dict[str, object]]:
         if not settings.use_kite_market_data:
             return {}
         requested = {symbol.upper() for symbol in symbols or []}
         context_symbols = {"NIFTY", "BANKNIFTY", "INDIAVIX", *requested}
         if "BANKNIFTY" in requested:
-            context_symbols.update(self.banknifty_intelligence_service.constituent_symbols())
+            context_symbols.update(
+                self.banknifty_intelligence_service.constituent_symbols()
+            )
         ordered = [
             symbol
-            for symbol in ["NIFTY", "BANKNIFTY", "INDIAVIX", *self.banknifty_intelligence_service.constituent_symbols()]
+            for symbol in [
+                "NIFTY",
+                "BANKNIFTY",
+                "INDIAVIX",
+                *self.banknifty_intelligence_service.constituent_symbols(),
+            ]
             if symbol in context_symbols
         ]
         if hasattr(self.feed, "get_snapshots"):
@@ -900,15 +1133,26 @@ class ScannerService:
     ) -> dict[str, object]:
         if not hasattr(self.feed, "get_quotes") or not option_instruments:
             return {}
-        nearest_expiry = self.trade_setup_service.nearest_expiry(option_instruments, symbol)
+        nearest_expiry = self.trade_setup_service.nearest_expiry(
+            option_instruments, symbol
+        )
         candidate_rows = [
             item
             for item in option_instruments
             if self._instrument_matches(item, symbol)
             and str(item.get("instrument_type")) in {"CE", "PE"}
-            and (nearest_expiry is None or self._instrument_expiry_iso(item) == nearest_expiry)
+            and (
+                nearest_expiry is None
+                or self._instrument_expiry_iso(item) == nearest_expiry
+            )
         ]
-        strikes = sorted({self._instrument_strike(item) for item in candidate_rows if self._instrument_strike(item) > 0})
+        strikes = sorted(
+            {
+                self._instrument_strike(item)
+                for item in candidate_rows
+                if self._instrument_strike(item) > 0
+            }
+        )
         interval = self._strike_interval_from_values(strikes)
         radius = max(1, int(settings.kite_option_chain_strike_radius))
         lower = spot_price - (interval * radius)
@@ -921,7 +1165,11 @@ class ScannerService:
             ],
             key=lambda item: abs(self._instrument_strike(item) - spot_price),
         )[: max(1, int(settings.kite_option_chain_quote_limit))]
-        instruments = [f"{settings.option_exchange}:{item['tradingsymbol']}" for item in nearby if item.get("tradingsymbol")]
+        instruments = [
+            f"{settings.option_exchange}:{item['tradingsymbol']}"
+            for item in nearby
+            if item.get("tradingsymbol")
+        ]
         return self.feed.get_quotes(instruments)  # type: ignore
 
     def _quote_nearby_options(
@@ -935,14 +1183,22 @@ class ScannerService:
         if not hasattr(self.feed, "get_quotes") or not option_instruments:
             return {}
         option_type = self.trade_setup_service.option_type_for(trend, side)
-        nearby = sorted([
-            item
-            for item in option_instruments
-            if str(item.get("instrument_type")) == option_type
-            and self._instrument_matches(item, symbol)
-            and abs(float(item.get("strike") or 0.0) - spot_price) <= max(spot_price * 0.03, 250)
-        ], key=lambda item: abs(float(item.get("strike") or 0.0) - spot_price))[:80]
-        symbols = [f"{settings.option_exchange}:{item['tradingsymbol']}" for item in nearby if item.get("tradingsymbol")]
+        nearby = sorted(
+            [
+                item
+                for item in option_instruments
+                if str(item.get("instrument_type")) == option_type
+                and self._instrument_matches(item, symbol)
+                and abs(float(item.get("strike") or 0.0) - spot_price)
+                <= max(spot_price * 0.03, 250)
+            ],
+            key=lambda item: abs(float(item.get("strike") or 0.0) - spot_price),
+        )[:80]
+        symbols = [
+            f"{settings.option_exchange}:{item['tradingsymbol']}"
+            for item in nearby
+            if item.get("tradingsymbol")
+        ]
         return self.feed.get_quotes(symbols)  # type: ignore
 
     def _instrument_matches(self, item: dict[str, object], symbol: str) -> bool:
@@ -959,7 +1215,11 @@ class ScannerService:
         return text[:10] if len(text) >= 10 else text
 
     def _strike_interval_from_values(self, strikes: list[float]) -> float:
-        diffs = [strikes[idx] - strikes[idx - 1] for idx in range(1, len(strikes)) if strikes[idx] > strikes[idx - 1]]
+        diffs = [
+            strikes[idx] - strikes[idx - 1]
+            for idx in range(1, len(strikes))
+            if strikes[idx] > strikes[idx - 1]
+        ]
         return min(diffs) if diffs else 100.0
 
     def _instrument_strike(self, item: dict[str, object]) -> float:
@@ -1024,21 +1284,39 @@ class ScannerService:
         premium_eval: dict[str, object],
     ) -> dict[str, object]:
         quote_key = f"{contract.exchange}:{contract.tradingsymbol}"
-        quote_payload = quote_map.get(quote_key) or quote_map.get(contract.tradingsymbol) or {}
+        quote_payload = (
+            quote_map.get(quote_key) or quote_map.get(contract.tradingsymbol) or {}
+        )
         quote_payload = quote_payload if isinstance(quote_payload, dict) else {}
-        quote_timestamp = quote_payload.get("quote_timestamp") or quote_payload.get("timestamp")
-        quote_source = quote_payload.get("source") or ("kite_quote" if quote_payload else "missing")
+        quote_timestamp = quote_payload.get("quote_timestamp") or quote_payload.get(
+            "timestamp"
+        )
+        quote_source = quote_payload.get("source") or (
+            "kite_quote" if quote_payload else "missing"
+        )
         quote_token = self._safe_int(quote_payload.get("instrument_token"))
         token_validation_status = "quote_token_missing"
         if quote_token is not None and contract.instrument_token is not None:
-            token_validation_status = "matched" if quote_token == contract.instrument_token else "mismatch"
+            token_validation_status = (
+                "matched" if quote_token == contract.instrument_token else "mismatch"
+            )
         elif contract.instrument_token is not None:
             token_validation_status = "instrument_token_from_master_only"
 
-        details = premium_eval.get("details", {}) if isinstance(premium_eval.get("details"), dict) else {}
+        details = (
+            premium_eval.get("details", {})
+            if isinstance(premium_eval.get("details"), dict)
+            else {}
+        )
         candle_price = self._premium_reference_price(details)
         candle_timestamp = details.get("last_timestamp") or details.get("timestamp")
-        candle_source = details.get("source") or ("candles" if details.get("last_close") is not None else "snapshots" if details.get("last_price") is not None else None)
+        candle_source = details.get("source") or (
+            "candles"
+            if details.get("last_close") is not None
+            else "snapshots"
+            if details.get("last_price") is not None
+            else None
+        )
         live_price = float(contract.last_price or 0.0)
         entry_price = self._entry_price_from_contract(contract, side)
         mismatch_pct = None
@@ -1086,9 +1364,13 @@ class ScannerService:
                 "price": candle_price,
             },
             "mismatch": {
-                "mismatch_pct": round(mismatch_pct, 2) if mismatch_pct is not None else None,
+                "mismatch_pct": round(mismatch_pct, 2)
+                if mismatch_pct is not None
+                else None,
                 "tolerance_pct": settings.option_quote_premium_mismatch_tolerance_pct,
-                "reason": "option_quote_premium_mismatch" if "option_quote_premium_mismatch" in reasons else None,
+                "reason": "option_quote_premium_mismatch"
+                if "option_quote_premium_mismatch" in reasons
+                else None,
             },
         }
 
@@ -1104,8 +1386,14 @@ class ScannerService:
                 continue
         return None
 
-    def _premium_structure_from_confirmation(self, premium_eval: dict[str, object]) -> dict[str, float]:
-        details = premium_eval.get("details", {}) if isinstance(premium_eval.get("details"), dict) else {}
+    def _premium_structure_from_confirmation(
+        self, premium_eval: dict[str, object]
+    ) -> dict[str, float]:
+        details = (
+            premium_eval.get("details", {})
+            if isinstance(premium_eval.get("details"), dict)
+            else {}
+        )
         return {
             "atr": float(details.get("premium_atr") or 0.0),
             "swing_low": float(details.get("recent_low") or 0.0),
@@ -1152,29 +1440,74 @@ class ScannerService:
         multi_timeframe_eval: dict[str, object] | None = None,
         enforce_budget: bool = False,
     ) -> list[str]:
-        failures = self.trade_setup_service.risk_checks(combined_score, contract, prices["entry_price"], side, enforce_budget=enforce_budget)
+        failures = self.trade_setup_service.risk_checks(
+            combined_score,
+            contract,
+            prices["entry_price"],
+            side,
+            enforce_budget=enforce_budget,
+        )
         if prices["risk_reward"] < settings.min_risk_reward:
             failures.append("risk/reward is below threshold")
-        if contract.bid_quantity < settings.contract_min_depth_quantity or contract.ask_quantity < settings.contract_min_depth_quantity:
+        if (
+            contract.bid_quantity < settings.contract_min_depth_quantity
+            or contract.ask_quantity < settings.contract_min_depth_quantity
+        ):
             failures.append("selected option top-book depth is below threshold")
         if not (multi_timeframe_eval or {}).get("passed", False):
-            failures.extend(str(reason) for reason in (multi_timeframe_eval or {}).get("reasons", ["one_minute_and_five_minute_direction_disagree"]))
-        if settings.enable_option_premium_confirmation and not premium_eval.get("passed", False):
-            failures.extend(str(reason) for reason in premium_eval.get("reasons", ["option premium confirmation failed"]))
-        participation = banknifty_eval.get("details", {}) if isinstance(banknifty_eval.get("details"), dict) else {}
-        participation = participation.get("topBankAlignment", {}) if isinstance(participation.get("topBankAlignment"), dict) else {}
+            failures.extend(
+                str(reason)
+                for reason in (multi_timeframe_eval or {}).get(
+                    "reasons", ["one_minute_and_five_minute_direction_disagree"]
+                )
+            )
+        if settings.enable_option_premium_confirmation and not premium_eval.get(
+            "passed", False
+        ):
+            failures.extend(
+                str(reason)
+                for reason in premium_eval.get(
+                    "reasons", ["option premium confirmation failed"]
+                )
+            )
+        participation = (
+            banknifty_eval.get("details", {})
+            if isinstance(banknifty_eval.get("details"), dict)
+            else {}
+        )
+        participation = (
+            participation.get("topBankAlignment", {})
+            if isinstance(participation.get("topBankAlignment"), dict)
+            else {}
+        )
         if not participation.get("hard_gate_eligible", False):
-            failures.append("banknifty constituent participation is unavailable or incomplete")
+            failures.append(
+                "banknifty constituent participation is unavailable or incomplete"
+            )
         else:
-            if float(participation.get("alignment") or 0.0) < settings.banknifty_top_bank_min_alignment:
+            if (
+                float(participation.get("alignment") or 0.0)
+                < settings.banknifty_top_bank_min_alignment
+            ):
                 failures.append("top banks are mixed against Bank Nifty direction")
-            if float(participation.get("against_weight") or 0.0) >= settings.banknifty_opposing_heavyweight_weight:
+            if (
+                float(participation.get("against_weight") or 0.0)
+                >= settings.banknifty_opposing_heavyweight_weight
+            ):
                 failures.append("opposing heavyweight bank participation is too large")
         return list(dict.fromkeys(failures))
 
     def _entry_timing_failures(self, entry_timing_eval: dict[str, object]) -> list[str]:
-        state = str(entry_timing_eval.get("state") or entry_timing_eval.get("entry_timing_state") or "")
-        reasons = [str(reason) for reason in entry_timing_eval.get("reasons", []) if str(reason)]
+        state = str(
+            entry_timing_eval.get("state")
+            or entry_timing_eval.get("entry_timing_state")
+            or ""
+        )
+        reasons = [
+            str(reason)
+            for reason in entry_timing_eval.get("reasons", [])
+            if str(reason)
+        ]
         if state == EntryTimingService.ENTER_NOW:
             return []
         if state == EntryTimingService.TOO_LATE:
@@ -1205,7 +1538,11 @@ class ScannerService:
         gate_failures: list[str],
         scan_started_at: datetime | None = None,
     ) -> dict[str, object] | None:
-        state = str(entry_timing_eval.get("entry_timing_state") or entry_timing_eval.get("state") or "")
+        state = str(
+            entry_timing_eval.get("entry_timing_state")
+            or entry_timing_eval.get("state")
+            or ""
+        )
         early_arm = False
         effective_entry_timing = dict(entry_timing_eval)
         if state != EntryTimingService.ARMED_FOR_ENTRY:
@@ -1222,15 +1559,27 @@ class ScannerService:
             )
             if not early.get("eligible"):
                 if early.get("reason"):
-                    return {"registered": False, "reason": early.get("reason"), "early_arm": early}
+                    return {
+                        "registered": False,
+                        "reason": early.get("reason"),
+                        "early_arm": early,
+                    }
                 return None
             early_arm = True
             effective_entry_timing = dict(early["entry_timing"])
         if self.armed_entry_tracker is None:
             return {"registered": False, "reason": "armed_entry_tracker_unavailable"}
-        blocking_gate_failures = self._blocking_gate_failures_for_arming(gate_failures) if early_arm else list(gate_failures)
+        blocking_gate_failures = (
+            self._blocking_gate_failures_for_arming(gate_failures)
+            if early_arm
+            else list(gate_failures)
+        )
         if blocking_gate_failures:
-            return {"registered": False, "reason": "hard_gate_failed_before_arming", "gate_failures": list(gate_failures)}
+            return {
+                "registered": False,
+                "reason": "hard_gate_failed_before_arming",
+                "gate_failures": list(gate_failures),
+            }
         if not contract.instrument_token:
             return {"registered": False, "reason": "selected_option_token_missing"}
         if not settings.enable_kite_websocket:
@@ -1248,7 +1597,9 @@ class ScannerService:
             quantity=quantity,
             factor_scores=dict(factor_scores),
             order_mode=order_mode,
-            reasons=[str(reason) for reason in effective_entry_timing.get("reasons", [])],
+            reasons=[
+                str(reason) for reason in effective_entry_timing.get("reasons", [])
+            ],
         )
         result["early_arm"] = early_arm
         latency_metrics = getattr(self.armed_entry_tracker, "latency_metrics", None)
@@ -1256,10 +1607,17 @@ class ScannerService:
             latency_metrics.record_between(
                 "scan_start_to_armed_state",
                 scan_started_at,
-                detail={"symbol": symbol, "setup_id": result.get("setup_id"), "order_mode": order_mode},
+                detail={
+                    "symbol": symbol,
+                    "setup_id": result.get("setup_id"),
+                    "order_mode": order_mode,
+                },
             )
         if early_arm:
-            result["reason"] = result.get("reason") or "early_setup_armed_waiting_for_websocket_trigger"
+            result["reason"] = (
+                result.get("reason")
+                or "early_setup_armed_waiting_for_websocket_trigger"
+            )
             result["early_arm_policy"] = {
                 "min_score": settings.early_arm_min_score,
                 "trigger_buffer_pct": settings.early_arm_trigger_buffer_pct,
@@ -1284,32 +1642,51 @@ class ScannerService:
         if not settings.enable_early_armed_entry:
             return {}
         if side.upper() != "BUY" or symbol.upper() != "BANKNIFTY":
-            return {"eligible": False, "reason": "early_arming_only_supports_banknifty_option_buying"}
+            return {
+                "eligible": False,
+                "reason": "early_arming_only_supports_banknifty_option_buying",
+            }
         if settings.early_armed_entry_paper_only and str(order_mode).lower() != "paper":
             return {"eligible": False, "reason": "early_arming_paper_only"}
         if not self.session_eligibility_provider():
             return {"eligible": False, "reason": "early_arming_session_ineligible"}
         if not settings.early_arm_allow_premium_pending:
-            return {"eligible": False, "reason": "early_arming_premium_pending_not_allowed"}
+            return {
+                "eligible": False,
+                "reason": "early_arming_premium_pending_not_allowed",
+            }
         if not contract.instrument_token:
             return {"eligible": False, "reason": "selected_option_token_missing"}
         if contract.bid <= 0 or contract.ask <= 0 or contract.ask < contract.bid:
             return {"eligible": False, "reason": "early_arming_contract_untradeable"}
         if self._contract_spread_pct(contract) > settings.max_bid_ask_spread_pct:
             return {"eligible": False, "reason": "early_arming_spread_too_wide"}
-        if contract.bid_quantity < contract.lot_size or contract.ask_quantity < contract.lot_size:
-            return {"eligible": False, "reason": "early_arming_quantity_safe_depth_missing"}
+        if (
+            contract.bid_quantity < contract.lot_size
+            or contract.ask_quantity < contract.lot_size
+        ):
+            return {
+                "eligible": False,
+                "reason": "early_arming_quantity_safe_depth_missing",
+            }
         if not settings.enable_kite_websocket:
             return {"eligible": False, "reason": "websocket_disabled_for_event_entry"}
         if self._blocking_gate_failures_for_arming(gate_failures):
             return {"eligible": False, "reason": "hard_gate_failed_before_early_arming"}
         if self._current_entry_premium(contract, prices, factor_scores) <= 0:
             return {"eligible": False, "reason": "early_arming_current_premium_missing"}
-        if float(prices.get("stop_loss") or 0.0) <= 0 or float(prices.get("target_1") or 0.0) <= 0:
+        if (
+            float(prices.get("stop_loss") or 0.0) <= 0
+            or float(prices.get("target_1") or 0.0) <= 0
+        ):
             return {"eligible": False, "reason": "early_arming_price_plan_missing"}
         if not self._setup_strong_enough_for_early_arm(factor_scores):
             return {"eligible": False, "reason": "early_arming_setup_not_strong_enough"}
-        risk_request = factor_scores.get("risk_request") if isinstance(factor_scores.get("risk_request"), dict) else {}
+        risk_request = (
+            factor_scores.get("risk_request")
+            if isinstance(factor_scores.get("risk_request"), dict)
+            else {}
+        )
         requested_risk_tier = str(risk_request.get("requested_tier") or "TIER_1_BASE")
         if requested_risk_tier != "TIER_1_BASE":
             factor_scores["risk_request"] = {
@@ -1331,7 +1708,11 @@ class ScannerService:
         }
 
     def _blocking_gate_failures_for_arming(self, gate_failures: list[str]) -> list[str]:
-        return [reason for reason in gate_failures if not self._early_arm_allowed_failure(str(reason))]
+        return [
+            reason
+            for reason in gate_failures
+            if not self._early_arm_allowed_failure(str(reason))
+        ]
 
     def _early_arm_allowed_failure(self, reason: str) -> bool:
         text = str(reason or "").lower()
@@ -1351,8 +1732,15 @@ class ScannerService:
             return True
         return "premium_candle" in text or "premium confirmation" in text
 
-    def _setup_strong_enough_for_early_arm(self, factor_scores: dict[str, object]) -> bool:
-        required = ["data_quality", "data_freshness", "multi_timeframe", "option_quality"]
+    def _setup_strong_enough_for_early_arm(
+        self, factor_scores: dict[str, object]
+    ) -> bool:
+        required = [
+            "data_quality",
+            "data_freshness",
+            "multi_timeframe",
+            "option_quality",
+        ]
         for key in required:
             value = factor_scores.get(key, {})
             if isinstance(value, dict) and not value.get("passed", True):
@@ -1368,13 +1756,30 @@ class ScannerService:
         factor_scores: dict[str, object],
     ) -> dict[str, object]:
         current = self._current_entry_premium(contract, prices, factor_scores)
-        trigger = self._early_entry_trigger(current=current, entry_timing_eval=entry_timing_eval, factor_scores=factor_scores)
+        trigger = self._early_entry_trigger(
+            current=current,
+            entry_timing_eval=entry_timing_eval,
+            factor_scores=factor_scores,
+        )
         target = float(prices.get("target_1") or 0.0)
         stop = float(prices.get("stop_loss") or 0.0)
-        remaining_rr = (target - current) / (current - stop) if current > stop and target > current else 0.0
-        target_room_pct = ((target - current) / max(current, 0.01)) * 100 if target > current else 0.0
-        distance_to_trigger_pct = ((trigger - current) / max(trigger, 0.01)) * 100 if trigger > current else 0.0
-        reasons = ["early_setup_armed_waiting_for_websocket_trigger", "premium_confirmation_pending"]
+        remaining_rr = (
+            (target - current) / (current - stop)
+            if current > stop and target > current
+            else 0.0
+        )
+        target_room_pct = (
+            ((target - current) / max(current, 0.01)) * 100 if target > current else 0.0
+        )
+        distance_to_trigger_pct = (
+            ((trigger - current) / max(trigger, 0.01)) * 100
+            if trigger > current
+            else 0.0
+        )
+        reasons = [
+            "early_setup_armed_waiting_for_websocket_trigger",
+            "premium_confirmation_pending",
+        ]
         return {
             "enabled": True,
             "state": EntryTimingService.ARMED_FOR_ENTRY,
@@ -1398,10 +1803,26 @@ class ScannerService:
             "early_arm": True,
         }
 
-    def _current_entry_premium(self, contract: OptionContract, prices: dict[str, float], factor_scores: dict[str, object]) -> float:
+    def _current_entry_premium(
+        self,
+        contract: OptionContract,
+        prices: dict[str, float],
+        factor_scores: dict[str, object],
+    ) -> float:
         premium_eval = factor_scores.get("option_premium_confirmation", {})
-        details = premium_eval.get("details", {}) if isinstance(premium_eval, dict) and isinstance(premium_eval.get("details"), dict) else {}
-        for value in (contract.ask, contract.last_price, prices.get("entry_price"), details.get("last_close"), details.get("last_price")):
+        details = (
+            premium_eval.get("details", {})
+            if isinstance(premium_eval, dict)
+            and isinstance(premium_eval.get("details"), dict)
+            else {}
+        )
+        for value in (
+            contract.ask,
+            contract.last_price,
+            prices.get("entry_price"),
+            details.get("last_close"),
+            details.get("last_price"),
+        ):
             try:
                 current = float(value or 0.0)
                 if current > 0:
@@ -1410,9 +1831,20 @@ class ScannerService:
                 continue
         return 0.0
 
-    def _early_entry_trigger(self, *, current: float, entry_timing_eval: dict[str, object], factor_scores: dict[str, object]) -> float:
+    def _early_entry_trigger(
+        self,
+        *,
+        current: float,
+        entry_timing_eval: dict[str, object],
+        factor_scores: dict[str, object],
+    ) -> float:
         premium_eval = factor_scores.get("option_premium_confirmation", {})
-        details = premium_eval.get("details", {}) if isinstance(premium_eval, dict) and isinstance(premium_eval.get("details"), dict) else {}
+        details = (
+            premium_eval.get("details", {})
+            if isinstance(premium_eval, dict)
+            and isinstance(premium_eval.get("details"), dict)
+            else {}
+        )
         candidates: list[float] = []
         for value in (
             entry_timing_eval.get("entry_trigger_price"),
@@ -1427,13 +1859,17 @@ class ScannerService:
                     candidates.append(parsed)
             except (TypeError, ValueError):
                 continue
-        minimum_trigger = current * (1 + max(0.0, settings.early_arm_trigger_buffer_pct) / 100)
+        minimum_trigger = current * (
+            1 + max(0.0, settings.early_arm_trigger_buffer_pct) / 100
+        )
         candidates.append(minimum_trigger)
         return max(candidates)
 
     def _contract_spread_pct(self, contract: OptionContract) -> float:
         if contract.bid > 0 and contract.ask > 0 and contract.last_price > 0:
-            return ((contract.ask - contract.bid) / max(contract.last_price, 0.01)) * 100
+            return (
+                (contract.ask - contract.bid) / max(contract.last_price, 0.01)
+            ) * 100
         return 100.0
 
     def _log_decision(
@@ -1453,7 +1889,11 @@ class ScannerService:
     ) -> None:
         action = self._action(side, trend) if trend else ""
         quality = factor_scores.get("option_quality", {}) if factor_scores else {}
-        premium = factor_scores.get("option_premium_confirmation", {}) if factor_scores else {}
+        premium = (
+            factor_scores.get("option_premium_confirmation", {})
+            if factor_scores
+            else {}
+        )
         volatility = factor_scores.get("volatility_edge", {}) if factor_scores else {}
         liquidity = factor_scores.get("liquidity") if factor_scores else None
         payload = {
@@ -1479,7 +1919,9 @@ class ScannerService:
             },
             "option_state": {
                 "delta": self._nested_value(quality, "details", "greeks", "delta"),
-                "iv": self._nested_value(quality, "details", "greeks", "implied_volatility"),
+                "iv": self._nested_value(
+                    quality, "details", "greeks", "implied_volatility"
+                ),
                 "theta": self._nested_value(quality, "details", "greeks", "theta"),
                 "spread_pct": self._nested_value(quality, "details", "spread_pct"),
                 "volume": contract.volume if contract else None,
@@ -1532,7 +1974,9 @@ class ScannerService:
                 self.outcome_collector.register_episode(
                     episode_identity["episode_key"],
                     state="PREPARED" if accepted else "REJECTED",
-                    observed_at=datetime.fromisoformat(str(payload["timestamp"]).replace("Z", "+00:00")).replace(tzinfo=None),
+                    observed_at=datetime.fromisoformat(
+                        str(payload["timestamp"]).replace("Z", "+00:00")
+                    ).replace(tzinfo=None),
                     context={
                         "underlying_token": (snapshot or {}).get("instrument_token"),
                         "option_token": contract.instrument_token,
@@ -1564,28 +2008,44 @@ class ScannerService:
                     },
                 )
             except Exception as exc:
-                logger.warning("failed_to_register_episode_outcome symbol=%s error=%s", symbol, exc)
+                logger.warning(
+                    "failed_to_register_episode_outcome symbol=%s error=%s", symbol, exc
+                )
         if self.decision_evidence_repository is not None:
             try:
-                episode = factor_scores.get("episode", {}) if factor_scores and isinstance(factor_scores.get("episode"), dict) else {}
+                episode = (
+                    factor_scores.get("episode", {})
+                    if factor_scores and isinstance(factor_scores.get("episode"), dict)
+                    else {}
+                )
                 self.decision_evidence_repository.record_decision(
                     decision_type="scheduled_scanner",
                     final_state="PREPARED" if accepted else "OBSERVE",
                     symbol=symbol,
                     tradingsymbol=contract.tradingsymbol if contract else None,
-                    episode_key=str(episode.get("episode_key")) if episode.get("episode_key") else None,
+                    episode_key=str(episode.get("episode_key"))
+                    if episode.get("episode_key")
+                    else None,
                     context={
                         "snapshot": snapshot or {},
-                        "contract": self._contract_payload(contract) if contract else {},
+                        "contract": self._contract_payload(contract)
+                        if contract
+                        else {},
                         "prices": prices or {},
                         "factor_scores": factor_scores or {},
                         "score_breakdown": breakdown,
                     },
                     gate_results={"accepted": accepted, "reasons": reasons},
-                    transition_timestamps={"scanner_decision_at": self._decision_timestamp()},
+                    transition_timestamps={
+                        "scanner_decision_at": self._decision_timestamp()
+                    },
                 )
             except Exception as exc:
-                logger.warning("failed_to_persist_decision_evidence symbol=%s error=%s", symbol, exc)
+                logger.warning(
+                    "failed_to_persist_decision_evidence symbol=%s error=%s",
+                    symbol,
+                    exc,
+                )
 
     def _shadow_policy_context(
         self,
@@ -1599,22 +2059,54 @@ class ScannerService:
         factor_scores: dict[str, object],
         snapshot: dict[str, object],
     ) -> dict[str, object]:
-        multi = factor_scores.get("multi_timeframe") if isinstance(factor_scores.get("multi_timeframe"), dict) else {}
+        multi = (
+            factor_scores.get("multi_timeframe")
+            if isinstance(factor_scores.get("multi_timeframe"), dict)
+            else {}
+        )
         frames = {
             str(item.get("timeframe")): item
             for item in multi.get("frames", [])
             if isinstance(item, dict)
         }
-        premium = factor_scores.get("option_premium_confirmation") if isinstance(factor_scores.get("option_premium_confirmation"), dict) else {}
-        freshness = factor_scores.get("data_freshness") if isinstance(factor_scores.get("data_freshness"), dict) else {}
-        quality = factor_scores.get("data_quality") if isinstance(factor_scores.get("data_quality"), dict) else {}
-        timing = factor_scores.get("entry_timing") if isinstance(factor_scores.get("entry_timing"), dict) else {}
-        constituents = factor_scores.get("banknifty_intelligence") if isinstance(factor_scores.get("banknifty_intelligence"), dict) else {}
+        premium = (
+            factor_scores.get("option_premium_confirmation")
+            if isinstance(factor_scores.get("option_premium_confirmation"), dict)
+            else {}
+        )
+        freshness = (
+            factor_scores.get("data_freshness")
+            if isinstance(factor_scores.get("data_freshness"), dict)
+            else {}
+        )
+        quality = (
+            factor_scores.get("data_quality")
+            if isinstance(factor_scores.get("data_quality"), dict)
+            else {}
+        )
+        timing = (
+            factor_scores.get("entry_timing")
+            if isinstance(factor_scores.get("entry_timing"), dict)
+            else {}
+        )
+        constituents = (
+            factor_scores.get("banknifty_intelligence")
+            if isinstance(factor_scores.get("banknifty_intelligence"), dict)
+            else {}
+        )
         timing_state = str(timing.get("state") or "").upper()
-        route = "scheduled_direct" if timing_state == "ENTER_NOW" else "armed" if timing_state == "ARMED_FOR_ENTRY" else "scheduled"
+        route = (
+            "scheduled_direct"
+            if timing_state == "ENTER_NOW"
+            else "armed"
+            if timing_state == "ARMED_FOR_ENTRY"
+            else "scheduled"
+        )
         direction = "bullish" if str(action).upper() == "BUY_CE" else "bearish"
         expected_frame_direction = "bullish" if direction == "bullish" else "bearish"
-        five_direction = str((frames.get("5minute") or {}).get("direction") or "neutral")
+        five_direction = str(
+            (frames.get("5minute") or {}).get("direction") or "neutral"
+        )
         one_direction = str((frames.get("1minute") or {}).get("direction") or "neutral")
         entry = float(prices.get("entry_price") or 0.0)
         stop = float(prices.get("stop_loss") or 0.0)
@@ -1634,22 +2126,35 @@ class ScannerService:
             "maximum_spread_pct": float(settings.max_bid_ask_spread_pct),
             "five_minute_structure": five_direction,
             "one_minute_structure": one_direction,
-            "five_minute_strongly_opposed": five_direction not in {"neutral", "transition", "transitioning", expected_frame_direction},
+            "five_minute_strongly_opposed": five_direction
+            not in {"neutral", "transition", "transitioning", expected_frame_direction},
             "constituent_evidence_available": bool(constituents),
-            "constituent_strongly_contradictory": bool(constituents.get("passed") is False),
-            "contract_tradeable": bool(contract.bid > 0 and contract.ask > 0 and contract.instrument_token),
+            "constituent_strongly_contradictory": bool(
+                constituents.get("passed") is False
+            ),
+            "contract_tradeable": bool(
+                contract.bid > 0 and contract.ask > 0 and contract.instrument_token
+            ),
             "price_plan_valid": bool(entry > stop > 0 and target > entry),
             "base_risk_feasible": bool(contract.lot_size > 0 and entry > stop > 0),
             "provenance_valid": bool(quality.get("passed", False)),
             "data_fresh": bool(freshness.get("passed", False)),
             "premium_confirmation_passed": bool(premium.get("passed", False)),
-            "preparation_passed": bool(accepted or timing_state in {"ARMED_FOR_ENTRY", "ENTER_NOW"}),
-            "fast_candidate_requirements_passed": bool(factor_scores.get("prepared_candidate")),
-            "promotion_registered": bool(timing_state in {"ARMED_FOR_ENTRY", "ENTER_NOW"}),
+            "preparation_passed": bool(
+                accepted or timing_state in {"ARMED_FOR_ENTRY", "ENTER_NOW"}
+            ),
+            "fast_candidate_requirements_passed": bool(
+                factor_scores.get("prepared_candidate")
+            ),
+            "promotion_registered": bool(
+                timing_state in {"ARMED_FOR_ENTRY", "ENTER_NOW"}
+            ),
             "armed_confirmation_passed": bool(timing_state == "ENTER_NOW"),
             "chase_valid": not bool(timing.get("entry_should_reject_as_late")),
-            "target_room_valid": float(timing.get("target1_room_pct") or 0.0) >= float(settings.min_target1_room_pct),
-            "remaining_rr_valid": float(timing.get("remaining_risk_reward") or 0.0) >= float(settings.min_remaining_risk_reward),
+            "target_room_valid": float(timing.get("target1_room_pct") or 0.0)
+            >= float(settings.min_target1_room_pct),
+            "remaining_rr_valid": float(timing.get("remaining_risk_reward") or 0.0)
+            >= float(settings.min_remaining_risk_reward),
             "session_eligible": True,
             "account_eligible": bool(accepted),
             "metadata": {
@@ -1661,11 +2166,19 @@ class ScannerService:
         }
 
     def _shadow_setup_family(self, factor_scores: dict[str, object] | None) -> str:
-        payload = factor_scores.get("setup_family") if factor_scores and isinstance(factor_scores.get("setup_family"), dict) else {}
+        payload = (
+            factor_scores.get("setup_family")
+            if factor_scores and isinstance(factor_scores.get("setup_family"), dict)
+            else {}
+        )
         return str(payload.get("setup_family") or payload.get("family") or "unknown")
 
     def _shadow_market_regime(self, factor_scores: dict[str, object] | None) -> str:
-        payload = factor_scores.get("market_regime") if factor_scores and isinstance(factor_scores.get("market_regime"), dict) else {}
+        payload = (
+            factor_scores.get("market_regime")
+            if factor_scores and isinstance(factor_scores.get("market_regime"), dict)
+            else {}
+        )
         return str(payload.get("regime") or payload.get("label") or "unknown")
 
     def _save_rejection(
@@ -1683,7 +2196,11 @@ class ScannerService:
         rejection_source: str = "scanner",
     ) -> None:
         try:
-            action = self._action(side, trend) if str(trend).lower() in {"bullish", "bearish"} else None
+            action = (
+                self._action(side, trend)
+                if str(trend).lower() in {"bullish", "bearish"}
+                else None
+            )
             factor_scores = self._with_rejection_snapshot(
                 factor_scores=factor_scores or {},
                 symbol=symbol,
@@ -1697,7 +2214,9 @@ class ScannerService:
             )
             factor_scores = self._with_strategy_metadata(factor_scores, "unknown")
             save = self.rejected_opportunity_repository.save_rejection
-            if rejection_source == "automation_scan" and hasattr(self.rejected_opportunity_repository, "save_rejection_async"):
+            if rejection_source == "automation_scan" and hasattr(
+                self.rejected_opportunity_repository, "save_rejection_async"
+            ):
                 save = self.rejected_opportunity_repository.save_rejection_async
             save(
                 symbol=symbol,
@@ -1712,7 +2231,9 @@ class ScannerService:
                 rejection_source=rejection_source,
             )
         except Exception as exc:
-            logger.warning("failed_to_save_rejected_opportunity symbol=%s error=%s", symbol, exc)
+            logger.warning(
+                "failed_to_save_rejected_opportunity symbol=%s error=%s", symbol, exc
+            )
 
     def _with_rejection_snapshot(
         self,
@@ -1730,25 +2251,45 @@ class ScannerService:
         enriched = dict(factor_scores)
         if "rejection_snapshot" in enriched:
             return enriched
-        prices = enriched.get("prices", {}) if isinstance(enriched.get("prices"), dict) else {}
-        timing = enriched.get("entry_timing", {}) if isinstance(enriched.get("entry_timing"), dict) else {}
-        contract_payload = self._contract_payload(contract) if contract is not None else {}
-        spot_price = (snapshot or {}).get("price") if isinstance(snapshot, dict) else None
+        prices = (
+            enriched.get("prices", {})
+            if isinstance(enriched.get("prices"), dict)
+            else {}
+        )
+        timing = (
+            enriched.get("entry_timing", {})
+            if isinstance(enriched.get("entry_timing"), dict)
+            else {}
+        )
+        contract_payload = (
+            self._contract_payload(contract) if contract is not None else {}
+        )
+        spot_price = (
+            (snapshot or {}).get("price") if isinstance(snapshot, dict) else None
+        )
         option_ltp = contract.last_price if contract is not None else None
         option_bid = contract.bid if contract is not None else None
         option_ask = contract.ask if contract is not None else None
-        spread_pct = self._contract_spread_pct(contract) if contract is not None else None
+        spread_pct = (
+            self._contract_spread_pct(contract) if contract is not None else None
+        )
         enriched["rejection_snapshot"] = {
             "symbol": symbol.upper(),
             "side": side.upper(),
             "trend": trend,
-            "action": self._action(side, trend) if str(trend).lower() in {"bullish", "bearish"} else None,
+            "action": self._action(side, trend)
+            if str(trend).lower() in {"bullish", "bearish"}
+            else None,
             "score": int(score or 0),
             "primary_gate": reasons[0] if reasons else None,
             "reasons": list(reasons),
             "spot_price": spot_price,
-            "spot_source": (snapshot or {}).get("source") if isinstance(snapshot, dict) else None,
-            "is_real_data": (snapshot or {}).get("is_real_data") if isinstance(snapshot, dict) else None,
+            "spot_source": (snapshot or {}).get("source")
+            if isinstance(snapshot, dict)
+            else None,
+            "is_real_data": (snapshot or {}).get("is_real_data")
+            if isinstance(snapshot, dict)
+            else None,
             "tradingsymbol": contract_payload.get("tradingsymbol"),
             "exchange": contract_payload.get("exchange"),
             "instrument_token": contract_payload.get("instrument_token"),
@@ -1766,8 +2307,11 @@ class ScannerService:
             "target_3": prices.get("target_3"),
             "risk_reward": prices.get("risk_reward"),
             "entry_trigger_price": timing.get("entry_trigger_price"),
-            "current_premium": timing.get("current_premium") or option_ask or option_ltp,
-            "entry_timing_state": timing.get("entry_timing_state") or timing.get("state"),
+            "current_premium": timing.get("current_premium")
+            or option_ask
+            or option_ltp,
+            "entry_timing_state": timing.get("entry_timing_state")
+            or timing.get("state"),
             "market_session": self._rejection_market_session(rejection_source),
             "recorded_at": self._decision_timestamp(),
         }
@@ -1775,7 +2319,10 @@ class ScannerService:
 
     def _rejection_market_session(self, rejection_source: str) -> str:
         source = str(rejection_source).lower()
-        if source.startswith("backtest") or source in {"historical_replay", "scanner_parity_backtest"}:
+        if source.startswith("backtest") or source in {
+            "historical_replay",
+            "scanner_parity_backtest",
+        }:
             return "BACKTEST"
         provider = getattr(self.rejected_opportunity_repository, "market_session", None)
         if callable(provider):
@@ -1799,19 +2346,29 @@ class ScannerService:
 
         return datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
 
-    def _with_strategy_metadata(self, factor_scores: dict[str, object], order_mode: str) -> dict[str, object]:
+    def _with_strategy_metadata(
+        self, factor_scores: dict[str, object], order_mode: str
+    ) -> dict[str, object]:
         if "strategy_metadata" in factor_scores:
             return factor_scores
         enriched = dict(factor_scores)
-        setup_family = enriched.get("setup_family") if isinstance(enriched.get("setup_family"), dict) else {}
+        setup_family = (
+            enriched.get("setup_family")
+            if isinstance(enriched.get("setup_family"), dict)
+            else {}
+        )
         enriched["strategy_metadata"] = {
             "strategy_name": settings.strategy_name,
             "strategy_version": settings.strategy_version,
             "order_mode": order_mode,
             "generated_at": self._decision_timestamp(),
             "setup_type": enriched.get("setup_type"),
-            "setup_family_name": setup_family.get("name") if isinstance(setup_family, dict) else enriched.get("setup_family_name"),
-            "setup_family_group": setup_family.get("group") if isinstance(setup_family, dict) else enriched.get("setup_family_group"),
+            "setup_family_name": setup_family.get("name")
+            if isinstance(setup_family, dict)
+            else enriched.get("setup_family_name"),
+            "setup_family_group": setup_family.get("group")
+            if isinstance(setup_family, dict)
+            else enriched.get("setup_family_group"),
             "hard_gate_thresholds": {
                 "min_option_quality_score": settings.min_option_quality_score,
                 "min_risk_reward": settings.min_risk_reward,
@@ -1901,7 +2458,11 @@ class ScannerService:
         enriched["setup_family"] = family
         enriched["setup_family_name"] = family.get("name")
         enriched["setup_family_group"] = family.get("group")
-        enriched["setup_type"] = self._setup_type(side, trend) if str(trend).lower() in {"bullish", "bearish"} else "unknown_directional_setup"
+        enriched["setup_type"] = (
+            self._setup_type(side, trend)
+            if str(trend).lower() in {"bullish", "bearish"}
+            else "unknown_directional_setup"
+        )
         return enriched
 
     def _nested_value(self, value: object, *keys: str) -> object:
@@ -1927,7 +2488,9 @@ class ScannerService:
             return {"enabled": False, "passed": True, "reasons": []}
         direction = "CALL" if trend.lower() == "bullish" else "PUT"
         try:
-            result = self.strategy_edge_service.evaluate(symbol=symbol, direction=direction)
+            result = self.strategy_edge_service.evaluate(
+                symbol=symbol, direction=direction
+            )
             return {"enabled": True, **result}
         except Exception as exc:
             return {
@@ -1938,8 +2501,14 @@ class ScannerService:
 
     def _setup_type(self, side: str, trend: str) -> str:
         if side.upper() == "SELL":
-            return "credit_put_sell" if trend.lower() == "bullish" else "credit_call_sell"
-        return "directional_call_buy" if trend.lower() == "bullish" else "directional_put_buy"
+            return (
+                "credit_put_sell" if trend.lower() == "bullish" else "credit_call_sell"
+            )
+        return (
+            "directional_call_buy"
+            if trend.lower() == "bullish"
+            else "directional_put_buy"
+        )
 
     def _action(self, side: str, trend: str) -> str:
         if side.upper() == "SELL":
@@ -1962,10 +2531,18 @@ class ScannerService:
             "volume": contract.volume,
         }
 
-    def _banknifty_response_fields(self, banknifty_eval: dict[str, object]) -> dict[str, object]:
-        details = banknifty_eval.get("details", {}) if isinstance(banknifty_eval.get("details"), dict) else {}
+    def _banknifty_response_fields(
+        self, banknifty_eval: dict[str, object]
+    ) -> dict[str, object]:
+        details = (
+            banknifty_eval.get("details", {})
+            if isinstance(banknifty_eval.get("details"), dict)
+            else {}
+        )
         return {
-            "bankNiftySpecificScore": details.get("bankNiftySpecificScore", banknifty_eval.get("score")),
+            "bankNiftySpecificScore": details.get(
+                "bankNiftySpecificScore", banknifty_eval.get("score")
+            ),
             "topBankAlignment": details.get("topBankAlignment"),
             "privateBankStrength": details.get("privateBankStrength"),
             "psuBankStrength": details.get("psuBankStrength"),
@@ -1979,7 +2556,10 @@ class ScannerService:
             "optionChainNearAtmSignal": details.get("optionChainNearAtmSignal"),
             "dayType": details.get("dayType"),
             "noTradeReasons": details.get("noTradeReasons", []),
-            "tradeQuality": details.get("tradeQuality", "NO_TRADE" if banknifty_eval.get("passed") is False else "B"),
+            "tradeQuality": details.get(
+                "tradeQuality",
+                "NO_TRADE" if banknifty_eval.get("passed") is False else "B",
+            ),
             "confidenceReason": details.get("confidenceReason", ""),
             "invalidationReason": details.get("invalidationReason", ""),
         }
@@ -2000,7 +2580,11 @@ class ScannerService:
         timing = timing if isinstance(timing, dict) else {}
         volatility = factor_scores.get("volatility_edge", {}) if factor_scores else {}
         volatility = volatility if isinstance(volatility, dict) else {}
-        volatility_details = volatility.get("details", {}) if isinstance(volatility.get("details"), dict) else {}
+        volatility_details = (
+            volatility.get("details", {})
+            if isinstance(volatility.get("details"), dict)
+            else {}
+        )
         armed = factor_scores.get("armed_entry", {}) if factor_scores else {}
         armed = armed if isinstance(armed, dict) else {}
         setup_family = factor_scores.get("setup_family", {}) if factor_scores else {}
@@ -2031,7 +2615,9 @@ class ScannerService:
             "entry_timing_state": timing.get("entry_timing_state"),
             "entry_trigger_price": timing.get("entry_trigger_price"),
             "current_premium": timing.get("current_premium"),
-            "premium_distance_to_trigger_pct": timing.get("premium_distance_to_trigger_pct"),
+            "premium_distance_to_trigger_pct": timing.get(
+                "premium_distance_to_trigger_pct"
+            ),
             "premium_move_from_base_pct": timing.get("premium_move_from_base_pct"),
             "chase_risk": timing.get("chase_risk"),
             "remaining_risk_reward": timing.get("remaining_risk_reward"),
@@ -2043,10 +2629,16 @@ class ScannerService:
             "armed_setup_id": armed.get("setup_id"),
             "selected_option": armed.get("selected_option"),
             "valid_until": armed.get("valid_until") or timing.get("entry_valid_until"),
-            "websocket_tracking_enabled": armed.get("websocket_tracking_enabled", False),
-            "paper_event_entry_enabled": armed.get("paper_event_entry_enabled", settings.enable_event_driven_paper_entry),
+            "websocket_tracking_enabled": armed.get(
+                "websocket_tracking_enabled", False
+            ),
+            "paper_event_entry_enabled": armed.get(
+                "paper_event_entry_enabled", settings.enable_event_driven_paper_entry
+            ),
             "live_event_entry_blocked": armed.get("live_event_entry_blocked", False),
-            "reason": armed.get("latest_reason") or armed.get("reason") or timing.get("entry_timing_reason"),
+            "reason": armed.get("latest_reason")
+            or armed.get("reason")
+            or timing.get("entry_timing_reason"),
             "setup_family": setup_family.get("name"),
             "setup_family_group": setup_family.get("group"),
             "setup_family_reasons": setup_family.get("reasons", []),
@@ -2061,11 +2653,15 @@ class ScannerService:
             "candidate_abstention_code": candidate.get("abstention_code"),
             "volatility_edge_score": volatility.get("score"),
             "volatility_edge_classification": volatility.get("classification"),
-            "volatility_edge_for_option_buying": volatility.get("volatility_edge_for_option_buying"),
+            "volatility_edge_for_option_buying": volatility.get(
+                "volatility_edge_for_option_buying"
+            ),
             "iv_rank": volatility_details.get("iv_rank"),
             "iv_percentile": volatility_details.get("iv_percentile"),
             "iv_to_rv_ratio": volatility_details.get("iv_to_rv_ratio"),
-            "expected_move_coverage_iv": volatility_details.get("expected_move_coverage_iv"),
+            "expected_move_coverage_iv": volatility_details.get(
+                "expected_move_coverage_iv"
+            ),
             "iv_expansion_supported": volatility_details.get("iv_expansion_supported"),
             "iv_crush_risk": volatility_details.get("iv_crush_risk"),
             "volatility_edge_reasons": volatility.get("reasons", []),

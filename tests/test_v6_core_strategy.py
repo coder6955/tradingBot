@@ -42,7 +42,9 @@ class V6CoreStrategyTests(unittest.TestCase):
         )
         self.assertEqual(spike["direction"], "neutral")
         self.assertEqual(trend["direction"], "bullish")
-        self.assertIn(trend["phase"], {"impulse", "pullback_continuation", "breakout_acceptance"})
+        self.assertIn(
+            trend["phase"], {"impulse", "pullback_continuation", "breakout_acceptance"}
+        )
         self.assertGreaterEqual(trend["bullish_evidence_votes"], 2)
 
     def test_opening_policy_is_ready_before_0945_without_weakening_normal_session(self):
@@ -51,13 +53,19 @@ class V6CoreStrategyTests(unittest.TestCase):
             symbol="BANKNIFTY",
             trend="bullish",
             as_of=datetime(2026, 7, 28, 9, 35),
-            candle_sets={"1minute": _candles(5, timeframe_minutes=1), "5minute": _candles(3, timeframe_minutes=5)},
+            candle_sets={
+                "1minute": _candles(5, timeframe_minutes=1),
+                "5minute": _candles(3, timeframe_minutes=5),
+            },
         )
         normal = service.evaluate(
             symbol="BANKNIFTY",
             trend="bullish",
             as_of=datetime(2026, 7, 28, 10, 0),
-            candle_sets={"1minute": _candles(5, timeframe_minutes=1), "5minute": _candles(3, timeframe_minutes=5)},
+            candle_sets={
+                "1minute": _candles(5, timeframe_minutes=1),
+                "5minute": _candles(3, timeframe_minutes=5),
+            },
         )
         self.assertTrue(opening["passed"], opening)
         self.assertTrue(opening["opening_session"])
@@ -110,7 +118,10 @@ class V6CoreStrategyTests(unittest.TestCase):
                     "last_price": 100,
                     "volume": 5000,
                     "oi": 50000,
-                    "depth": {"buy": [{"price": 99, "quantity": 100}], "sell": [{"price": 100, "quantity": 100}]},
+                    "depth": {
+                        "buy": [{"price": 99, "quantity": 100}],
+                        "sell": [{"price": 100, "quantity": 100}],
+                    },
                 }
             },
         )
@@ -125,7 +136,10 @@ class V6CoreStrategyTests(unittest.TestCase):
                 return {
                     "passed": True,
                     "action": "promote_precomputed_plan_to_armed_entry",
-                    "plan": {"order_mode": "paper", "contract": {"instrument_token": 1}},
+                    "plan": {
+                        "order_mode": "paper",
+                        "contract": {"instrument_token": 1},
+                    },
                 }
 
         class Promoter:
@@ -139,11 +153,19 @@ class V6CoreStrategyTests(unittest.TestCase):
             fast_scan_context_service=Context(),
             fast_candidate_promoter=Promoter(),
         )
-        service._run_fast_candidate_validation({"direction": "bullish", "timestamp": datetime.now().isoformat()})
+        service._run_fast_candidate_validation(
+            {"direction": "bullish", "timestamp": datetime.now().isoformat()}
+        )
         self.assertEqual(len(calls), 1)
         self.assertTrue(service.last_fast_candidate_decision["passed"])
-        self.assertEqual(service.last_fast_candidate_decision["stage"], "fast_candidate_promoted_to_armed_entry")
-        self.assertEqual(service.last_fast_candidate_decision["io_calls"], {"rest_calls": 0, "database_queries": 0})
+        self.assertEqual(
+            service.last_fast_candidate_decision["stage"],
+            "fast_candidate_promoted_to_armed_entry",
+        )
+        self.assertEqual(
+            service.last_fast_candidate_decision["io_calls"],
+            {"rest_calls": 0, "database_queries": 0},
+        )
 
     def test_partial_runner_uses_whole_lots_once_and_high_watermark_trail(self):
         service = TradeExitService.__new__(TradeExitService)
@@ -176,17 +198,26 @@ class V6CoreStrategyTests(unittest.TestCase):
             highest_price_during_trade=125,
         )
         self.assertTrue(service._can_partial_at_r(trade, 110))
-        trade.partial_exit_json = json.dumps([{"quantity": 15, "outcome": "partial_target_1"}])
+        trade.partial_exit_json = json.dumps(
+            [{"quantity": 15, "outcome": "partial_target_1"}]
+        )
         trade.remaining_quantity = 15
         self.assertFalse(service._can_partial_at_r(trade, 112))
-        with patch.object(service, "_high_since_entry", return_value=125), patch.object(service, "_premium_atr", return_value=4):
-            self.assertEqual(service._trailing_exit_outcome(trade, 116), "trailing_stop")
+        with (
+            patch.object(service, "_high_since_entry", return_value=125),
+            patch.object(service, "_premium_atr", return_value=4),
+        ):
+            self.assertEqual(
+                service._trailing_exit_outcome(trade, 116), "trailing_stop"
+            )
 
     def test_time_stop_is_extended_only_for_trend_runner_profile(self):
         service = TradeExitService.__new__(TradeExitService)
         base = {
             "contract": {"lot_size": 15},
-            "setup_family": {"exit_profile": {"time_stop_minutes": 12, "target_style": "runner"}},
+            "setup_family": {
+                "exit_profile": {"time_stop_minutes": 12, "target_style": "runner"}
+            },
         }
         trade = SimpleNamespace(
             side="BUY",
@@ -195,11 +226,17 @@ class V6CoreStrategyTests(unittest.TestCase):
             created_at=datetime.now() - timedelta(minutes=18),
             order_response_json=json.dumps({"signal_factor_scores": base}),
         )
-        with patch("app.services.trade_exit_service.ist_now", return_value=datetime.now().astimezone()):
+        with patch(
+            "app.services.trade_exit_service.ist_now",
+            return_value=datetime.now().astimezone(),
+        ):
             self.assertIsNone(service._time_exit_outcome(trade, 101))
         base["setup_family"]["exit_profile"]["target_style"] = "fixed_structure"
         trade.order_response_json = json.dumps({"signal_factor_scores": base})
-        with patch("app.services.trade_exit_service.ist_now", return_value=datetime.now().astimezone()):
+        with patch(
+            "app.services.trade_exit_service.ist_now",
+            return_value=datetime.now().astimezone(),
+        ):
             self.assertEqual(service._time_exit_outcome(trade, 101), "time_exit")
 
 

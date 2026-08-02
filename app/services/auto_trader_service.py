@@ -39,7 +39,9 @@ class AutoTraderService:
         self.scanner_factory = scanner_factory
         self.order_service_factory = order_service_factory
         self.opportunity_repository = opportunity_repository
-        self.risk_management_service = risk_management_service or RiskManagementService()
+        self.risk_management_service = (
+            risk_management_service or RiskManagementService()
+        )
         self.notification_service = notification_service or NotificationService()
         self.latency_metrics = latency_metrics
         self.fast_scan_context_service = fast_scan_context_service
@@ -73,7 +75,9 @@ class AutoTraderService:
         self.fast_suppressed_reasons: dict[str, int] = {}
 
     def _now_ist(self) -> str:
-        return datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M:%S %p IST")
+        return datetime.now(ZoneInfo("Asia/Kolkata")).strftime(
+            "%d %b %Y, %I:%M:%S %p IST"
+        )
 
     def _append_decision_event(self, event: dict[str, Any]) -> None:
         with self._decision_event_lock:
@@ -82,7 +86,7 @@ class AutoTraderService:
 
     def recent_decision_events(self, limit: int = 30) -> list[dict[str, Any]]:
         with self._decision_event_lock:
-            return [dict(item) for item in self.decision_events[-max(1, int(limit)):]]
+            return [dict(item) for item in self.decision_events[-max(1, int(limit)) :]]
 
     def start(
         self,
@@ -106,11 +110,15 @@ class AutoTraderService:
             "limit": max(1, int(limit)),
             "place_orders": bool(place_orders),
             "confirm_live": bool(confirm_live),
-            "order_mode": (order_mode or settings.default_order_mode or "paper").lower(),
+            "order_mode": (
+                order_mode or settings.default_order_mode or "paper"
+            ).lower(),
         }
         self.running = True
         self.task = asyncio.create_task(self._run())
-        self.notification_service.send(f"Auto trader started: side={side.upper()}, symbols={symbols or 'default'}, interval={max(1, int(interval))}s")
+        self.notification_service.send(
+            f"Auto trader started: side={side.upper()}, symbols={symbols or 'default'}, interval={max(1, int(interval))}s"
+        )
         return self.status()
 
     async def stop(self) -> dict[str, Any]:
@@ -125,7 +133,9 @@ class AutoTraderService:
         return self.status()
 
     def status(self) -> dict[str, Any]:
-        order_mode = str(self.config.get("order_mode") or settings.default_order_mode or "paper").lower()
+        order_mode = str(
+            self.config.get("order_mode") or settings.default_order_mode or "paper"
+        ).lower()
         return {
             "running": self.running,
             "config": self.config,
@@ -134,7 +144,9 @@ class AutoTraderService:
             "execution_count": len(self.executions),
             "error_count": len(self.errors),
             "recent_errors": self.errors[-5:],
-            "last_scan_result": dict(self.last_scan_result) if self.last_scan_result else None,
+            "last_scan_result": dict(self.last_scan_result)
+            if self.last_scan_result
+            else None,
             "recent_decisions": self.recent_decision_events(limit=5),
             "mode": order_mode,
             "live_ordering_requires_confirm_live": True,
@@ -156,8 +168,12 @@ class AutoTraderService:
                 "validation_error_count": self.fast_validation_error_count,
                 "validation_running": self._fast_rescan_running,
                 "suppressed_reasons": dict(self.fast_suppressed_reasons),
-                "last_event": dict(self.last_fast_rally_event) if self.last_fast_rally_event else None,
-                "last_dispatch": dict(self.last_fast_dispatch) if self.last_fast_dispatch else None,
+                "last_event": dict(self.last_fast_rally_event)
+                if self.last_fast_rally_event
+                else None,
+                "last_dispatch": dict(self.last_fast_dispatch)
+                if self.last_fast_dispatch
+                else None,
             },
         }
 
@@ -174,11 +190,21 @@ class AutoTraderService:
                         "source": "scheduled_scan",
                     }
                 )
-            await asyncio.sleep(float(self.config.get("interval_seconds", settings.scanner_interval_seconds)))
+            await asyncio.sleep(
+                float(
+                    self.config.get(
+                        "interval_seconds", settings.scanner_interval_seconds
+                    )
+                )
+            )
 
     def scan_once(self) -> dict[str, Any]:
         if not self._scan_lock.acquire(blocking=False):
-            return {"skipped": True, "reason": "scan_already_running", "last_scan_at": self.last_scan_at}
+            return {
+                "skipped": True,
+                "reason": "scan_already_running",
+                "last_scan_at": self.last_scan_at,
+            }
         try:
             return self._scan_once_impl()
         finally:
@@ -208,7 +234,9 @@ class AutoTraderService:
                     }
                 )
                 opportunities = []
-            result = self._finalize_opportunities(opportunities, source="automation_scan")
+            result = self._finalize_opportunities(
+                opportunities, source="automation_scan"
+            )
             result["io_calls"] = {
                 "rest_calls": calls.rest_calls,
                 "database_queries": calls.database_queries,
@@ -221,7 +249,11 @@ class AutoTraderService:
                 "scheduled_scan_duration",
                 scan_started,
                 scan_completed,
-                detail={"accepted_candidates": len(opportunities), "scan_source": "scheduled", **result["io_calls"]},
+                detail={
+                    "accepted_candidates": len(opportunities),
+                    "scan_source": "scheduled",
+                    **result["io_calls"],
+                },
             )
         self.last_scan_result = {
             "time": self.last_scan_at,
@@ -233,7 +265,9 @@ class AutoTraderService:
         }
         return result
 
-    def _finalize_opportunities(self, opportunities: list[Signal], *, source: str) -> dict[str, Any]:
+    def _finalize_opportunities(
+        self, opportunities: list[Signal], *, source: str
+    ) -> dict[str, Any]:
         limited = opportunities[: int(self.config.get("limit", 5))]
         self.latest_opportunities = [asdict(signal) for signal in limited]
         saved_ids: list[int] = []
@@ -250,23 +284,38 @@ class AutoTraderService:
             order_mode = str(self.config.get("order_mode") or "paper").lower()
             for signal in limited:
                 try:
-                    decision_at = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
-                    result = self._place_once(signal, opportunity_id=saved_id_by_order_key.get(self._order_key(signal)))
+                    decision_at = datetime.now(ZoneInfo("Asia/Kolkata")).replace(
+                        tzinfo=None
+                    )
+                    result = self._place_once(
+                        signal,
+                        opportunity_id=saved_id_by_order_key.get(
+                            self._order_key(signal)
+                        ),
+                    )
                     if self.latency_metrics is not None:
                         self.latency_metrics.record_between(
                             "decision_to_order_completion",
                             decision_at,
-                            detail={"symbol": signal.symbol, "source": source, "order_mode": self.config.get("order_mode")},
+                            detail={
+                                "symbol": signal.symbol,
+                                "source": source,
+                                "order_mode": self.config.get("order_mode"),
+                            },
                         )
                     if result is not None:
                         placed.append(result)
                 except Exception as exc:
                     message = str(exc)
-                    if order_mode == "live" and message.startswith("risk guard blocked order:"):
+                    if order_mode == "live" and message.startswith(
+                        "risk guard blocked order:"
+                    ):
                         try:
                             shadow = self._place_shadow_paper(
                                 signal,
-                                opportunity_id=saved_id_by_order_key.get(self._order_key(signal)),
+                                opportunity_id=saved_id_by_order_key.get(
+                                    self._order_key(signal)
+                                ),
                                 reason=message,
                             )
                             placed.append(shadow)
@@ -302,16 +351,30 @@ class AutoTraderService:
         self.last_fast_rally_event = dict(event)
         self.fast_rally_request_count += 1
         if not self.running:
-            return self._record_fast_dispatch(event, {"scheduled": False, "reason": "auto_trader_not_running", "stage": "suppressed"})
+            return self._record_fast_dispatch(
+                event,
+                {
+                    "scheduled": False,
+                    "reason": "auto_trader_not_running",
+                    "stage": "suppressed",
+                },
+            )
         now = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
         with self._fast_rescan_lock:
             cooldown = max(0.1, float(settings.fast_rally_rescan_cooldown_seconds))
             if self._fast_rescan_running:
                 return self._record_fast_dispatch(
                     event,
-                    {"scheduled": False, "reason": "fast_rescan_already_running", "stage": "suppressed"},
+                    {
+                        "scheduled": False,
+                        "reason": "fast_rescan_already_running",
+                        "stage": "suppressed",
+                    },
                 )
-            if self._last_fast_rescan_at and (now - self._last_fast_rescan_at).total_seconds() < cooldown:
+            if (
+                self._last_fast_rescan_at
+                and (now - self._last_fast_rescan_at).total_seconds() < cooldown
+            ):
                 return self._record_fast_dispatch(
                     event,
                     {
@@ -323,9 +386,17 @@ class AutoTraderService:
                 )
             self._fast_rescan_running = True
             self._last_fast_rescan_at = now
-        result = {"scheduled": True, "stage": "candidate_promoted_for_cached_validation"}
+        result = {
+            "scheduled": True,
+            "stage": "candidate_promoted_for_cached_validation",
+        }
         try:
-            Thread(target=self._run_fast_candidate_validation, args=(dict(event),), name="banknifty-fast-candidate", daemon=True).start()
+            Thread(
+                target=self._run_fast_candidate_validation,
+                args=(dict(event),),
+                name="banknifty-fast-candidate",
+                daemon=True,
+            ).start()
         except Exception as exc:
             with self._fast_rescan_lock:
                 self._fast_rescan_running = False
@@ -349,9 +420,15 @@ class AutoTraderService:
                 decision = (
                     self.fast_scan_context_service.validate_candidate(event)
                     if self.fast_scan_context_service is not None
-                    else {"passed": False, "reason": "fast_scan_context_service_missing"}
+                    else {
+                        "passed": False,
+                        "reason": "fast_scan_context_service_missing",
+                    }
                 )
-                decision["io_calls"] = {"rest_calls": calls.rest_calls, "database_queries": calls.database_queries}
+                decision["io_calls"] = {
+                    "rest_calls": calls.rest_calls,
+                    "database_queries": calls.database_queries,
+                }
                 if calls.rest_calls or calls.database_queries:
                     original_reason = decision.get("reason")
                     decision.update(
@@ -363,29 +440,61 @@ class AutoTraderService:
                     )
                 decision["rally_event"] = dict(event)
                 self.last_fast_candidate_decision = decision
-            if bool(decision.get("passed")) and decision.get("action") == "promote_precomputed_plan_to_armed_entry":
+            if (
+                bool(decision.get("passed"))
+                and decision.get("action") == "promote_precomputed_plan_to_armed_entry"
+            ):
                 if self.fast_candidate_promoter is None:
-                    decision.update({"passed": False, "reason": "fast_candidate_promoter_missing"})
+                    decision.update(
+                        {"passed": False, "reason": "fast_candidate_promoter_missing"}
+                    )
                 else:
-                    promotion = self.fast_candidate_promoter.register_from_fast_plan(dict(decision.get("plan") or {}))
+                    promotion = self.fast_candidate_promoter.register_from_fast_plan(
+                        dict(decision.get("plan") or {})
+                    )
                     decision["promotion"] = promotion
                     if promotion.get("registered"):
                         decision["stage"] = "fast_candidate_promoted_to_armed_entry"
-                        decision["reason"] = "fast_candidate_armed_waiting_for_tick_quality"
+                        decision["reason"] = (
+                            "fast_candidate_armed_waiting_for_tick_quality"
+                        )
                     else:
                         decision.update(
                             {
                                 "passed": False,
-                                "reason": str(promotion.get("reason") or "fast_candidate_promotion_failed"),
+                                "reason": str(
+                                    promotion.get("reason")
+                                    or "fast_candidate_promotion_failed"
+                                ),
                             }
                         )
                 self.last_fast_candidate_decision = decision
             scan_completed = datetime.now(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
             if self.latency_metrics is not None:
-                self.latency_metrics.record_between("rally_detection_to_scan_start", rally_at, scan_started, detail=decision)
-                self.latency_metrics.record_between("fast_rally_detection_to_scan_start", rally_at, scan_started, detail=decision)
-                self.latency_metrics.record_between("cached_candidate_decision_duration", scan_started, scan_completed, detail=decision)
-                self.latency_metrics.record_between("fast_rally_scan_duration", scan_started, scan_completed, detail=decision)
+                self.latency_metrics.record_between(
+                    "rally_detection_to_scan_start",
+                    rally_at,
+                    scan_started,
+                    detail=decision,
+                )
+                self.latency_metrics.record_between(
+                    "fast_rally_detection_to_scan_start",
+                    rally_at,
+                    scan_started,
+                    detail=decision,
+                )
+                self.latency_metrics.record_between(
+                    "cached_candidate_decision_duration",
+                    scan_started,
+                    scan_completed,
+                    detail=decision,
+                )
+                self.latency_metrics.record_between(
+                    "fast_rally_scan_duration",
+                    scan_started,
+                    scan_completed,
+                    detail=decision,
+                )
             self._append_decision_event(
                 {
                     "time": self._now_ist(),
@@ -399,15 +508,28 @@ class AutoTraderService:
                 }
             )
             if self.decision_evidence_repository is not None:
-                plan = decision.get("plan") if isinstance(decision.get("plan"), dict) else {}
-                promotion = decision.get("promotion") if isinstance(decision.get("promotion"), dict) else {}
+                plan = (
+                    decision.get("plan")
+                    if isinstance(decision.get("plan"), dict)
+                    else {}
+                )
+                promotion = (
+                    decision.get("promotion")
+                    if isinstance(decision.get("promotion"), dict)
+                    else {}
+                )
                 self.decision_evidence_repository.record_decision(
                     decision_type="fast_rally",
                     final_state="ARMED" if promotion.get("registered") else "OBSERVE",
                     symbol="BANKNIFTY",
-                    tradingsymbol=str(plan.get("tradingsymbol")) if plan.get("tradingsymbol") else None,
+                    tradingsymbol=str(plan.get("tradingsymbol"))
+                    if plan.get("tradingsymbol")
+                    else None,
                     context={"rally_event": event, "cached_decision": decision},
-                    gate_results={"passed": bool(decision.get("passed")), "reason": decision.get("reason")},
+                    gate_results={
+                        "passed": bool(decision.get("passed")),
+                        "reason": decision.get("reason"),
+                    },
                     transition_timestamps={
                         "rally_at": event.get("timestamp"),
                         "validation_started_at": scan_started.isoformat(sep=" "),
@@ -420,11 +542,16 @@ class AutoTraderService:
             else:
                 self.fast_validation_rejected_count += 1
             if self.latency_metrics is not None:
-                event_time = self._parse_event_time(event.get("receive_timestamp") or event.get("timestamp"))
+                event_time = self._parse_event_time(
+                    event.get("receive_timestamp") or event.get("timestamp")
+                )
                 self.latency_metrics.record_between(
                     "tick_to_candidate_decision",
                     event_time,
-                    detail={"direction": direction, "candidate_passed": bool(decision.get("passed"))},
+                    detail={
+                        "direction": direction,
+                        "candidate_passed": bool(decision.get("passed")),
+                    },
                 )
         except Exception as exc:
             failure = {
@@ -460,7 +587,9 @@ class AutoTraderService:
             with self._fast_rescan_lock:
                 self._fast_rescan_running = False
 
-    def _record_fast_dispatch(self, event: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    def _record_fast_dispatch(
+        self, event: dict[str, Any], result: dict[str, Any]
+    ) -> dict[str, Any]:
         payload = {
             **dict(result),
             "time": self._now_ist(),
@@ -475,7 +604,9 @@ class AutoTraderService:
         else:
             self.fast_validation_suppressed_count += 1
             reason = str(payload.get("reason") or "fast_validation_not_scheduled")
-            self.fast_suppressed_reasons[reason] = self.fast_suppressed_reasons.get(reason, 0) + 1
+            self.fast_suppressed_reasons[reason] = (
+                self.fast_suppressed_reasons.get(reason, 0) + 1
+            )
         self._append_decision_event(
             {
                 **payload,
@@ -492,7 +623,9 @@ class AutoTraderService:
         try:
             parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
             if parsed.tzinfo is not None:
-                parsed = parsed.astimezone(ZoneInfo("Asia/Kolkata")).replace(tzinfo=None)
+                parsed = parsed.astimezone(ZoneInfo("Asia/Kolkata")).replace(
+                    tzinfo=None
+                )
             return parsed
         except (TypeError, ValueError):
             return None
@@ -508,7 +641,9 @@ class AutoTraderService:
             ]
         )
 
-    def _place_once(self, signal: Signal, opportunity_id: int | None = None) -> dict[str, Any] | None:
+    def _place_once(
+        self, signal: Signal, opportunity_id: int | None = None
+    ) -> dict[str, Any] | None:
         order_key = self._order_key(signal)
         service = self.order_service_factory()
         result = service.place_signal_order(
@@ -524,10 +659,14 @@ class AutoTraderService:
             "result": result,
         }
         self.executions.append(execution)
-        self.notification_service.send(f"Auto trader placed {result.get('status')} order for {signal.tradingsymbol or signal.symbol}")
+        self.notification_service.send(
+            f"Auto trader placed {result.get('status')} order for {signal.tradingsymbol or signal.symbol}"
+        )
         return execution
 
-    def _place_shadow_paper(self, signal: Signal, opportunity_id: int | None = None, reason: str = "") -> dict[str, Any]:
+    def _place_shadow_paper(
+        self, signal: Signal, opportunity_id: int | None = None, reason: str = ""
+    ) -> dict[str, Any]:
         service = self.order_service_factory()
         result = service.place_signal_order(
             signal,
@@ -543,5 +682,7 @@ class AutoTraderService:
             "result": result,
         }
         self.executions.append(execution)
-        self.notification_service.send(f"Auto trader recorded paper shadow for {signal.tradingsymbol or signal.symbol}")
+        self.notification_service.send(
+            f"Auto trader recorded paper shadow for {signal.tradingsymbol or signal.symbol}"
+        )
         return execution

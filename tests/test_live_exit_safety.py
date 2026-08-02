@@ -16,7 +16,14 @@ from app.services.time_utils import ist_now_naive
 
 
 class LiveExitProvider:
-    def __init__(self, *, order_status: str = "COMPLETE", position_quantity: int = 0, average_price: float = 111.0, filled_quantity: int = 15) -> None:
+    def __init__(
+        self,
+        *,
+        order_status: str = "COMPLETE",
+        position_quantity: int = 0,
+        average_price: float = 111.0,
+        filled_quantity: int = 15,
+    ) -> None:
         self.order_status = order_status
         self.position_quantity = position_quantity
         self.average_price = average_price
@@ -27,11 +34,28 @@ class LiveExitProvider:
 
     def instruments(self, exchange=None):
         if exchange == "NFO":
-            return [{"tradingsymbol": "BANKNIFTY26JUL58000CE", "exchange": "NFO", "instrument_token": 123}]
-        return [{"tradingsymbol": "NIFTY BANK", "name": "NIFTY BANK", "instrument_token": 260105}]
+            return [
+                {
+                    "tradingsymbol": "BANKNIFTY26JUL58000CE",
+                    "exchange": "NFO",
+                    "instrument_token": 123,
+                }
+            ]
+        return [
+            {
+                "tradingsymbol": "NIFTY BANK",
+                "name": "NIFTY BANK",
+                "instrument_token": 260105,
+            }
+        ]
 
     def quote(self, instruments):
-        return {instruments[0]: {"last_price": 111.0, "depth": {"buy": [{"price": 110.5}], "sell": [{"price": 111.0}]}}}
+        return {
+            instruments[0]: {
+                "last_price": 111.0,
+                "depth": {"buy": [{"price": 110.5}], "sell": [{"price": 111.0}]},
+            }
+        }
 
     def place_order(self, **kwargs):
         with self._lock:
@@ -54,7 +78,15 @@ class LiveExitProvider:
         ]
 
     def positions(self):
-        return {"net": [{"exchange": "NFO", "tradingsymbol": "BANKNIFTY26JUL58000CE", "quantity": self.position_quantity}]}
+        return {
+            "net": [
+                {
+                    "exchange": "NFO",
+                    "tradingsymbol": "BANKNIFTY26JUL58000CE",
+                    "quantity": self.position_quantity,
+                }
+            ]
+        }
 
 
 class BrokerPositionOnlyProvider(LiveExitProvider):
@@ -77,9 +109,13 @@ class ProtectiveExitProvider(LiveExitProvider):
                 {
                     "order_id": order_id,
                     "status": self.protective_status,
-                    "filled_quantity": 0 if self.protective_status.upper() not in {"COMPLETE", "FILLED"} else 15,
+                    "filled_quantity": 0
+                    if self.protective_status.upper() not in {"COMPLETE", "FILLED"}
+                    else 15,
                     "quantity": 15,
-                    "average_price": self.average_price if self.protective_status.upper() in {"COMPLETE", "FILLED"} else 0,
+                    "average_price": self.average_price
+                    if self.protective_status.upper() in {"COMPLETE", "FILLED"}
+                    else 0,
                 }
             ]
         return super().order_history(order_id)
@@ -92,7 +128,9 @@ class FixedActiveFeed:
         self.active_trade_tokens: set[int] = set()
         self.fallback_active = False
 
-    def latest_price(self, *, provider, exchange, tradingsymbol, instrument_token=None, mode="paper"):
+    def latest_price(
+        self, *, provider, exchange, tradingsymbol, instrument_token=None, mode="paper"
+    ):
         return PriceTick(
             instrument=f"{exchange}:{tradingsymbol}",
             price=self.price,
@@ -114,7 +152,11 @@ class FixedActiveFeed:
         return {"unsubscribed": sorted(tokens)}
 
     def status(self):
-        return {"websocket_enabled": True, "websocket_connected": True, "active_trade_tokens": sorted(self.active_trade_tokens)}
+        return {
+            "websocket_enabled": True,
+            "websocket_connected": True,
+            "active_trade_tokens": sorted(self.active_trade_tokens),
+        }
 
 
 class LiveExitSafetyTests(unittest.TestCase):
@@ -157,7 +199,14 @@ class LiveExitSafetyTests(unittest.TestCase):
             quantity=15,
             score=90,
         )
-        return self.repo.create_trade(signal, mode="live", status=status, requested_quantity=15, placed_quantity=15, broker_order_id="entry-1")
+        return self.repo.create_trade(
+            signal,
+            mode="live",
+            status=status,
+            requested_quantity=15,
+            placed_quantity=15,
+            broker_order_id="entry-1",
+        )
 
     def _service(self, provider: LiveExitProvider) -> TradeExitService:
         return TradeExitService(
@@ -173,16 +222,27 @@ class LiveExitSafetyTests(unittest.TestCase):
         service = self._service(provider)
 
         with ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(lambda _: service.evaluate_once(limit=10), range(2)))
+            results = list(
+                pool.map(lambda _: service.evaluate_once(limit=10), range(2))
+            )
 
         self.assertEqual(provider.place_order_count, 1)
-        self.assertTrue(any(item["results"][0].get("reason") == "exit_already_pending_or_closed" for item in results))
+        self.assertTrue(
+            any(
+                item["results"][0].get("reason") == "exit_already_pending_or_closed"
+                for item in results
+            )
+        )
         self.assertEqual(self.repo.list_trades(limit=1)[0].status, "closing")
 
     def test_atomic_transition_allows_only_first_closer(self) -> None:
         record = self._create_live_trade()
-        first = self.repo.try_mark_closing(int(record.id), outcome="target_1", exit_price=111)
-        second = self.repo.try_mark_closing(int(record.id), outcome="stop_loss", exit_price=89)
+        first = self.repo.try_mark_closing(
+            int(record.id), outcome="target_1", exit_price=111
+        )
+        second = self.repo.try_mark_closing(
+            int(record.id), outcome="stop_loss", exit_price=89
+        )
 
         self.assertIsNotNone(first)
         self.assertIsNone(second)
@@ -206,7 +266,9 @@ class LiveExitSafetyTests(unittest.TestCase):
         result = self._service(provider).evaluate_once(limit=10)
         trade = self.repo.list_trades(limit=1)[0]
 
-        self.assertEqual(result["results"][0]["confirmation"]["reason"], "broker_position_not_zero")
+        self.assertEqual(
+            result["results"][0]["confirmation"]["reason"], "broker_position_not_zero"
+        )
         self.assertEqual(trade.status, "closing")
 
     def test_successful_broker_complete_and_zero_position_marks_closed(self) -> None:
@@ -229,7 +291,9 @@ class LiveExitSafetyTests(unittest.TestCase):
             trigger_price=90,
             broker_payload={"status": "OPEN"},
         )
-        provider = ProtectiveExitProvider(protective_status="OPEN", order_status="COMPLETE", position_quantity=0)
+        provider = ProtectiveExitProvider(
+            protective_status="OPEN", order_status="COMPLETE", position_quantity=0
+        )
 
         result = self._service(provider).evaluate_once(limit=10)
         updated = self.repo.list_trades(limit=1)[0]
@@ -239,7 +303,9 @@ class LiveExitSafetyTests(unittest.TestCase):
         self.assertEqual(provider.place_order_count, 1)
         self.assertEqual(updated.protective_order_status, "cancelled")
 
-    def test_stop_loss_waits_for_pending_protective_sl_and_does_not_double_sell(self) -> None:
+    def test_stop_loss_waits_for_pending_protective_sl_and_does_not_double_sell(
+        self,
+    ) -> None:
         trade = self._create_live_trade()
         self.repo.update_protective_order(
             int(trade.id),
@@ -248,7 +314,9 @@ class LiveExitSafetyTests(unittest.TestCase):
             trigger_price=90,
             broker_payload={"status": "TRIGGER PENDING"},
         )
-        provider = ProtectiveExitProvider(protective_status="TRIGGER PENDING", position_quantity=15)
+        provider = ProtectiveExitProvider(
+            protective_status="TRIGGER PENDING", position_quantity=15
+        )
         service = TradeExitService(
             trade_repository=self.repo,
             kite_provider_factory=lambda: provider,
@@ -259,7 +327,9 @@ class LiveExitSafetyTests(unittest.TestCase):
         result = service.evaluate_once(limit=10)
         updated = self.repo.list_trades(limit=1)[0]
 
-        self.assertEqual(result["results"][0]["reason"], "protective_stop_order_pending")
+        self.assertEqual(
+            result["results"][0]["reason"], "protective_stop_order_pending"
+        )
         self.assertEqual(provider.place_order_count, 0)
         self.assertEqual(updated.status, "filled")
 
@@ -274,15 +344,29 @@ class LiveExitSafetyTests(unittest.TestCase):
         self.assertEqual({item.status for item in alerts}, {"closing", "exit_failed"})
 
     def test_startup_broker_without_local_trade_blocks_live_automation(self) -> None:
-        provider = BrokerPositionOnlyProvider({"net": [{"exchange": "NFO", "tradingsymbol": "BANKNIFTY26JUL58000CE", "quantity": 15}]})
+        provider = BrokerPositionOnlyProvider(
+            {
+                "net": [
+                    {
+                        "exchange": "NFO",
+                        "tradingsymbol": "BANKNIFTY26JUL58000CE",
+                        "quantity": 15,
+                    }
+                ]
+            }
+        )
         service = BrokerSyncService(self.repo, kite_provider_factory=lambda: provider)
 
         result = service.reconcile_startup_positions()
 
         self.assertTrue(result["live_trading_blocked"])
-        self.assertEqual(result["mismatches"][0]["type"], "broker_position_without_local_trade")
+        self.assertEqual(
+            result["mismatches"][0]["type"], "broker_position_without_local_trade"
+        )
 
-    def test_local_trade_without_broker_position_marks_mismatch_and_blocks(self) -> None:
+    def test_local_trade_without_broker_position_marks_mismatch_and_blocks(
+        self,
+    ) -> None:
         self._create_live_trade()
         provider = BrokerPositionOnlyProvider({"net": []})
         service = BrokerSyncService(self.repo, kite_provider_factory=lambda: provider)
@@ -297,12 +381,37 @@ class LiveExitSafetyTests(unittest.TestCase):
         record = self._create_live_trade()
         provider = LiveExitProvider(order_status="COMPLETE", position_quantity=0)
         calls = []
-        service = BrokerSyncService(self.repo, kite_provider_factory=lambda: provider, exit_confirmation_callback=lambda trade_id: calls.append(trade_id) or {"trade_id": trade_id})
+        service = BrokerSyncService(
+            self.repo,
+            kite_provider_factory=lambda: provider,
+            exit_confirmation_callback=lambda trade_id: (
+                calls.append(trade_id) or {"trade_id": trade_id}
+            ),
+        )
         self.repo.try_mark_closing(int(record.id), outcome="target_1", exit_price=111)
-        self.repo.update_exit_order_status(int(record.id), status="submitted", exit_order_id="exit-1", broker_payload={})
+        self.repo.update_exit_order_status(
+            int(record.id),
+            status="submitted",
+            exit_order_id="exit-1",
+            broker_payload={},
+        )
 
-        first = service.handle_order_postback({"order_id": "exit-1", "status": "COMPLETE", "filled_quantity": 15, "average_price": 111})
-        second = service.handle_order_postback({"order_id": "exit-1", "status": "COMPLETE", "filled_quantity": 15, "average_price": 111})
+        first = service.handle_order_postback(
+            {
+                "order_id": "exit-1",
+                "status": "COMPLETE",
+                "filled_quantity": 15,
+                "average_price": 111,
+            }
+        )
+        second = service.handle_order_postback(
+            {
+                "order_id": "exit-1",
+                "status": "COMPLETE",
+                "filled_quantity": 15,
+                "average_price": 111,
+            }
+        )
 
         self.assertTrue(first["handled"])
         self.assertTrue(second["duplicate"])
@@ -341,10 +450,25 @@ class LiveExitSafetyTests(unittest.TestCase):
             broker_payload={"status": "TRIGGER PENDING"},
         )
         calls = []
-        provider = ProtectiveExitProvider(protective_status="COMPLETE", position_quantity=0, average_price=89)
-        service = BrokerSyncService(self.repo, kite_provider_factory=lambda: provider, exit_confirmation_callback=lambda trade_id: calls.append(trade_id) or {"trade_id": trade_id, "closed": True})
+        provider = ProtectiveExitProvider(
+            protective_status="COMPLETE", position_quantity=0, average_price=89
+        )
+        service = BrokerSyncService(
+            self.repo,
+            kite_provider_factory=lambda: provider,
+            exit_confirmation_callback=lambda trade_id: (
+                calls.append(trade_id) or {"trade_id": trade_id, "closed": True}
+            ),
+        )
 
-        result = service.handle_order_postback({"order_id": "protective-1", "status": "COMPLETE", "filled_quantity": 15, "average_price": 89})
+        result = service.handle_order_postback(
+            {
+                "order_id": "protective-1",
+                "status": "COMPLETE",
+                "filled_quantity": 15,
+                "average_price": 89,
+            }
+        )
         updated = self.repo.list_trades(limit=1)[0]
 
         self.assertTrue(result["handled"])
@@ -361,14 +485,20 @@ class LiveExitSafetyTests(unittest.TestCase):
             trigger_price=90,
             broker_payload={"status": "TRIGGER PENDING"},
         )
-        provider = ProtectiveExitProvider(protective_status="CANCELLED", position_quantity=15)
+        provider = ProtectiveExitProvider(
+            protective_status="CANCELLED", position_quantity=15
+        )
         service = BrokerSyncService(self.repo, kite_provider_factory=lambda: provider)
 
-        result = service.handle_order_postback({"order_id": "protective-1", "status": "CANCELLED"})
+        result = service.handle_order_postback(
+            {"order_id": "protective-1", "status": "CANCELLED"}
+        )
 
         self.assertTrue(result["handled"])
         self.assertTrue(service.live_block_status()["blocked"])
-        self.assertIn("protective stop order cancelled", service.live_block_status()["reason"])
+        self.assertIn(
+            "protective stop order cancelled", service.live_block_status()["reason"]
+        )
 
 
 if __name__ == "__main__":

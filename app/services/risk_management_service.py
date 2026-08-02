@@ -22,9 +22,12 @@ class RiskManagementService:
     ) -> None:
         self.trade_repository = trade_repository or TradeRepository()
         self.account_funds_service = account_funds_service or AccountFundsService()
-        self.account_equity_state_service = account_equity_state_service or AccountEquityStateService(
-            trade_repository=self.trade_repository,
-            account_funds_service=self.account_funds_service,
+        self.account_equity_state_service = (
+            account_equity_state_service
+            or AccountEquityStateService(
+                trade_repository=self.trade_repository,
+                account_funds_service=self.account_funds_service,
+            )
         )
 
     def evaluate_entry(self) -> dict[str, Any]:
@@ -39,7 +42,9 @@ class RiskManagementService:
 
         available_cash = self._available_cash()
         risk_equity = max(float(equity_snapshot.current_audited_equity), 0.01)
-        max_daily_loss = float(equity_snapshot.start_of_day_equity) * (settings.max_realized_daily_loss_percent / 100)
+        max_daily_loss = float(equity_snapshot.start_of_day_equity) * (
+            settings.max_realized_daily_loss_percent / 100
+        )
         if float(summary["pnl"]) <= -abs(max_daily_loss):
             reasons.append("max daily loss reached")
 
@@ -57,7 +62,9 @@ class RiskManagementService:
         exposure = self.trade_repository.open_exposure_summary()
         if int(exposure["open_trades"]) >= settings.max_open_trades:
             reasons.append("max open trades reached")
-        max_open_premium = available_cash * (settings.max_open_premium_exposure_pct / 100)
+        max_open_premium = available_cash * (
+            settings.max_open_premium_exposure_pct / 100
+        )
         if float(exposure["premium_exposure"]) >= max_open_premium:
             reasons.append("max open premium exposure reached")
         if equity_snapshot.missing_bid_trade_ids:
@@ -67,8 +74,12 @@ class RiskManagementService:
             "planned_risk_today": equity_snapshot.daily_planned_risk,
             "total_open_risk": equity_snapshot.open_stop_risk,
             "banknifty_open_risk": equity_snapshot.open_stop_risk,
-            "planned_risk_today_pct": round(equity_snapshot.daily_planned_risk / risk_equity * 100.0, 4),
-            "total_open_risk_pct": round(equity_snapshot.open_stop_risk / risk_equity * 100.0, 4),
+            "planned_risk_today_pct": round(
+                equity_snapshot.daily_planned_risk / risk_equity * 100.0, 4
+            ),
+            "total_open_risk_pct": round(
+                equity_snapshot.open_stop_risk / risk_equity * 100.0, 4
+            ),
         }
 
         return {
@@ -123,7 +134,9 @@ class RiskManagementService:
         symbol_count = int(exposure.get("by_symbol", {}).get(symbol, 0))
         if symbol_count >= settings.max_symbol_open_trades:
             result = dict(result)
-            result["reasons"] = list(result["reasons"]) + ["max open trades for symbol reached"]
+            result["reasons"] = list(result["reasons"]) + [
+                "max open trades for symbol reached"
+            ]
             result["passed"] = False
         return result
 
@@ -131,22 +144,40 @@ class RiskManagementService:
         if settings.cooldown_after_stop_minutes <= 0:
             return None
         trades = self.trade_repository.today_trades()
-        stop_trades = [trade for trade in trades if trade.outcome == "stop_loss" and trade.updated_at]
+        stop_trades = [
+            trade
+            for trade in trades
+            if trade.outcome == "stop_loss" and trade.updated_at
+        ]
         if not stop_trades:
             return None
         latest = max(stop_trades, key=lambda trade: trade.updated_at)
-        latest_ist = latest.updated_at.replace(tzinfo=ZoneInfo("Asia/Kolkata")) if latest.updated_at.tzinfo is None else latest.updated_at.astimezone(ZoneInfo("Asia/Kolkata"))
-        cooldown_until = latest_ist + timedelta(minutes=settings.cooldown_after_stop_minutes)
+        latest_ist = (
+            latest.updated_at.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+            if latest.updated_at.tzinfo is None
+            else latest.updated_at.astimezone(ZoneInfo("Asia/Kolkata"))
+        )
+        cooldown_until = latest_ist + timedelta(
+            minutes=settings.cooldown_after_stop_minutes
+        )
         if ist_now() < cooldown_until:
             return "cooldown after stop loss is active"
         return None
 
     def _consecutive_losses(self) -> int:
-        closed = [trade for trade in self.trade_repository.today_trades() if trade.status == "closed"]
-        closed.sort(key=lambda trade: trade.updated_at or trade.created_at, reverse=True)
+        closed = [
+            trade
+            for trade in self.trade_repository.today_trades()
+            if trade.status == "closed"
+        ]
+        closed.sort(
+            key=lambda trade: trade.updated_at or trade.created_at, reverse=True
+        )
         count = 0
         for trade in closed:
-            pnl = float(trade.net_pnl if trade.net_pnl is not None else trade.pnl or 0.0)
+            pnl = float(
+                trade.net_pnl if trade.net_pnl is not None else trade.pnl or 0.0
+            )
             if pnl >= 0:
                 break
             count += 1
@@ -160,7 +191,13 @@ class RiskManagementService:
             approved = float(getattr(trade, "approved_risk_amount", 0.0) or 0.0)
             planned_risk += approved
         for trade in self.trade_repository.open_trades():
-            quantity = int(trade.remaining_quantity or trade.filled_quantity or trade.placed_quantity or trade.requested_quantity or 0)
+            quantity = int(
+                trade.remaining_quantity
+                or trade.filled_quantity
+                or trade.placed_quantity
+                or trade.requested_quantity
+                or 0
+            )
             estimated = float(getattr(trade, "estimated_loss_at_stop", 0.0) or 0.0)
             if estimated <= 0:
                 entry = float(trade.average_price or trade.entry_price or 0.0)
@@ -173,6 +210,10 @@ class RiskManagementService:
             "planned_risk_today": round(planned_risk, 2),
             "total_open_risk": round(total_open_risk, 2),
             "banknifty_open_risk": round(banknifty_open_risk, 2),
-            "planned_risk_today_pct": round(planned_risk / max(available_cash, 0.01) * 100.0, 4),
-            "total_open_risk_pct": round(total_open_risk / max(available_cash, 0.01) * 100.0, 4),
+            "planned_risk_today_pct": round(
+                planned_risk / max(available_cash, 0.01) * 100.0, 4
+            ),
+            "total_open_risk_pct": round(
+                total_open_risk / max(available_cash, 0.01) * 100.0, 4
+            ),
         }

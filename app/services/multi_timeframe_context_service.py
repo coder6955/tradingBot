@@ -46,7 +46,9 @@ class MultiTimeframeContextService:
         "1minute": ("1minute", "1min"),
     }
 
-    def load_completed_candles(self, symbol: str, *, as_of: datetime | None = None) -> dict[str, list[Candle]]:
+    def load_completed_candles(
+        self, symbol: str, *, as_of: datetime | None = None
+    ) -> dict[str, list[Candle]]:
         """Load both active timeframes in one bounded database query."""
         return self._load_bulk(symbol, as_of=as_of)
 
@@ -62,18 +64,32 @@ class MultiTimeframeContextService:
         desired = "bullish" if trend.lower() == "bullish" else "bearish"
         frames: list[_Frame] = []
         errors: list[str] = []
-        loaded = candle_sets if candle_sets is not None else self._load_bulk(symbol, as_of=as_of)
+        loaded = (
+            candle_sets
+            if candle_sets is not None
+            else self._load_bulk(symbol, as_of=as_of)
+        )
         evaluation_at = (as_of or ist_now_naive()).replace(tzinfo=None)
         opening_session = self._is_opening_session(evaluation_at)
         for timeframe, responsibility in self.RESPONSIBILITIES.items():
             try:
                 candles = list(loaded.get(timeframe, []))[-80:]
-            except Exception as exc:  # database loss must be observable but must not crash scanning
+            except (
+                Exception
+            ) as exc:  # database loss must be observable but must not crash scanning
                 errors.append(f"{timeframe}_load_failed:{type(exc).__name__}")
                 candles = []
             required = self._required_candles(timeframe, opening_session)
             if len(candles) >= required:
-                frames.append(self._frame(timeframe, responsibility, candles, min_candles=required, opening_session=opening_session))
+                frames.append(
+                    self._frame(
+                        timeframe,
+                        responsibility,
+                        candles,
+                        min_candles=required,
+                        opening_session=opening_session,
+                    )
+                )
 
         available = len(frames)
         aligned_weight = 0.0
@@ -93,10 +109,17 @@ class MultiTimeframeContextService:
 
         five = next((row for row in frames if row.timeframe == "5minute"), None)
         if five and five.strength >= 0.55 and five.direction != "neutral":
-            regime = "trend_expansion" if five.atr_pct >= self._median_atr(frames) else "directional_acceptance"
+            regime = (
+                "trend_expansion"
+                if five.atr_pct >= self._median_atr(frames)
+                else "directional_acceptance"
+            )
         elif five and five.strength <= 0.22:
             regime = "compression_range"
-        elif available == 2 and len({row.direction for row in frames if row.direction != "neutral"}) > 1:
+        elif (
+            available == 2
+            and len({row.direction for row in frames if row.direction != "neutral"}) > 1
+        ):
             regime = "transition"
         else:
             regime = "balanced_rotation" if available else "unknown"
@@ -121,7 +144,10 @@ class MultiTimeframeContextService:
             "uncertainty": round(uncertainty, 3),
             "reasons": reasons,
             "frames": [frame.__dict__ for frame in frames],
-            "responsibilities": {**self.RESPONSIBILITIES, "tick": "execution_and_fill_confirmation"},
+            "responsibilities": {
+                **self.RESPONSIBILITIES,
+                "tick": "execution_and_fill_confirmation",
+            },
             "timeframes_used": ["1minute", "5minute"],
             "hard_block": False,
             "opening_session": opening_session,
@@ -131,7 +157,9 @@ class MultiTimeframeContextService:
             },
         }
 
-    def _load_bulk(self, symbol: str, *, as_of: datetime | None = None) -> dict[str, list[Candle]]:
+    def _load_bulk(
+        self, symbol: str, *, as_of: datetime | None = None
+    ) -> dict[str, list[Candle]]:
         cutoff = (as_of or ist_now_naive()).replace(tzinfo=None)
         session = get_session()
         try:
@@ -150,15 +178,23 @@ class MultiTimeframeContextService:
             grouped: dict[str, list[Candle]] = {"1minute": [], "5minute": []}
             for row in rows:
                 timeframe = str(row.timeframe)
-                completion = row.timestamp.replace(tzinfo=None) + timedelta(minutes=1 if timeframe == "1minute" else 5)
+                completion = row.timestamp.replace(tzinfo=None) + timedelta(
+                    minutes=1 if timeframe == "1minute" else 5
+                )
                 if timeframe in grouped and completion <= cutoff:
                     grouped[timeframe].append(row)
             completed_rows = [row for values in grouped.values() for row in values]
             if not completed_rows:
                 return grouped
-            latest_session = max(row.timestamp.replace(tzinfo=None).date() for row in completed_rows)
+            latest_session = max(
+                row.timestamp.replace(tzinfo=None).date() for row in completed_rows
+            )
             return {
-                name: [row for row in values if row.timestamp.replace(tzinfo=None).date() == latest_session][-80:]
+                name: [
+                    row
+                    for row in values
+                    if row.timestamp.replace(tzinfo=None).date() == latest_session
+                ][-80:]
                 for name, values in grouped.items()
             }
         finally:
@@ -198,16 +234,31 @@ class MultiTimeframeContextService:
         true_ranges = []
         previous = closes[0]
         for high, low, close in zip(highs[1:], lows[1:], closes[1:]):
-            true_ranges.append(max(high - low, abs(high - previous), abs(low - previous)))
+            true_ranges.append(
+                max(high - low, abs(high - previous), abs(low - previous))
+            )
             previous = close
         atr = sum(true_ranges[-14:]) / max(1, len(true_ranges[-14:]))
         atr_pct = (atr / max(closes[-1], 0.01)) * 100
         window_high = max(highs[-20:])
         window_low = min(lows[-20:])
         position = (closes[-1] - window_low) / max(window_high - window_low, 0.01)
-        score = round(50 + (50 * strength if direction == "bullish" else -50 * strength if direction == "bearish" else 0))
+        score = round(
+            50
+            + (
+                50 * strength
+                if direction == "bullish"
+                else -50 * strength
+                if direction == "bearish"
+                else 0
+            )
+        )
         last = candles[-1]
-        timestamp = last.timestamp.replace(tzinfo=None) if isinstance(last.timestamp, datetime) else datetime.fromisoformat(str(last.timestamp)).replace(tzinfo=None)
+        timestamp = (
+            last.timestamp.replace(tzinfo=None)
+            if isinstance(last.timestamp, datetime)
+            else datetime.fromisoformat(str(last.timestamp)).replace(tzinfo=None)
+        )
         return _Frame(
             timeframe,
             responsibility,
@@ -235,11 +286,15 @@ class MultiTimeframeContextService:
 
     def _is_opening_session(self, value: datetime) -> bool:
         try:
-            hour, minute = (int(part) for part in settings.opening_structure_end_time.split(":", 1))
+            hour, minute = (
+                int(part) for part in settings.opening_structure_end_time.split(":", 1)
+            )
         except (TypeError, ValueError):
             hour, minute = 9, 45
         session_open = value.replace(hour=9, minute=15, second=0, microsecond=0).time()
-        opening_end = value.replace(hour=hour, minute=minute, second=0, microsecond=0).time()
+        opening_end = value.replace(
+            hour=hour, minute=minute, second=0, microsecond=0
+        ).time()
         return session_open <= value.time() < opening_end
 
     def _median_atr(self, frames: list[_Frame]) -> float:

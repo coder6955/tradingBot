@@ -43,14 +43,18 @@ class LatencyMetricsService:
 
     def __init__(self, *, sample_limit: int | None = None) -> None:
         self.sample_limit = max(10, int(sample_limit or settings.latency_sample_limit))
-        self._samples: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=self.sample_limit))
+        self._samples: dict[str, deque[float]] = defaultdict(
+            lambda: deque(maxlen=self.sample_limit)
+        )
         self._last_events: dict[str, dict[str, Any]] = {}
         self._missing_samples: dict[str, int] = defaultdict(int)
         self._lock = RLock()
         self.dropped_event_count = 0
         self.critical_dropped_event_count = 0
 
-    def record(self, name: str, milliseconds: float, *, detail: dict[str, Any] | None = None) -> dict[str, Any]:
+    def record(
+        self, name: str, milliseconds: float, *, detail: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         value = max(0.0, float(milliseconds))
         event = {
             "metric": str(name),
@@ -76,7 +80,9 @@ class LatencyMetricsService:
             return None
         finish = (end or ist_now_naive()).replace(tzinfo=None)
         beginning = start.replace(tzinfo=None)
-        return self.record(name, max(0.0, (finish - beginning).total_seconds() * 1000.0), detail=detail)
+        return self.record(
+            name, max(0.0, (finish - beginning).total_seconds() * 1000.0), detail=detail
+        )
 
     def record_queue_drop(self, *, critical: bool, detail: dict[str, Any]) -> None:
         with self._lock:
@@ -85,7 +91,9 @@ class LatencyMetricsService:
                 self.critical_dropped_event_count += 1
         self.record("queue_event_drop", 0.0, detail={**detail, "critical": critical})
 
-    def record_missing(self, name: str, *, detail: dict[str, Any] | None = None) -> None:
+    def record_missing(
+        self, name: str, *, detail: dict[str, Any] | None = None
+    ) -> None:
         with self._lock:
             self._missing_samples[str(name)] += 1
             self._last_events[str(name)] = {
@@ -98,9 +106,17 @@ class LatencyMetricsService:
 
     def report(self) -> dict[str, Any]:
         with self._lock:
-            names = set(self.REQUIRED_METRICS) | set(self._samples) | set(self._missing_samples)
+            names = (
+                set(self.REQUIRED_METRICS)
+                | set(self._samples)
+                | set(self._missing_samples)
+            )
             metrics = {
-                name: self._summary(list(self._samples.get(name, ())), self._last_events.get(name), self._missing_samples.get(name, 0))
+                name: self._summary(
+                    list(self._samples.get(name, ())),
+                    self._last_events.get(name),
+                    self._missing_samples.get(name, 0),
+                )
                 for name in sorted(names)
             }
             dropped = self.dropped_event_count
@@ -119,7 +135,12 @@ class LatencyMetricsService:
             **current_strategy_lineage(),
         }
 
-    def _summary(self, values: list[float], last_event: dict[str, Any] | None, missing_samples: int = 0) -> dict[str, Any]:
+    def _summary(
+        self,
+        values: list[float],
+        last_event: dict[str, Any] | None,
+        missing_samples: int = 0,
+    ) -> dict[str, Any]:
         ordered = sorted(values)
         return {
             "sample_size": len(ordered),

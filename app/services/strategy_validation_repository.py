@@ -10,7 +10,17 @@ from app.services.strategy_lineage_service import current_strategy_lineage
 class StrategyValidationRepository:
     """Persist measured strategy edge so execution can be gated by evidence."""
 
-    def save(self, *, strategy_name: str, symbol: str, timeframe: str, direction: str, mode: str, result: dict[str, Any], passed: bool) -> StrategyValidationRecord:
+    def save(
+        self,
+        *,
+        strategy_name: str,
+        symbol: str,
+        timeframe: str,
+        direction: str,
+        mode: str,
+        result: dict[str, Any],
+        passed: bool,
+    ) -> StrategyValidationRecord:
         summary = result.get("summary") or result.get("test_summary") or {}
         lineage = current_strategy_lineage()
         record = StrategyValidationRecord(
@@ -40,7 +50,15 @@ class StrategyValidationRepository:
         finally:
             session.close()
 
-    def latest(self, *, strategy_name: str, symbol: str, timeframe: str, direction: str, mode: str = "walk_forward_option") -> StrategyValidationRecord | None:
+    def latest(
+        self,
+        *,
+        strategy_name: str,
+        symbol: str,
+        timeframe: str,
+        direction: str,
+        mode: str = "walk_forward_option",
+    ) -> StrategyValidationRecord | None:
         session = get_session()
         try:
             return (
@@ -61,7 +79,12 @@ class StrategyValidationRepository:
     def recent(self, *, limit: int = 50) -> list[StrategyValidationRecord]:
         session = get_session()
         try:
-            return session.query(StrategyValidationRecord).order_by(StrategyValidationRecord.id.desc()).limit(limit).all()
+            return (
+                session.query(StrategyValidationRecord)
+                .order_by(StrategyValidationRecord.id.desc())
+                .limit(limit)
+                .all()
+            )
         finally:
             session.close()
 

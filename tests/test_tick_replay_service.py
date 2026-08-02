@@ -10,9 +10,17 @@ class TickReplayServiceTests(unittest.TestCase):
         base = datetime(2026, 7, 17, 14, 10)
         result = TickReplayService(lambda tick: seen.append(tick.price)).replay(
             [
-                {"instrument_token": 1, "price": 102, "timestamp": base + timedelta(seconds=2)},
+                {
+                    "instrument_token": 1,
+                    "price": 102,
+                    "timestamp": base + timedelta(seconds=2),
+                },
                 {"instrument_token": 1, "price": 100, "timestamp": base},
-                {"instrument_token": 1, "price": 101, "timestamp": base + timedelta(seconds=1)},
+                {
+                    "instrument_token": 1,
+                    "price": 101,
+                    "timestamp": base + timedelta(seconds=1),
+                },
             ]
         )
 

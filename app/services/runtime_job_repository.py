@@ -38,7 +38,9 @@ class RuntimeJobRepository:
         finally:
             session.close()
 
-    def count(self, *, job_name: str, trading_date: str, status: str | None = None) -> int:
+    def count(
+        self, *, job_name: str, trading_date: str, status: str | None = None
+    ) -> int:
         session = get_session()
         try:
             query = (
@@ -52,7 +54,13 @@ class RuntimeJobRepository:
         finally:
             session.close()
 
-    def start(self, *, job_name: str, trading_date: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    def start(
+        self,
+        *,
+        job_name: str,
+        trading_date: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         session = get_session()
         try:
             now = ist_now_naive()
@@ -80,14 +88,20 @@ class RuntimeJobRepository:
     ) -> dict[str, Any] | None:
         session = get_session()
         try:
-            row = session.query(RuntimeJobRunRecord).filter(RuntimeJobRunRecord.id == int(run_id)).first()
+            row = (
+                session.query(RuntimeJobRunRecord)
+                .filter(RuntimeJobRunRecord.id == int(run_id))
+                .first()
+            )
             if row is None:
                 return None
             completed_at = ist_now_naive()
             row.status = status
             row.completed_at = completed_at
             if row.started_at is not None:
-                row.duration_ms = int(max(0.0, (completed_at - row.started_at).total_seconds()) * 1000)
+                row.duration_ms = int(
+                    max(0.0, (completed_at - row.started_at).total_seconds()) * 1000
+                )
             row.error_message = error_message
             if metadata is not None:
                 row.metadata_json = json.dumps(metadata, default=str)

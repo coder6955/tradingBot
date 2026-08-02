@@ -11,7 +11,10 @@ from datetime import datetime, timedelta
 from app.config import settings
 from app.models import Signal
 from app.services.database import get_session, init_db
-from app.services.episode_outcome_collector import EpisodeOutcomeCollector, MarketPathEvent
+from app.services.episode_outcome_collector import (
+    EpisodeOutcomeCollector,
+    MarketPathEvent,
+)
 from app.services.evidence_persistence_queue import EvidencePersistenceQueue
 from app.services.latency_metrics_service import LatencyMetricsService
 from app.services.pre_order_risk_service import PreOrderRiskService
@@ -24,7 +27,11 @@ class PassingRisk:
             "passed": True,
             "reasons": [],
             "summary": {"trades": 0, "pnl": 0.0, "stop_losses": 0},
-            "open_exposure": {"open_trades": 0, "by_symbol": {}, "premium_exposure": 0.0},
+            "open_exposure": {
+                "open_trades": 0,
+                "by_symbol": {},
+                "premium_exposure": 0.0,
+            },
             "limits": {"available_cash": 100000.0, "current_audited_equity": 100000.0},
             "risk_state": {
                 "current_audited_equity": 100000.0,
@@ -81,9 +88,15 @@ def summary(values: list[float]) -> dict[str, float | int | None]:
     }
 
 
-def benchmark_pre_order(*, asynchronous_evidence: bool, offset: int, samples: int) -> tuple[dict[str, object], dict[str, object]]:
+def benchmark_pre_order(
+    *, asynchronous_evidence: bool, offset: int, samples: int
+) -> tuple[dict[str, object], dict[str, object]]:
     metrics = LatencyMetricsService(sample_limit=max(100, samples))
-    evidence_queue = EvidencePersistenceQueue(max_size=samples + 10, start_worker=False) if asynchronous_evidence else None
+    evidence_queue = (
+        EvidencePersistenceQueue(max_size=samples + 10, start_worker=False)
+        if asynchronous_evidence
+        else None
+    )
     service = PreOrderRiskService(
         risk_management_service=PassingRisk(),
         evidence_queue=evidence_queue,
@@ -183,11 +196,16 @@ def benchmark_outcomes(samples: int = 500) -> dict[str, object]:
         started = time.perf_counter()
         drain.process_event(event)
         process_durations.append((time.perf_counter() - started) * 1000.0)
-    return {"callback_enqueue": summary(enqueue_durations), "worker_processing": summary(process_durations)}
+    return {
+        "callback_enqueue": summary(enqueue_durations),
+        "worker_processing": summary(process_durations),
+    }
 
 
 def main() -> None:
-    snapshot = {item.name: getattr(settings, item.name) for item in fields(type(settings))}
+    snapshot = {
+        item.name: getattr(settings, item.name) for item in fields(type(settings))
+    }
     handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     handle.close()
     try:
@@ -196,20 +214,24 @@ def main() -> None:
         object.__setattr__(settings, "max_realized_daily_loss_percent", 10.0)
         object.__setattr__(settings, "max_total_open_risk_percent", 10.0)
         object.__setattr__(settings, "max_banknifty_open_risk_percent", 10.0)
-        asynchronous, components = benchmark_pre_order(asynchronous_evidence=True, offset=0, samples=200)
-        synchronous, synchronous_components = benchmark_pre_order(asynchronous_evidence=False, offset=1000, samples=100)
+        asynchronous, components = benchmark_pre_order(
+            asynchronous_evidence=True, offset=0, samples=200
+        )
+        synchronous, synchronous_components = benchmark_pre_order(
+            asynchronous_evidence=False, offset=1000, samples=100
+        )
         report = {
-                    "benchmark": "local_sqlite_shadow_validation_v1",
-                    "legacy_reported_baseline_ms": {"p50": 92, "p95": 111, "p99": 117},
-                    "safe_async_final_pre_order": asynchronous,
-                    "synchronous_evidence_comparison": synchronous,
-                    "component_metrics": components,
-                    "synchronous_component_metrics": synchronous_components,
-                    "sqlite_empty_commit": benchmark_sqlite_commit(),
-                    "trade_persistence": benchmark_trade_persistence(),
-                    "outcome_collector": benchmark_outcomes(),
-                    "target_p95_ms": 25.0,
-                    "target_met": float(asynchronous["p95_ms"] or 999999) <= 25.0,
+            "benchmark": "local_sqlite_shadow_validation_v1",
+            "legacy_reported_baseline_ms": {"p50": 92, "p95": 111, "p99": 117},
+            "safe_async_final_pre_order": asynchronous,
+            "synchronous_evidence_comparison": synchronous,
+            "component_metrics": components,
+            "synchronous_component_metrics": synchronous_components,
+            "sqlite_empty_commit": benchmark_sqlite_commit(),
+            "trade_persistence": benchmark_trade_persistence(),
+            "outcome_collector": benchmark_outcomes(),
+            "target_p95_ms": 25.0,
+            "target_met": float(asynchronous["p95_ms"] or 999999) <= 25.0,
         }
         print(json.dumps(report, indent=2, sort_keys=True))
         if not report["target_met"]:

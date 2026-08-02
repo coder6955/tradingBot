@@ -10,7 +10,21 @@ VENV_SITE_PACKAGES = PROJECT_ROOT / ".venv" / "Lib" / "site-packages"
 if VENV_SITE_PACKAGES.exists() and str(VENV_SITE_PACKAGES) not in sys.path:
     sys.path.append(str(VENV_SITE_PACKAGES))
 
-from sqlalchemy import BigInteger, Column, DateTime, Float, Index, Integer, String, Text, UniqueConstraint, create_engine, event, inspect, text
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    DateTime,
+    Float,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    event,
+    inspect,
+    text,
+)
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.config import settings
@@ -24,7 +38,11 @@ SessionLocal = None
 
 class Candle(Base):
     __tablename__ = "candles"
-    __table_args__ = (UniqueConstraint("symbol", "timeframe", "timestamp", name="uq_candle_series_timestamp"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "symbol", "timeframe", "timestamp", name="uq_candle_series_timestamp"
+        ),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String(50), nullable=False, index=True)
@@ -100,7 +118,12 @@ class OpportunityRecord(Base):
     score = Column(Integer, nullable=False)
     probability = Column(Float, nullable=True)
     heuristic_score_confidence = Column(Float, nullable=True)
-    probability_source = Column(String(50), nullable=False, default="unavailable_insufficient_calibration", index=True)
+    probability_source = Column(
+        String(50),
+        nullable=False,
+        default="unavailable_insufficient_calibration",
+        index=True,
+    )
     calibration_version = Column(String(100), nullable=True, index=True)
     strategy_version = Column(String(100), nullable=True, index=True)
     config_hash = Column(String(64), nullable=True, index=True)
@@ -333,7 +356,12 @@ class DecisionRiskEvidenceRecord(Base):
 class DecisionOutcomeRecord(Base):
     __tablename__ = "decision_outcomes"
     __table_args__ = (
-        UniqueConstraint("episode_key", "horizon", "outcome_source", name="uq_episode_horizon_outcome_source"),
+        UniqueConstraint(
+            "episode_key",
+            "horizon",
+            "outcome_source",
+            name="uq_episode_horizon_outcome_source",
+        ),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -374,7 +402,11 @@ class EpisodeObservationRecord(Base):
 
 class ShadowPolicyDecisionRecord(Base):
     __tablename__ = "shadow_policy_decisions"
-    __table_args__ = (UniqueConstraint("episode_key", "policy_version", name="uq_episode_shadow_policy"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "episode_key", "policy_version", name="uq_episode_shadow_policy"
+        ),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
@@ -428,7 +460,11 @@ class AccountEquitySnapshotRecord(Base):
 
 class RawTickRecord(Base):
     __tablename__ = "raw_ticks"
-    __table_args__ = (UniqueConstraint("session_date", "sequence", name="uq_raw_tick_session_sequence"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "session_date", "sequence", name="uq_raw_tick_session_sequence"
+        ),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     created_at = Column(DateTime, nullable=False, default=ist_now_naive, index=True)
@@ -511,10 +547,18 @@ class ArmedEntryRecord(Base):
 def init_db(database_url: Optional[str] = None) -> None:
     global engine, SessionLocal
     url = database_url or settings.database_url
-    connect_args = {"connect_timeout": 5} if url.startswith("mysql") else {"check_same_thread": False} if url.startswith("sqlite") else {}
+    connect_args = (
+        {"connect_timeout": 5}
+        if url.startswith("mysql")
+        else {"check_same_thread": False}
+        if url.startswith("sqlite")
+        else {}
+    )
     engine = create_engine(url, future=True, connect_args=connect_args)
     event.listen(engine, "before_cursor_execute", _record_database_query)
-    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    SessionLocal = sessionmaker(
+        bind=engine, autoflush=False, autocommit=False, expire_on_commit=False
+    )
     Base.metadata.create_all(bind=engine)
     _ensure_candle_columns()
     _ensure_opportunity_columns()
@@ -550,7 +594,9 @@ def _ensure_candle_columns() -> None:
     with engine.begin() as connection:
         for column, column_type in required.items():
             if column not in existing:
-                connection.execute(text(f"ALTER TABLE candles ADD COLUMN {column} {column_type}"))
+                connection.execute(
+                    text(f"ALTER TABLE candles ADD COLUMN {column} {column_type}")
+                )
 
 
 def _ensure_opportunity_columns() -> None:
@@ -571,9 +617,13 @@ def _ensure_opportunity_columns() -> None:
     with engine.begin() as connection:
         for column, column_type in required.items():
             if column not in columns:
-                connection.execute(text(f"ALTER TABLE opportunities ADD COLUMN {column} {column_type}"))
+                connection.execute(
+                    text(f"ALTER TABLE opportunities ADD COLUMN {column} {column_type}")
+                )
         if engine.dialect.name.startswith("mysql"):
-            connection.execute(text("ALTER TABLE opportunities MODIFY COLUMN probability FLOAT NULL"))
+            connection.execute(
+                text("ALTER TABLE opportunities MODIFY COLUMN probability FLOAT NULL")
+            )
 
 
 def _ensure_trade_columns() -> None:
@@ -646,7 +696,9 @@ def _ensure_trade_columns() -> None:
     with engine.begin() as connection:
         for column, column_type in required.items():
             if column not in existing:
-                connection.execute(text(f"ALTER TABLE trades ADD COLUMN {column} {column_type}"))
+                connection.execute(
+                    text(f"ALTER TABLE trades ADD COLUMN {column} {column_type}")
+                )
 
 
 def _ensure_rejected_opportunity_columns() -> None:
@@ -677,11 +729,23 @@ def _ensure_rejected_opportunity_columns() -> None:
     with engine.begin() as connection:
         for column, column_type in required.items():
             if column not in existing:
-                connection.execute(text(f"ALTER TABLE rejected_opportunities ADD COLUMN {column} {column_type}"))
-        later_outcome_column = next((column for column in columns if column["name"] == "later_outcome"), None)
-        later_outcome_type = str(later_outcome_column.get("type", "") if later_outcome_column else "").lower()
+                connection.execute(
+                    text(
+                        f"ALTER TABLE rejected_opportunities ADD COLUMN {column} {column_type}"
+                    )
+                )
+        later_outcome_column = next(
+            (column for column in columns if column["name"] == "later_outcome"), None
+        )
+        later_outcome_type = str(
+            later_outcome_column.get("type", "") if later_outcome_column else ""
+        ).lower()
         if engine.dialect.name.startswith("mysql") and "80" not in later_outcome_type:
-            connection.execute(text("ALTER TABLE rejected_opportunities MODIFY COLUMN later_outcome VARCHAR(80)"))
+            connection.execute(
+                text(
+                    "ALTER TABLE rejected_opportunities MODIFY COLUMN later_outcome VARCHAR(80)"
+                )
+            )
 
 
 def _ensure_strategy_validation_columns() -> None:
@@ -690,7 +754,9 @@ def _ensure_strategy_validation_columns() -> None:
     inspector = inspect(engine)
     if "strategy_validations" not in inspector.get_table_names():
         return
-    existing = {column["name"] for column in inspector.get_columns("strategy_validations")}
+    existing = {
+        column["name"] for column in inspector.get_columns("strategy_validations")
+    }
     required = {
         "max_drawdown_pct": "FLOAT",
         "passed": "INTEGER",
@@ -702,7 +768,11 @@ def _ensure_strategy_validation_columns() -> None:
     with engine.begin() as connection:
         for column, column_type in required.items():
             if column not in existing:
-                connection.execute(text(f"ALTER TABLE strategy_validations ADD COLUMN {column} {column_type}"))
+                connection.execute(
+                    text(
+                        f"ALTER TABLE strategy_validations ADD COLUMN {column} {column_type}"
+                    )
+                )
 
 
 def _ensure_strategy_version_columns() -> None:
@@ -732,7 +802,11 @@ def _ensure_strategy_version_columns() -> None:
     with engine.begin() as connection:
         for column, column_type in required.items():
             if column not in existing:
-                connection.execute(text(f"ALTER TABLE strategy_versions ADD COLUMN {column} {column_type}"))
+                connection.execute(
+                    text(
+                        f"ALTER TABLE strategy_versions ADD COLUMN {column} {column_type}"
+                    )
+                )
 
 
 def _ensure_runtime_job_run_columns() -> None:
@@ -755,7 +829,11 @@ def _ensure_runtime_job_run_columns() -> None:
     with engine.begin() as connection:
         for column, column_type in required.items():
             if column not in existing:
-                connection.execute(text(f"ALTER TABLE runtime_job_runs ADD COLUMN {column} {column_type}"))
+                connection.execute(
+                    text(
+                        f"ALTER TABLE runtime_job_runs ADD COLUMN {column} {column_type}"
+                    )
+                )
 
 
 def _ensure_raw_tick_columns() -> None:
@@ -769,7 +847,9 @@ def _ensure_raw_tick_columns() -> None:
     with engine.begin() as connection:
         for column, column_type in required.items():
             if column not in existing:
-                connection.execute(text(f"ALTER TABLE raw_ticks ADD COLUMN {column} {column_type}"))
+                connection.execute(
+                    text(f"ALTER TABLE raw_ticks ADD COLUMN {column} {column_type}")
+                )
 
 
 def _ensure_setup_episode_columns() -> None:
@@ -803,7 +883,11 @@ def _ensure_setup_episode_columns() -> None:
     with engine.begin() as connection:
         for column, column_type in required.items():
             if column not in existing:
-                connection.execute(text(f"ALTER TABLE setup_episodes ADD COLUMN {column} {column_type}"))
+                connection.execute(
+                    text(
+                        f"ALTER TABLE setup_episodes ADD COLUMN {column} {column_type}"
+                    )
+                )
 
 
 def _ensure_decision_outcome_unique_index() -> None:
@@ -814,8 +898,13 @@ def _ensure_decision_outcome_unique_index() -> None:
     if "decision_outcomes" not in inspector.get_table_names():
         return
     constraint_name = "uq_episode_horizon_outcome_source"
-    unique_names = {str(item.get("name")) for item in inspector.get_unique_constraints("decision_outcomes")}
-    index_names = {str(item.get("name")) for item in inspector.get_indexes("decision_outcomes")}
+    unique_names = {
+        str(item.get("name"))
+        for item in inspector.get_unique_constraints("decision_outcomes")
+    }
+    index_names = {
+        str(item.get("name")) for item in inspector.get_indexes("decision_outcomes")
+    }
     if constraint_name in unique_names or constraint_name in index_names:
         return
     with engine.connect() as connection:
@@ -842,8 +931,15 @@ def _mark_legacy_rejected_outcomes_low_confidence() -> None:
     inspector = inspect(engine)
     if "rejected_opportunities" not in inspector.get_table_names():
         return
-    columns = {column["name"] for column in inspector.get_columns("rejected_opportunities")}
-    required = {"later_outcome_source", "learning_eligible", "learning_exclusion_reason", "later_outcome_confidence"}
+    columns = {
+        column["name"] for column in inspector.get_columns("rejected_opportunities")
+    }
+    required = {
+        "later_outcome_source",
+        "learning_eligible",
+        "learning_exclusion_reason",
+        "later_outcome_confidence",
+    }
     if not required.issubset(columns):
         return
     with engine.begin() as connection:

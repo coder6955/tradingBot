@@ -8,7 +8,11 @@ from typing import Any, Dict, Iterable, List, Optional
 from app.config import settings
 from app.services.account_funds_service import AccountFundsService
 from app.services.database import Candle, get_session
-from app.services.risk_policy_service import RiskDecisionContext, RiskPolicyService, TIER_1_BASE
+from app.services.risk_policy_service import (
+    RiskDecisionContext,
+    RiskPolicyService,
+    TIER_1_BASE,
+)
 from app.services.time_utils import ist_now_naive, ist_today
 
 
@@ -40,15 +44,23 @@ class OptionContract:
 class TradeSetupService:
     """Select liquid option contracts and convert ranked setups into executable plans."""
 
-    def __init__(self, account_funds_service: AccountFundsService | None = None, risk_policy_service: RiskPolicyService | None = None) -> None:
+    def __init__(
+        self,
+        account_funds_service: AccountFundsService | None = None,
+        risk_policy_service: RiskPolicyService | None = None,
+    ) -> None:
         self.account_funds_service = account_funds_service or AccountFundsService()
         self.risk_policy_service = risk_policy_service or RiskPolicyService()
         self._sticky_contracts: dict[str, tuple[int, datetime]] = {}
 
-    def nearest_expiry(self, instruments: Iterable[Dict[str, Any]], underlying: str) -> Optional[str]:
+    def nearest_expiry(
+        self, instruments: Iterable[Dict[str, Any]], underlying: str
+    ) -> Optional[str]:
         expiries: List[date] = []
         for item in instruments:
-            if self._underlying_matches(item, underlying) and item.get("instrument_type") in {"CE", "PE"}:
+            if self._underlying_matches(item, underlying) and item.get(
+                "instrument_type"
+            ) in {"CE", "PE"}:
                 expiry = self._parse_expiry(item.get("expiry"))
                 if expiry:
                     expiries.append(expiry)
@@ -97,8 +109,19 @@ class TradeSetupService:
             affordable = self._affordable_buy_candidates(candidates)
             if affordable:
                 candidates = affordable
-        ranked = self.rank_contracts(candidates=candidates, spot_price=spot_price, target_strike=target, side=side)
-        selected = ranked[0]["contract"] if ranked else max(candidates, key=lambda contract: self._contract_score(contract, target))
+        ranked = self.rank_contracts(
+            candidates=candidates,
+            spot_price=spot_price,
+            target_strike=target,
+            side=side,
+        )
+        selected = (
+            ranked[0]["contract"]
+            if ranked
+            else max(
+                candidates, key=lambda contract: self._contract_score(contract, target)
+            )
+        )
         if underlying.upper() != "BANKNIFTY":
             return selected
         return self._sticky_contract_selection(
@@ -124,7 +147,9 @@ class TradeSetupService:
         for contract in candidates:
             executable = contract.ask if side.upper() == "BUY" else contract.bid
             spread_pct = self._spread_pct(contract)
-            distance_intervals = abs(contract.strike - target) / max(self._strike_interval(candidates), 1.0)
+            distance_intervals = abs(contract.strike - target) / max(
+                self._strike_interval(candidates), 1.0
+            )
             score = float(self.liquidity_score(contract))
             score -= min(30.0, distance_intervals * 8.0)
             score -= min(35.0, spread_pct * 4.0)
@@ -136,9 +161,16 @@ class TradeSetupService:
                 score += 4.0
             if contract.delta is not None:
                 abs_delta = abs(float(contract.delta))
-                if settings.min_option_buy_delta <= abs_delta <= settings.max_option_buy_delta:
+                if (
+                    settings.min_option_buy_delta
+                    <= abs_delta
+                    <= settings.max_option_buy_delta
+                ):
                     score += 10.0
-                    score += max(0.0, 8.0 - abs(abs_delta - settings.target_option_buy_delta) * 40.0)
+                    score += max(
+                        0.0,
+                        8.0 - abs(abs_delta - settings.target_option_buy_delta) * 40.0,
+                    )
                 else:
                     score -= 8.0
             if contract.theta is not None and executable > 0:
@@ -149,10 +181,17 @@ class TradeSetupService:
             dte = (expiry - ist_today()).days if expiry else None
             if dte is not None and dte <= 0 and settings.block_expiry_day_option_buying:
                 score -= 50.0
-            elif dte is not None and settings.preferred_option_buy_min_dte <= dte <= settings.preferred_option_buy_max_dte:
+            elif (
+                dte is not None
+                and settings.preferred_option_buy_min_dte
+                <= dte
+                <= settings.preferred_option_buy_max_dte
+            ):
                 score += 8.0
             elif dte is not None:
-                score -= min(16.0, abs(dte - settings.preferred_option_buy_max_dte) * 2.0)
+                score -= min(
+                    16.0, abs(dte - settings.preferred_option_buy_max_dte) * 2.0
+                )
             rows.append(
                 {
                     "contract": contract,
@@ -161,11 +200,26 @@ class TradeSetupService:
                     "spread_pct": round(spread_pct, 3),
                     "distance_intervals": round(distance_intervals, 3),
                     "dte": dte,
-                    "depth": {"bid_quantity": contract.bid_quantity, "ask_quantity": contract.ask_quantity},
-                    "greeks": {"delta": contract.delta, "gamma": contract.gamma, "theta": contract.theta, "iv": contract.implied_volatility},
+                    "depth": {
+                        "bid_quantity": contract.bid_quantity,
+                        "ask_quantity": contract.ask_quantity,
+                    },
+                    "greeks": {
+                        "delta": contract.delta,
+                        "gamma": contract.gamma,
+                        "theta": contract.theta,
+                        "iv": contract.implied_volatility,
+                    },
                 }
             )
-        rows.sort(key=lambda row: (float(row["score"]), -float(row["spread_pct"]), float(row["executable_price"])), reverse=True)
+        rows.sort(
+            key=lambda row: (
+                float(row["score"]),
+                -float(row["spread_pct"]),
+                float(row["executable_price"]),
+            ),
+            reverse=True,
+        )
         return rows[: max(1, settings.contract_max_ranked_candidates)]
 
     def _sticky_contract_selection(
@@ -181,12 +235,27 @@ class TradeSetupService:
         if existing is not None:
             token, selected_at = existing
             age = max(0.0, (now - selected_at).total_seconds())
-            pinned = next((contract for contract in candidates if contract.instrument_token == token), None)
-            if pinned is not None and age <= max(0, settings.banknifty_contract_stickiness_seconds):
+            pinned = next(
+                (
+                    contract
+                    for contract in candidates
+                    if contract.instrument_token == token
+                ),
+                None,
+            )
+            if pinned is not None and age <= max(
+                0, settings.banknifty_contract_stickiness_seconds
+            ):
                 selected_score = self._contract_score(selected, target)
                 pinned_score = self._contract_score(pinned, target)
-                spread_safe = self._spread_pct(pinned) <= settings.max_bid_ask_spread_pct
-                if spread_safe and selected_score - pinned_score < settings.banknifty_contract_switch_score_advantage:
+                spread_safe = (
+                    self._spread_pct(pinned) <= settings.max_bid_ask_spread_pct
+                )
+                if (
+                    spread_safe
+                    and selected_score - pinned_score
+                    < settings.banknifty_contract_switch_score_advantage
+                ):
                     return pinned
         if selected.instrument_token:
             self._sticky_contracts[key] = (int(selected.instrument_token), now)
@@ -248,9 +317,16 @@ class TradeSetupService:
         premium_structure: Dict[str, float] | None = None,
     ) -> Dict[str, float]:
         if entry_price <= 0:
-            raise ValueError("entry price must be positive before calculating stop loss and targets")
+            raise ValueError(
+                "entry price must be positive before calculating stop loss and targets"
+            )
         if (underlying or "").upper() == "BANKNIFTY" and side.upper() == "BUY":
-            return self._banknifty_buy_prices(entry_price, snapshot or {}, contract=contract, premium_structure=premium_structure)
+            return self._banknifty_buy_prices(
+                entry_price,
+                snapshot or {},
+                contract=contract,
+                premium_structure=premium_structure,
+            )
         if side.upper() == "SELL":
             stop_loss = entry_price * 1.35
             target_1 = entry_price * 0.75
@@ -281,8 +357,15 @@ class TradeSetupService:
         contract: OptionContract | None = None,
         premium_structure: Dict[str, float] | None = None,
     ) -> Dict[str, float]:
-        structure = premium_structure or self._option_premium_structure(contract.tradingsymbol if contract else "")
-        spread = max((contract.ask - contract.bid) if contract and contract.ask and contract.bid else 0.0, 0.0)
+        structure = premium_structure or self._option_premium_structure(
+            contract.tradingsymbol if contract else ""
+        )
+        spread = max(
+            (contract.ask - contract.bid)
+            if contract and contract.ask and contract.bid
+            else 0.0,
+            0.0,
+        )
         atr = float(structure.get("atr") or 0.0)
         swing_low = float(structure.get("swing_low") or 0.0)
         swing_high = float(structure.get("swing_high") or 0.0)
@@ -290,19 +373,34 @@ class TradeSetupService:
         spread_pct = spread / max(entry_price, 0.05)
         fallback_risk_pct = self._banknifty_premium_risk_pct(snapshot)
         min_noise_risk = max(entry_price * 0.10, atr * 1.05, spread * 2.0, 0.05)
-        max_risk = entry_price * self._max_banknifty_risk_pct(entry_price, atr_pct, spread_pct, snapshot)
+        max_risk = entry_price * self._max_banknifty_risk_pct(
+            entry_price, atr_pct, spread_pct, snapshot
+        )
 
         if swing_low > 0 and swing_low < entry_price:
-            structure_risk = entry_price - max(0.05, swing_low - max(spread, atr * 0.20))
+            structure_risk = entry_price - max(
+                0.05, swing_low - max(spread, atr * 0.20)
+            )
         else:
             structure_risk = entry_price * fallback_risk_pct
         risk = max(min_noise_risk, structure_risk)
         risk = min(max(risk, entry_price * 0.12), max_risk)
 
         stop_loss = max(0.05, entry_price - risk)
-        target_1 = self._first_target(entry_price=entry_price, risk=risk, atr=atr, swing_high=swing_high, spread=spread, snapshot=snapshot)
-        target_2 = max(target_1 + risk * 0.55, entry_price + risk * 2.05, target_1 * 1.10)
-        target_3 = max(target_2 + risk * 0.65, entry_price + risk * 3.00, target_2 * 1.12)
+        target_1 = self._first_target(
+            entry_price=entry_price,
+            risk=risk,
+            atr=atr,
+            swing_high=swing_high,
+            spread=spread,
+            snapshot=snapshot,
+        )
+        target_2 = max(
+            target_1 + risk * 0.55, entry_price + risk * 2.05, target_1 * 1.10
+        )
+        target_3 = max(
+            target_2 + risk * 0.65, entry_price + risk * 3.00, target_2 * 1.12
+        )
         reward = target_1 - entry_price
         return {
             "entry_price": round(entry_price, 2),
@@ -325,7 +423,11 @@ class TradeSetupService:
         price = float(snapshot.get("price") or 0.0)
         day_high = float(snapshot.get("day_high") or 0.0)
         day_low = float(snapshot.get("day_low") or 0.0)
-        day_range_pct = ((day_high - day_low) / price) if price > 0 and day_high > day_low else 0.006
+        day_range_pct = (
+            ((day_high - day_low) / price)
+            if price > 0 and day_high > day_low
+            else 0.006
+        )
         adx = float(snapshot.get("adx") or 15.0)
         risk_pct = 0.16 + min(day_range_pct * 10, 0.08)
         if adx >= 22:
@@ -334,7 +436,9 @@ class TradeSetupService:
             risk_pct -= 0.02
         return max(0.16, min(0.28, risk_pct))
 
-    def _option_premium_structure(self, tradingsymbol: str, timeframe: str = "5minute", limit: int = 24) -> Dict[str, float]:
+    def _option_premium_structure(
+        self, tradingsymbol: str, timeframe: str = "5minute", limit: int = 24
+    ) -> Dict[str, float]:
         if not tradingsymbol:
             return {"atr": 0.0, "swing_low": 0.0, "swing_high": 0.0}
         session = get_session()
@@ -356,7 +460,9 @@ class TradeSetupService:
         for candle in candles[1:]:
             high = float(candle.high_price)
             low = float(candle.low_price)
-            true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+            true_ranges.append(
+                max(high - low, abs(high - previous_close), abs(low - previous_close))
+            )
             previous_close = float(candle.close_price)
         recent = candles[-8:] if len(candles) >= 8 else candles
         return {
@@ -365,7 +471,13 @@ class TradeSetupService:
             "swing_high": max(float(candle.high_price) for candle in recent),
         }
 
-    def _max_banknifty_risk_pct(self, entry_price: float, atr_pct: float, spread_pct: float, snapshot: Dict[str, Any]) -> float:
+    def _max_banknifty_risk_pct(
+        self,
+        entry_price: float,
+        atr_pct: float,
+        spread_pct: float,
+        snapshot: Dict[str, Any],
+    ) -> float:
         adx = float(snapshot.get("adx") or 15.0)
         room_pct = float(snapshot.get("room_to_level_pct") or 0.0)
         cap = 0.30
@@ -379,18 +491,38 @@ class TradeSetupService:
             cap -= 0.03
         return max(0.18, min(0.36, cap))
 
-    def _first_target(self, *, entry_price: float, risk: float, atr: float, swing_high: float, spread: float, snapshot: Dict[str, Any]) -> float:
-        minimum_target = entry_price + max(risk * 1.20, atr * 1.35, spread * 3.0, entry_price * 0.14)
+    def _first_target(
+        self,
+        *,
+        entry_price: float,
+        risk: float,
+        atr: float,
+        swing_high: float,
+        spread: float,
+        snapshot: Dict[str, Any],
+    ) -> float:
+        minimum_target = entry_price + max(
+            risk * 1.20, atr * 1.35, spread * 3.0, entry_price * 0.14
+        )
         if swing_high > entry_price and (swing_high - entry_price) >= risk * 1.05:
             return max(minimum_target, min(swing_high, entry_price + risk * 1.80))
         adx = float(snapshot.get("adx") or 15.0)
         multiplier = 1.45 if adx < 24 else 1.65
         return max(minimum_target, entry_price + risk * multiplier)
 
-    def position_size(self, entry_price: float, stop_loss: float, lot_size: int, side: str, account_equity: float | None = None) -> int:
+    def position_size(
+        self,
+        entry_price: float,
+        stop_loss: float,
+        lot_size: int,
+        side: str,
+        account_equity: float | None = None,
+    ) -> int:
         if lot_size <= 0 or side.upper() != "BUY":
             return 0
-        equity = account_equity if account_equity is not None else self._available_cash()
+        equity = (
+            account_equity if account_equity is not None else self._available_cash()
+        )
         if equity <= 0 and account_equity is None:
             # Scanner sizing is provisional. The shared pre-order authority
             # requires real live equity and reruns every invariant.
@@ -408,7 +540,9 @@ class TradeSetupService:
         )
         return int(decision.maximum_quantity) if decision.passed else 0
 
-    def affordable_quantity(self, entry_price: float, lot_size: int, available_funds: float, side: str) -> int:
+    def affordable_quantity(
+        self, entry_price: float, lot_size: int, available_funds: float, side: str
+    ) -> int:
         if lot_size <= 0 or entry_price <= 0 or available_funds <= 0:
             return 0
         if side.upper() == "SELL":
@@ -416,7 +550,14 @@ class TradeSetupService:
         affordable_lots = floor(available_funds / (entry_price * lot_size))
         return max(0, affordable_lots * lot_size)
 
-    def risk_checks(self, score: int, contract: OptionContract, entry_price: float, side: str, enforce_budget: bool = False) -> List[str]:
+    def risk_checks(
+        self,
+        score: int,
+        contract: OptionContract,
+        entry_price: float,
+        side: str,
+        enforce_budget: bool = False,
+    ) -> List[str]:
         failures: List[str] = []
         if self.liquidity_score(contract) < settings.min_option_liquidity_score:
             failures.append("option liquidity is below threshold")
@@ -424,7 +565,11 @@ class TradeSetupService:
             if entry_price < settings.min_option_buy_premium:
                 failures.append("option premium is below minimum configured for buying")
             expiry = self._parse_expiry(contract.expiry)
-            if settings.block_expiry_day_option_buying and expiry is not None and expiry <= ist_today():
+            if (
+                settings.block_expiry_day_option_buying
+                and expiry is not None
+                and expiry <= ist_today()
+            ):
                 failures.append("expiry-day option buying is blocked")
             if enforce_budget:
                 available_cash = self._available_cash()
@@ -458,25 +603,39 @@ class TradeSetupService:
             return "PE" if bullish else "CE"
         return "CE" if bullish else "PE"
 
-    def _contract_from_instrument(self, item: Dict[str, Any], quotes: Dict[str, Any]) -> OptionContract | None:
+    def _contract_from_instrument(
+        self, item: Dict[str, Any], quotes: Dict[str, Any]
+    ) -> OptionContract | None:
         tradingsymbol = str(item.get("tradingsymbol") or "")
         if not tradingsymbol:
             return None
-        quote = quotes.get(f"{settings.option_exchange}:{tradingsymbol}") or quotes.get(tradingsymbol) or {}
+        quote = (
+            quotes.get(f"{settings.option_exchange}:{tradingsymbol}")
+            or quotes.get(tradingsymbol)
+            or {}
+        )
         depth = quote.get("depth", {}) if isinstance(quote, dict) else {}
         buy_depth = depth.get("buy", []) if isinstance(depth, dict) else []
         sell_depth = depth.get("sell", []) if isinstance(depth, dict) else []
         bid = float(buy_depth[0].get("price", 0.0)) if buy_depth else 0.0
         ask = float(sell_depth[0].get("price", 0.0)) if sell_depth else 0.0
-        bid_quantity = int(float(buy_depth[0].get("quantity", 0) or 0)) if buy_depth else 0
-        ask_quantity = int(float(sell_depth[0].get("quantity", 0) or 0)) if sell_depth else 0
-        greeks = quote.get("greeks", {}) if isinstance(quote.get("greeks"), dict) else {}
+        bid_quantity = (
+            int(float(buy_depth[0].get("quantity", 0) or 0)) if buy_depth else 0
+        )
+        ask_quantity = (
+            int(float(sell_depth[0].get("quantity", 0) or 0)) if sell_depth else 0
+        )
+        greeks = (
+            quote.get("greeks", {}) if isinstance(quote.get("greeks"), dict) else {}
+        )
         return OptionContract(
             tradingsymbol=tradingsymbol,
             exchange=str(item.get("exchange") or settings.option_exchange),
             instrument_token=self._safe_int(item.get("instrument_token")),
             name=str(item.get("name") or ""),
-            expiry=self._parse_expiry(item.get("expiry")).isoformat() if self._parse_expiry(item.get("expiry")) else "",
+            expiry=self._parse_expiry(item.get("expiry")).isoformat()
+            if self._parse_expiry(item.get("expiry"))
+            else "",
             strike=float(item.get("strike") or 0.0),
             option_type=str(item.get("instrument_type") or ""),
             lot_size=self._safe_int(item.get("lot_size"), 0) or 1,
@@ -489,7 +648,9 @@ class TradeSetupService:
             oi_day_low=float(quote.get("oi_day_low") or 0.0),
             bid_quantity=bid_quantity,
             ask_quantity=ask_quantity,
-            implied_volatility=self._optional_float(quote.get("implied_volatility") or quote.get("iv") or greeks.get("iv")),
+            implied_volatility=self._optional_float(
+                quote.get("implied_volatility") or quote.get("iv") or greeks.get("iv")
+            ),
             delta=self._optional_float(quote.get("delta") or greeks.get("delta")),
             gamma=self._optional_float(quote.get("gamma") or greeks.get("gamma")),
             theta=self._optional_float(quote.get("theta") or greeks.get("theta")),
@@ -497,21 +658,44 @@ class TradeSetupService:
 
     def _strike_interval(self, contracts: List[OptionContract]) -> float:
         strikes = sorted({contract.strike for contract in contracts})
-        diffs = [strikes[idx] - strikes[idx - 1] for idx in range(1, len(strikes)) if strikes[idx] > strikes[idx - 1]]
+        diffs = [
+            strikes[idx] - strikes[idx - 1]
+            for idx in range(1, len(strikes))
+            if strikes[idx] > strikes[idx - 1]
+        ]
         return min(diffs) if diffs else 50.0
 
-    def _target_strike(self, spot_price: float, option_type: str, side: str, interval: float) -> float:
+    def _target_strike(
+        self, spot_price: float, option_type: str, side: str, interval: float
+    ) -> float:
         if side.upper() == "SELL":
-            return spot_price - interval if option_type == "PE" else spot_price + interval
-        return spot_price - (interval * 0.5) if option_type == "CE" else spot_price + (interval * 0.5)
+            return (
+                spot_price - interval if option_type == "PE" else spot_price + interval
+            )
+        return (
+            spot_price - (interval * 0.5)
+            if option_type == "CE"
+            else spot_price + (interval * 0.5)
+        )
 
     def _contract_score(self, contract: OptionContract, target: float) -> float:
         distance_penalty = abs(contract.strike - target)
         executable_penalty = 60.0 if contract.ask <= 0 else 0.0
-        depth_bonus = 5.0 if contract.bid_quantity >= settings.contract_min_depth_quantity else 0.0
-        return self.liquidity_score(contract) + depth_bonus - executable_penalty - (distance_penalty / max(contract.strike, 1.0) * 1000)
+        depth_bonus = (
+            5.0
+            if contract.bid_quantity >= settings.contract_min_depth_quantity
+            else 0.0
+        )
+        return (
+            self.liquidity_score(contract)
+            + depth_bonus
+            - executable_penalty
+            - (distance_penalty / max(contract.strike, 1.0) * 1000)
+        )
 
-    def _affordable_buy_candidates(self, contracts: List[OptionContract]) -> List[OptionContract]:
+    def _affordable_buy_candidates(
+        self, contracts: List[OptionContract]
+    ) -> List[OptionContract]:
         available_cash = self._available_cash()
         if available_cash <= 0:
             return []

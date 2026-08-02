@@ -49,7 +49,9 @@ class GreeksService:
             time_years=time_years,
             risk_free_rate=risk_free_rate,
         )
-        delta, gamma, theta, vega = self._greeks(spot_price, strike, option_type, time_years, risk_free_rate, iv)
+        delta, gamma, theta, vega = self._greeks(
+            spot_price, strike, option_type, time_years, risk_free_rate, iv
+        )
         theta_pct = abs(theta) / max(option_price, 0.01) * 100
         return Greeks(
             implied_volatility=round(iv, 4),
@@ -77,33 +79,59 @@ class GreeksService:
         high = 3.0
         for _ in range(60):
             mid = (low + high) / 2
-            theoretical = self._price(spot_price, strike, option_type, time_years, risk_free_rate, mid)
+            theoretical = self._price(
+                spot_price, strike, option_type, time_years, risk_free_rate, mid
+            )
             if theoretical > option_price:
                 high = mid
             else:
                 low = mid
         return (low + high) / 2
 
-    def _price(self, spot: float, strike: float, option_type: str, t: float, r: float, sigma: float) -> float:
+    def _price(
+        self,
+        spot: float,
+        strike: float,
+        option_type: str,
+        t: float,
+        r: float,
+        sigma: float,
+    ) -> float:
         d1, d2 = self._d1_d2(spot, strike, t, r, sigma)
         if option_type.upper() == "CE":
             return spot * self._norm_cdf(d1) - strike * exp(-r * t) * self._norm_cdf(d2)
         return strike * exp(-r * t) * self._norm_cdf(-d2) - spot * self._norm_cdf(-d1)
 
-    def _greeks(self, spot: float, strike: float, option_type: str, t: float, r: float, sigma: float) -> tuple[float, float, float, float]:
+    def _greeks(
+        self,
+        spot: float,
+        strike: float,
+        option_type: str,
+        t: float,
+        r: float,
+        sigma: float,
+    ) -> tuple[float, float, float, float]:
         d1, d2 = self._d1_d2(spot, strike, t, r, sigma)
         pdf = self._norm_pdf(d1)
         gamma = pdf / (spot * sigma * sqrt(t))
         vega = spot * pdf * sqrt(t) / 100
         if option_type.upper() == "CE":
             delta = self._norm_cdf(d1)
-            theta = (-(spot * pdf * sigma) / (2 * sqrt(t)) - r * strike * exp(-r * t) * self._norm_cdf(d2)) / 365
+            theta = (
+                -(spot * pdf * sigma) / (2 * sqrt(t))
+                - r * strike * exp(-r * t) * self._norm_cdf(d2)
+            ) / 365
         else:
             delta = self._norm_cdf(d1) - 1
-            theta = (-(spot * pdf * sigma) / (2 * sqrt(t)) + r * strike * exp(-r * t) * self._norm_cdf(-d2)) / 365
+            theta = (
+                -(spot * pdf * sigma) / (2 * sqrt(t))
+                + r * strike * exp(-r * t) * self._norm_cdf(-d2)
+            ) / 365
         return delta, gamma, theta, vega
 
-    def _d1_d2(self, spot: float, strike: float, t: float, r: float, sigma: float) -> tuple[float, float]:
+    def _d1_d2(
+        self, spot: float, strike: float, t: float, r: float, sigma: float
+    ) -> tuple[float, float]:
         spot = max(spot, 0.01)
         strike = max(strike, 0.01)
         sigma = max(sigma, 0.01)

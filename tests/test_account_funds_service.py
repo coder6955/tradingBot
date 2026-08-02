@@ -32,7 +32,9 @@ class AccountFundsServiceTests(unittest.TestCase):
             first = service.available_cash()
             second = service.available_cash()
         finally:
-            object.__setattr__(settings, "account_funds_cache_ttl_seconds", original_ttl)
+            object.__setattr__(
+                settings, "account_funds_cache_ttl_seconds", original_ttl
+            )
 
         self.assertEqual(first, 10000)
         self.assertEqual(second, 10000)

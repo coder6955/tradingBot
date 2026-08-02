@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Optional
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-ENV_FILE = ROOT.joinpath('.env')
+ENV_FILE = ROOT.joinpath(".env")
 
 
 def _clean_env_value(value: str | None) -> str | None:
@@ -32,22 +32,22 @@ def save_access_token(token: str) -> None:
     updated = False
     out_lines: list[str] = []
     for line in lines:
-        if line.strip().startswith('KITE_ACCESS_TOKEN='):
-            out_lines.append(f'KITE_ACCESS_TOKEN={clean_token}')
+        if line.strip().startswith("KITE_ACCESS_TOKEN="):
+            out_lines.append(f"KITE_ACCESS_TOKEN={clean_token}")
             updated = True
         else:
             out_lines.append(line)
 
     if not updated:
-        out_lines.append(f'KITE_ACCESS_TOKEN={clean_token}')
+        out_lines.append(f"KITE_ACCESS_TOKEN={clean_token}")
 
-    ENV_FILE.write_text('\n'.join(out_lines) + '\n')
+    ENV_FILE.write_text("\n".join(out_lines) + "\n")
 
 
 def load_access_token() -> Optional[str]:
     if not ENV_FILE.exists():
         return None
     for line in ENV_FILE.read_text().splitlines():
-        if line.strip().startswith('KITE_ACCESS_TOKEN='):
-            return _clean_env_value(line.split('=', 1)[1])
+        if line.strip().startswith("KITE_ACCESS_TOKEN="):
+            return _clean_env_value(line.split("=", 1)[1])
     return None

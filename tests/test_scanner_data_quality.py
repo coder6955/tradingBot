@@ -9,8 +9,13 @@ from app.services.banknifty_intelligence_service import BankNiftyIntelligenceSer
 from app.services.database import Candle, get_session, init_db
 from app.services.market_regime_service import MarketRegimeService
 from app.services.option_chain_service import OptionChainService
-from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
-from app.services.kite_websocket_price_feed import KiteWebSocketPriceFeed, WebSocketPremiumCandle
+from app.services.option_premium_confirmation_service import (
+    OptionPremiumConfirmationService,
+)
+from app.services.kite_websocket_price_feed import (
+    KiteWebSocketPriceFeed,
+    WebSocketPremiumCandle,
+)
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
 from app.services.scanner_service import ScannerService
 from app.services.trade_setup_service import OptionContract
@@ -74,12 +79,26 @@ class BankNiftyQualityFeed:
 
     def get_quotes(self, instruments):
         payload = dict(self.quote_payload)
-        depth = payload.get("depth", {}) if isinstance(payload.get("depth"), dict) else {}
+        depth = (
+            payload.get("depth", {}) if isinstance(payload.get("depth"), dict) else {}
+        )
         payload["depth"] = {
-            "buy": [{**row, "quantity": row.get("quantity", 1000)} for row in depth.get("buy", [])],
-            "sell": [{**row, "quantity": row.get("quantity", 1000)} for row in depth.get("sell", [])],
+            "buy": [
+                {**row, "quantity": row.get("quantity", 1000)}
+                for row in depth.get("buy", [])
+            ],
+            "sell": [
+                {**row, "quantity": row.get("quantity", 1000)}
+                for row in depth.get("sell", [])
+            ],
         }
-        return {instrument: {**payload, "quote_timestamp": datetime.now().isoformat(sep=" ")} for instrument in instruments}
+        return {
+            instrument: {
+                **payload,
+                "quote_timestamp": datetime.now().isoformat(sep=" "),
+            }
+            for instrument in instruments
+        }
 
     def call_counts(self):
         return {"quote": 1, "historical_data": 0, "instruments": 1}
@@ -90,12 +109,20 @@ class IncompleteCanonicalFeed(BankNiftyQualityFeed):
         return {
             **super().get_snapshot(symbol),
             "analysis_ready": False,
-            "data_quality_reasons": ["insufficient_completed_5minute_structure_candles"],
+            "data_quality_reasons": [
+                "insufficient_completed_5minute_structure_candles"
+            ],
         }
 
 
 class FakeWebSocketPremiumFeed:
-    def __init__(self, candles: list[WebSocketPremiumCandle], *, subscribed: bool = True, ticks_seen: int | None = None) -> None:
+    def __init__(
+        self,
+        candles: list[WebSocketPremiumCandle],
+        *,
+        subscribed: bool = True,
+        ticks_seen: int | None = None,
+    ) -> None:
         self.candles = candles
         self.subscribed = subscribed
         self.ticks_seen = len(candles) if ticks_seen is None else ticks_seen
@@ -103,7 +130,9 @@ class FakeWebSocketPremiumFeed:
     def get_recent_premium_candles(self, instrument_token: int, limit: int = 10):
         return self.candles[-limit:]
 
-    def get_current_session_premium_candles(self, instrument_token: int, limit: int = 10):
+    def get_current_session_premium_candles(
+        self, instrument_token: int, limit: int = 10
+    ):
         return self.candles[-limit:]
 
     def premium_candle_status(self, instrument_token: int):
@@ -203,7 +232,12 @@ class FakeLiveGapBackfillService:
             session.commit()
         finally:
             session.close()
-        return {"status": "ok", "reason": kwargs.get("reason"), "historical_calls": 1, "inserted": len(closes)}
+        return {
+            "status": "ok",
+            "reason": kwargs.get("reason"),
+            "historical_calls": 1,
+            "inserted": len(closes),
+        }
 
 
 class FakeArmedEntryTracker:
@@ -243,7 +277,9 @@ class FakeBlockingRegimeFilterService:
             "classification": "NO_BUY_REGIME",
             "hard_reasons": ["opening_trap_structure"],
             "soft_reasons": [],
-            "details": {"verdict": "Do not buy Bank Nifty options in this regime: opening_trap_structure"},
+            "details": {
+                "verdict": "Do not buy Bank Nifty options in this regime: opening_trap_structure"
+            },
         }
 
 
@@ -286,7 +322,9 @@ class ScannerDataQualityTests(unittest.TestCase):
         object.__setattr__(settings, "enable_live_option_candle_gap_backfill", True)
         object.__setattr__(settings, "enable_on_demand_premium_candle_backfill", True)
         object.__setattr__(settings, "enable_websocket_candle_context_recovery", True)
-        object.__setattr__(settings, "live_option_candle_backfill_timeframes", "1minute")
+        object.__setattr__(
+            settings, "live_option_candle_backfill_timeframes", "1minute"
+        )
         object.__setattr__(settings, "account_equity", 1000000.0)
         object.__setattr__(settings, "runtime_manual_override", True)
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -349,7 +387,14 @@ class ScannerDataQualityTests(unittest.TestCase):
         finally:
             session.close()
 
-    def _replace_premium_candles(self, symbol: str, *, start: datetime, closes: list[float], volumes: list[float] | None = None) -> None:
+    def _replace_premium_candles(
+        self,
+        symbol: str,
+        *,
+        start: datetime,
+        closes: list[float],
+        volumes: list[float] | None = None,
+    ) -> None:
         session = get_session()
         try:
             session.query(Candle).filter(Candle.symbol == symbol).delete()
@@ -376,22 +421,32 @@ class ScannerDataQualityTests(unittest.TestCase):
             feed=BankNiftyQualityFeed(quote_payload),
             rejected_opportunity_repository=RejectedOpportunityRepository(),
         )
-        return scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")[0]
+        return scanner.scan_with_diagnostics(
+            symbols=["BANKNIFTY"], side="BUY", order_mode="paper"
+        )[0]
 
-    def test_incomplete_canonical_candles_return_scored_diagnostic_without_crashing(self) -> None:
+    def test_incomplete_canonical_candles_return_scored_diagnostic_without_crashing(
+        self,
+    ) -> None:
         scanner = ScannerService(
             feed=IncompleteCanonicalFeed({}),
             rejected_opportunity_repository=RejectedOpportunityRepository(),
         )
 
-        result = scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")
+        result = scanner.scan_with_diagnostics(
+            symbols=["BANKNIFTY"], side="BUY", order_mode="paper"
+        )
 
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["score"], 0)
         self.assertFalse(result[0]["passed"])
-        self.assertIn("canonical completed-candle analysis was not ready", result[0]["reasons"])
+        self.assertIn(
+            "canonical completed-candle analysis was not ready", result[0]["reasons"]
+        )
 
-    def test_zero_live_quote_with_valid_premium_candles_rejects_before_fake_prices(self) -> None:
+    def test_zero_live_quote_with_valid_premium_candles_rejects_before_fake_prices(
+        self,
+    ) -> None:
         result = self._scanner_result(
             {
                 "instrument_token": 580001,
@@ -405,8 +460,15 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("selected_option_quote_invalid", result["reasons"])
         self.assertEqual(result["factor_scores"]["prices"], {})
-        self.assertEqual(result["factor_scores"]["data_quality"]["data_quality"], "invalid")
-        self.assertEqual(result["factor_scores"]["option_premium_confirmation"]["details"]["last_close"], 1087.1)
+        self.assertEqual(
+            result["factor_scores"]["data_quality"]["data_quality"], "invalid"
+        )
+        self.assertEqual(
+            result["factor_scores"]["option_premium_confirmation"]["details"][
+                "last_close"
+            ],
+            1087.1,
+        )
         self.assertNotEqual(result["factor_scores"]["prices"].get("entry_price"), 0.05)
 
     def test_scanner_diagnostics_exposes_entry_timing_fields(self) -> None:
@@ -480,10 +542,17 @@ class ScannerDataQualityTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("volatility_edge_deferred_outside_live_decision_path", result["factor_scores"]["volatility_edge"]["reasons"])
-        self.assertNotIn("volatility_edge_deferred_outside_live_decision_path", result["reasons"])
+        self.assertIn(
+            "volatility_edge_deferred_outside_live_decision_path",
+            result["factor_scores"]["volatility_edge"]["reasons"],
+        )
+        self.assertNotIn(
+            "volatility_edge_deferred_outside_live_decision_path", result["reasons"]
+        )
 
-    def test_volatility_edge_remains_shadow_when_legacy_hard_gate_is_enabled(self) -> None:
+    def test_volatility_edge_remains_shadow_when_legacy_hard_gate_is_enabled(
+        self,
+    ) -> None:
         object.__setattr__(settings, "enable_volatility_edge_hard_gate", True)
 
         result = self._scanner_result(
@@ -496,14 +565,32 @@ class ScannerDataQualityTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("volatility_edge_deferred_outside_live_decision_path", result["factor_scores"]["volatility_edge"]["reasons"])
-        self.assertNotIn("volatility_edge_deferred_outside_live_decision_path", result["reasons"])
+        self.assertIn(
+            "volatility_edge_deferred_outside_live_decision_path",
+            result["factor_scores"]["volatility_edge"]["reasons"],
+        )
+        self.assertNotIn(
+            "volatility_edge_deferred_outside_live_decision_path", result["reasons"]
+        )
 
     def test_rejected_opportunity_metadata_includes_volatility_edge(self) -> None:
         repo = RejectedOpportunityRepository()
-        scanner = ScannerService(feed=BankNiftyQualityFeed({"instrument_token": 580001, "last_price": 0, "depth": {"buy": [{"price": 0}], "sell": [{"price": 0}]}, "volume": 0, "oi": 0}), rejected_opportunity_repository=repo)
+        scanner = ScannerService(
+            feed=BankNiftyQualityFeed(
+                {
+                    "instrument_token": 580001,
+                    "last_price": 0,
+                    "depth": {"buy": [{"price": 0}], "sell": [{"price": 0}]},
+                    "volume": 0,
+                    "oi": 0,
+                }
+            ),
+            rejected_opportunity_repository=repo,
+        )
 
-        scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")
+        scanner.scan_with_diagnostics(
+            symbols=["BANKNIFTY"], side="BUY", order_mode="paper"
+        )
         rows = repo.list_rejections(symbol="BANKNIFTY", limit=1)
         factors = json.loads(rows[0].factor_scores_json)
 
@@ -526,11 +613,16 @@ class ScannerDataQualityTests(unittest.TestCase):
             banknifty_regime_filter_service=FakeBlockingRegimeFilterService(),
         )
 
-        result = scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")[0]
+        result = scanner.scan_with_diagnostics(
+            symbols=["BANKNIFTY"], side="BUY", order_mode="paper"
+        )[0]
 
         self.assertFalse(result["passed"])
         self.assertNotIn("opening_trap_structure", result["reasons"])
-        self.assertEqual(result["factor_scores"]["banknifty_regime_filter"]["classification"], "NO_BUY_REGIME")
+        self.assertEqual(
+            result["factor_scores"]["banknifty_regime_filter"]["classification"],
+            "NO_BUY_REGIME",
+        )
 
     def test_scanner_registers_armed_setup_when_entry_timing_is_armed(self) -> None:
         originals = {
@@ -562,7 +654,10 @@ class ScannerDataQualityTests(unittest.TestCase):
                     {
                         "instrument_token": 580001,
                         "last_price": 1087.1,
-                        "depth": {"buy": [{"price": 1086.0}], "sell": [{"price": 1087.1}]},
+                        "depth": {
+                            "buy": [{"price": 1086.0}],
+                            "sell": [{"price": 1087.1}],
+                        },
                         "volume": 100000,
                         "oi": 100000,
                     }
@@ -572,14 +667,20 @@ class ScannerDataQualityTests(unittest.TestCase):
                 armed_entry_tracker=tracker,
             )
 
-            result = scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")[0]
+            result = scanner.scan_with_diagnostics(
+                symbols=["BANKNIFTY"], side="BUY", order_mode="paper"
+            )[0]
         finally:
             for key, value in originals.items():
                 object.__setattr__(settings, key, value)
 
         self.assertFalse(result["passed"])
         self.assertEqual(result["entry_timing_state"], "ARMED_FOR_ENTRY")
-        self.assertEqual(result["armed_setup_id"], "armed-test-1", result["factor_scores"].get("armed_entry"))
+        self.assertEqual(
+            result["armed_setup_id"],
+            "armed-test-1",
+            result["factor_scores"].get("armed_entry"),
+        )
         self.assertTrue(result["websocket_tracking_enabled"])
         self.assertEqual(len(tracker.calls), 1)
         self.assertEqual(tracker.calls[0]["contract"].instrument_token, 580001)
@@ -616,7 +717,10 @@ class ScannerDataQualityTests(unittest.TestCase):
                     {
                         "instrument_token": 580001,
                         "last_price": 1087.1,
-                        "depth": {"buy": [{"price": 1086.0}], "sell": [{"price": 1087.1}]},
+                        "depth": {
+                            "buy": [{"price": 1086.0}],
+                            "sell": [{"price": 1087.1}],
+                        },
                         "volume": 100000,
                         "oi": 100000,
                     }
@@ -627,18 +731,29 @@ class ScannerDataQualityTests(unittest.TestCase):
                 armed_entry_tracker=tracker,
             )
 
-            result = scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")[0]
+            result = scanner.scan_with_diagnostics(
+                symbols=["BANKNIFTY"], side="BUY", order_mode="paper"
+            )[0]
         finally:
             for key, value in originals.items():
                 object.__setattr__(settings, key, value)
 
         self.assertFalse(result["passed"])
         self.assertEqual(result["entry_timing_state"], "ARMED_FOR_ENTRY")
-        self.assertEqual(result["armed_setup_id"], "armed-test-1", result["factor_scores"].get("armed_entry"))
+        self.assertEqual(
+            result["armed_setup_id"],
+            "armed-test-1",
+            result["factor_scores"].get("armed_entry"),
+        )
         self.assertTrue(result["factor_scores"]["armed_entry"]["early_arm"])
         self.assertTrue(tracker.calls[0]["entry_timing"]["early_arm"])
-        self.assertGreater(tracker.calls[0]["entry_timing"]["entry_trigger_price"], tracker.calls[0]["entry_timing"]["current_premium"])
-        self.assertIn("premium_confirmation_pending", tracker.calls[0]["entry_timing"]["reasons"])
+        self.assertGreater(
+            tracker.calls[0]["entry_timing"]["entry_trigger_price"],
+            tracker.calls[0]["entry_timing"]["current_premium"],
+        )
+        self.assertIn(
+            "premium_confirmation_pending", tracker.calls[0]["entry_timing"]["reasons"]
+        )
 
     def test_scanner_early_arm_ignores_shadow_regime_veto(self) -> None:
         originals = {
@@ -674,7 +789,10 @@ class ScannerDataQualityTests(unittest.TestCase):
                     {
                         "instrument_token": 580001,
                         "last_price": 1087.1,
-                        "depth": {"buy": [{"price": 1086.0}], "sell": [{"price": 1087.1}]},
+                        "depth": {
+                            "buy": [{"price": 1086.0}],
+                            "sell": [{"price": 1087.1}],
+                        },
                         "volume": 100000,
                         "oi": 100000,
                     }
@@ -686,7 +804,9 @@ class ScannerDataQualityTests(unittest.TestCase):
                 armed_entry_tracker=tracker,
             )
 
-            result = scanner.scan_with_diagnostics(symbols=["BANKNIFTY"], side="BUY", order_mode="paper")[0]
+            result = scanner.scan_with_diagnostics(
+                symbols=["BANKNIFTY"], side="BUY", order_mode="paper"
+            )[0]
         finally:
             for key, value in originals.items():
                 object.__setattr__(settings, key, value)
@@ -698,15 +818,42 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.assertEqual(result["entry_timing_state"], "ARMED_FOR_ENTRY")
 
     def test_scanner_early_arm_is_paper_only_by_default(self) -> None:
-        scanner = ScannerService(feed=BankNiftyQualityFeed({}), rejected_opportunity_repository=RejectedOpportunityRepository())
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 1087.1, 100000, 100000, 1086.0, 1087.1)
+        scanner = ScannerService(
+            feed=BankNiftyQualityFeed({}),
+            rejected_opportunity_repository=RejectedOpportunityRepository(),
+        )
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            1087.1,
+            100000,
+            100000,
+            1086.0,
+            1087.1,
+        )
         result = scanner._maybe_register_armed_entry(
             symbol="BANKNIFTY",
             side="BUY",
             trend="bullish",
             contract=contract,
-            prices={"entry_price": 1087.1, "stop_loss": 1000.0, "target_1": 1250.0, "target_2": 1300.0, "target_3": 1350.0, "risk_reward": 1.8},
-            entry_timing_eval={"entry_timing_state": "NO_TRADE", "reasons": ["entry_timing_price_inputs_missing"]},
+            prices={
+                "entry_price": 1087.1,
+                "stop_loss": 1000.0,
+                "target_1": 1250.0,
+                "target_2": 1300.0,
+                "target_3": 1350.0,
+                "risk_reward": 1.8,
+            },
+            entry_timing_eval={
+                "entry_timing_state": "NO_TRADE",
+                "reasons": ["entry_timing_price_inputs_missing"],
+            },
             score=90,
             probability=0.8,
             confidence=0.9,
@@ -718,7 +865,11 @@ class ScannerDataQualityTests(unittest.TestCase):
                 "market_regime": {"passed": True},
                 "price_action": {"passed": True},
                 "banknifty_intelligence": {"passed": True},
-                "option_premium_confirmation": {"passed": False, "reasons": ["premium_candles_stale_or_missing"], "details": {}},
+                "option_premium_confirmation": {
+                    "passed": False,
+                    "reasons": ["premium_candles_stale_or_missing"],
+                    "details": {},
+                },
             },
             order_mode="live",
             gate_failures=["premium_candles_stale_or_missing"],
@@ -734,8 +885,21 @@ class ScannerDataQualityTests(unittest.TestCase):
             armed_entry_tracker=tracker,
         )
         contract = OptionContract(
-            "BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 30,
-            100, 100000, 100000, 99.5, 100, bid_quantity=300, ask_quantity=300,
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            30,
+            100,
+            100000,
+            100000,
+            99.5,
+            100,
+            bid_quantity=300,
+            ask_quantity=300,
         )
         originals = {
             "enable_kite_websocket": settings.enable_kite_websocket,
@@ -753,8 +917,18 @@ class ScannerDataQualityTests(unittest.TestCase):
                 side="BUY",
                 trend="bullish",
                 contract=contract,
-                prices={"entry_price": 100, "stop_loss": 90, "target_1": 120, "target_2": 130, "target_3": 140, "risk_reward": 2},
-                entry_timing_eval={"entry_timing_state": "NO_TRADE", "reasons": ["premium_candles_stale_or_missing"]},
+                prices={
+                    "entry_price": 100,
+                    "stop_loss": 90,
+                    "target_1": 120,
+                    "target_2": 130,
+                    "target_3": 140,
+                    "risk_reward": 2,
+                },
+                entry_timing_eval={
+                    "entry_timing_state": "NO_TRADE",
+                    "reasons": ["premium_candles_stale_or_missing"],
+                },
                 score=10,
                 probability=0.7,
                 confidence=0.76,
@@ -788,8 +962,21 @@ class ScannerDataQualityTests(unittest.TestCase):
             session_eligibility_provider=lambda: True,
         )
         contract = OptionContract(
-            "BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 30,
-            100, 100000, 100000, 99.5, 100, bid_quantity=300, ask_quantity=300,
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            30,
+            100,
+            100000,
+            100000,
+            99.5,
+            100,
+            bid_quantity=300,
+            ask_quantity=300,
         )
         factors = {
             "data_quality": {"passed": True},
@@ -807,8 +994,18 @@ class ScannerDataQualityTests(unittest.TestCase):
                 side="BUY",
                 trend="bullish",
                 contract=contract,
-                prices={"entry_price": 100, "stop_loss": 90, "target_1": 120, "target_2": 130, "target_3": 140, "risk_reward": 2},
-                entry_timing_eval={"entry_timing_state": "NO_TRADE", "reasons": ["premium_candles_stale_or_missing"]},
+                prices={
+                    "entry_price": 100,
+                    "stop_loss": 90,
+                    "target_1": 120,
+                    "target_2": 130,
+                    "target_3": 140,
+                    "risk_reward": 2,
+                },
+                entry_timing_eval={
+                    "entry_timing_state": "NO_TRADE",
+                    "reasons": ["premium_candles_stale_or_missing"],
+                },
                 score=99,
                 probability=None,
                 confidence=0.99,
@@ -821,10 +1018,16 @@ class ScannerDataQualityTests(unittest.TestCase):
             object.__setattr__(settings, "enable_kite_websocket", original_websocket)
         self.assertTrue(result["registered"])
         self.assertEqual(factors["risk_request"]["requested_tier"], "TIER_1_BASE")
-        self.assertEqual(factors["risk_request"]["shadow_requested_tier"], "TIER_4_EXCEPTIONAL")
-        self.assertFalse(factors["risk_request"]["higher_tier_has_active_order_authority"])
+        self.assertEqual(
+            factors["risk_request"]["shadow_requested_tier"], "TIER_4_EXCEPTIONAL"
+        )
+        self.assertFalse(
+            factors["risk_request"]["higher_tier_has_active_order_authority"]
+        )
 
-    def test_previous_day_option_candles_fail_premium_confirmation_during_current_session(self) -> None:
+    def test_previous_day_option_candles_fail_premium_confirmation_during_current_session(
+        self,
+    ) -> None:
         yesterday = datetime.now() - timedelta(days=1, hours=1)
         self._replace_premium_candles(
             "BANKNIFTY26JUL58000CE",
@@ -832,14 +1035,33 @@ class ScannerDataQualityTests(unittest.TestCase):
             closes=[100, 104, 108, 112, 116, 121, 126],
             volumes=[1000, 1000, 1000, 1000, 1000, 1000, 2000],
         )
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 126, 50000, 10000, 125, 126)
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            126,
+            50000,
+            10000,
+            125,
+            126,
+        )
 
-        result = OptionPremiumConfirmationService().evaluate(contract=contract, side="BUY")
+        result = OptionPremiumConfirmationService().evaluate(
+            contract=contract, side="BUY"
+        )
 
         self.assertFalse(result["passed"])
         self.assertIn("premium_candles_stale_or_missing", result["reasons"])
         self.assertFalse(result["details"]["premium_candle_freshness_passed"])
-        self.assertNotEqual(result["details"]["premium_candle_session_date"], result["details"]["current_market_session_date"])
+        self.assertNotEqual(
+            result["details"]["premium_candle_session_date"],
+            result["details"]["current_market_session_date"],
+        )
 
     def test_current_session_option_candles_pass_freshness(self) -> None:
         now = datetime.now()
@@ -849,50 +1071,113 @@ class ScannerDataQualityTests(unittest.TestCase):
             closes=[100, 102, 104, 106, 108, 110, 116],
             volumes=[1000, 1000, 1000, 1000, 1000, 1000, 2000],
         )
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 116, 50000, 10000, 115, 116)
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            116,
+            50000,
+            10000,
+            115,
+            116,
+        )
 
-        result = OptionPremiumConfirmationService().evaluate(contract=contract, side="BUY")
+        result = OptionPremiumConfirmationService().evaluate(
+            contract=contract, side="BUY"
+        )
 
         self.assertTrue(result["details"]["premium_candle_freshness_passed"])
-        self.assertEqual(result["details"]["premium_candle_session_date"], result["details"]["current_market_session_date"])
+        self.assertEqual(
+            result["details"]["premium_candle_session_date"],
+            result["details"]["current_market_session_date"],
+        )
         self.assertIsNotNone(result["details"]["premium_candle_age_seconds"])
 
     def test_on_demand_live_gap_backfill_repairs_missing_premium_candles(self) -> None:
         session = get_session()
         try:
-            session.query(Candle).filter(Candle.symbol == "BANKNIFTY26JUL58000CE").delete()
+            session.query(Candle).filter(
+                Candle.symbol == "BANKNIFTY26JUL58000CE"
+            ).delete()
             session.commit()
         finally:
             session.close()
         backfill_service = FakeLiveGapBackfillService()
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 116, 50000, 10000, 115, 116)
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            116,
+            50000,
+            10000,
+            115,
+            116,
+        )
 
-        result = OptionPremiumConfirmationService(live_gap_backfill_service=backfill_service).evaluate(contract=contract, side="BUY")
+        result = OptionPremiumConfirmationService(
+            live_gap_backfill_service=backfill_service
+        ).evaluate(contract=contract, side="BUY")
 
         self.assertEqual(len(backfill_service.calls), 1)
         self.assertEqual(backfill_service.calls[0]["kwargs"]["timeframes"], ["1minute"])
         self.assertTrue(result["passed"])
         self.assertEqual(result["details"]["premium_candle_source"], "stored_candles")
-        self.assertEqual(result["details"]["live_candle_gap_backfill_timeframe"], "1minute")
+        self.assertEqual(
+            result["details"]["live_candle_gap_backfill_timeframe"], "1minute"
+        )
         self.assertEqual(result["details"]["live_candle_gap_backfill"]["inserted"], 7)
 
-    def test_on_demand_backfill_restores_websocket_candle_context_without_fake_ticks(self) -> None:
+    def test_on_demand_backfill_restores_websocket_candle_context_without_fake_ticks(
+        self,
+    ) -> None:
         session = get_session()
         try:
-            session.query(Candle).filter(Candle.symbol == "BANKNIFTY26JUL58000CE").delete()
+            session.query(Candle).filter(
+                Candle.symbol == "BANKNIFTY26JUL58000CE"
+            ).delete()
             session.commit()
         finally:
             session.close()
         now = datetime.now().replace(second=0, microsecond=0)
-        feed = KiteWebSocketPriceFeed(api_key="k", access_token="t", ticker_factory=None, clock=lambda: now)
+        feed = KiteWebSocketPriceFeed(
+            api_key="k", access_token="t", ticker_factory=None, clock=lambda: now
+        )
         backfill_service = FakeLiveGapBackfillService()
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 116, 50000, 10000, 115, 116)
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            116,
+            50000,
+            10000,
+            115,
+            116,
+        )
 
-        result = OptionPremiumConfirmationService(feed, live_gap_backfill_service=backfill_service).evaluate(contract=contract, side="BUY")
+        result = OptionPremiumConfirmationService(
+            feed, live_gap_backfill_service=backfill_service
+        ).evaluate(contract=contract, side="BUY")
 
         self.assertTrue(result["passed"])
         self.assertEqual(feed.tick_count(580001), 0)
-        self.assertEqual(result["details"]["premium_candle_source"], "websocket_builder")
+        self.assertEqual(
+            result["details"]["premium_candle_source"], "websocket_builder"
+        )
         recovery = result["details"]["websocket_candle_context_recovery"]
         self.assertEqual(recovery["status"], "ok")
         self.assertEqual(recovery["inserted_candles"], 7)
@@ -904,28 +1189,113 @@ class ScannerDataQualityTests(unittest.TestCase):
     def test_websocket_built_candle_is_accepted_if_fresh(self) -> None:
         session = get_session()
         try:
-            session.query(Candle).filter(Candle.symbol == "BANKNIFTY26JUL58000CE").delete()
+            session.query(Candle).filter(
+                Candle.symbol == "BANKNIFTY26JUL58000CE"
+            ).delete()
             session.commit()
         finally:
             session.close()
         now = datetime.now().replace(second=0, microsecond=0)
         candles = [
-            WebSocketPremiumCandle(580001, "1minute", now - timedelta(minutes=6), 100, 102, 99, 102, 1000, 3),
-            WebSocketPremiumCandle(580001, "1minute", now - timedelta(minutes=5), 103, 106, 102, 106, 1100, 3),
-            WebSocketPremiumCandle(580001, "1minute", now - timedelta(minutes=4), 107, 111, 106, 111, 1200, 3),
-            WebSocketPremiumCandle(580001, "1minute", now - timedelta(minutes=3), 112, 116, 111, 116, 1300, 3),
-            WebSocketPremiumCandle(580001, "1minute", now - timedelta(minutes=2), 117, 122, 116, 122, 1400, 3),
-            WebSocketPremiumCandle(580001, "1minute", now - timedelta(minutes=1), 123, 130, 122, 130, 3000, 3),
+            WebSocketPremiumCandle(
+                580001,
+                "1minute",
+                now - timedelta(minutes=6),
+                100,
+                102,
+                99,
+                102,
+                1000,
+                3,
+            ),
+            WebSocketPremiumCandle(
+                580001,
+                "1minute",
+                now - timedelta(minutes=5),
+                103,
+                106,
+                102,
+                106,
+                1100,
+                3,
+            ),
+            WebSocketPremiumCandle(
+                580001,
+                "1minute",
+                now - timedelta(minutes=4),
+                107,
+                111,
+                106,
+                111,
+                1200,
+                3,
+            ),
+            WebSocketPremiumCandle(
+                580001,
+                "1minute",
+                now - timedelta(minutes=3),
+                112,
+                116,
+                111,
+                116,
+                1300,
+                3,
+            ),
+            WebSocketPremiumCandle(
+                580001,
+                "1minute",
+                now - timedelta(minutes=2),
+                117,
+                122,
+                116,
+                122,
+                1400,
+                3,
+            ),
+            WebSocketPremiumCandle(
+                580001,
+                "1minute",
+                now - timedelta(minutes=1),
+                123,
+                130,
+                122,
+                130,
+                3000,
+                3,
+            ),
         ]
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 130, 50000, 10000, 129, 130)
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            130,
+            50000,
+            10000,
+            129,
+            130,
+        )
 
-        result = OptionPremiumConfirmationService(FakeWebSocketPremiumFeed(candles)).evaluate(contract=contract, side="BUY")
+        result = OptionPremiumConfirmationService(
+            FakeWebSocketPremiumFeed(candles)
+        ).evaluate(contract=contract, side="BUY")
 
-        self.assertEqual(result["details"]["premium_candle_source"], "websocket_builder")
+        self.assertEqual(
+            result["details"]["premium_candle_source"], "websocket_builder"
+        )
         self.assertTrue(result["details"]["premium_candle_freshness_passed"])
-        self.assertEqual(result["details"]["premium_candle_session_date"], result["details"]["current_market_session_date"])
+        self.assertEqual(
+            result["details"]["premium_candle_session_date"],
+            result["details"]["current_market_session_date"],
+        )
 
-    def test_fresh_websocket_candles_are_preferred_over_stale_stored_candles(self) -> None:
+    def test_fresh_websocket_candles_are_preferred_over_stale_stored_candles(
+        self,
+    ) -> None:
         yesterday = datetime.now() - timedelta(days=1, hours=1)
         self._replace_premium_candles(
             "BANKNIFTY26JUL58000CE",
@@ -935,75 +1305,214 @@ class ScannerDataQualityTests(unittest.TestCase):
         )
         now = datetime.now().replace(second=0, microsecond=0)
         candles = [
-            WebSocketPremiumCandle(580001, "1minute", now - timedelta(minutes=3), 100, 104, 99, 104, 1000, 3),
-            WebSocketPremiumCandle(580001, "1minute", now - timedelta(minutes=2), 105, 110, 104, 110, 1200, 3),
-            WebSocketPremiumCandle(580001, "1minute", now - timedelta(minutes=1), 111, 118, 110, 118, 2500, 3),
+            WebSocketPremiumCandle(
+                580001,
+                "1minute",
+                now - timedelta(minutes=3),
+                100,
+                104,
+                99,
+                104,
+                1000,
+                3,
+            ),
+            WebSocketPremiumCandle(
+                580001,
+                "1minute",
+                now - timedelta(minutes=2),
+                105,
+                110,
+                104,
+                110,
+                1200,
+                3,
+            ),
+            WebSocketPremiumCandle(
+                580001,
+                "1minute",
+                now - timedelta(minutes=1),
+                111,
+                118,
+                110,
+                118,
+                2500,
+                3,
+            ),
         ]
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 118, 50000, 10000, 117, 118)
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            118,
+            50000,
+            10000,
+            117,
+            118,
+        )
 
-        result = OptionPremiumConfirmationService(FakeWebSocketPremiumFeed(candles)).evaluate(contract=contract, side="BUY")
+        result = OptionPremiumConfirmationService(
+            FakeWebSocketPremiumFeed(candles)
+        ).evaluate(contract=contract, side="BUY")
 
-        self.assertEqual(result["details"]["premium_candle_source"], "websocket_builder")
+        self.assertEqual(
+            result["details"]["premium_candle_source"], "websocket_builder"
+        )
         self.assertTrue(result["details"]["premium_candle_freshness_passed"])
 
-    def test_insufficient_current_session_websocket_candles_rejects_with_specific_reason(self) -> None:
+    def test_insufficient_current_session_websocket_candles_rejects_with_specific_reason(
+        self,
+    ) -> None:
         now = datetime.now().replace(second=0, microsecond=0)
-        candles = [WebSocketPremiumCandle(580001, "1minute", now - timedelta(minutes=1), 100, 101, 99, 101, 1000, 2)]
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 101, 50000, 10000, 100, 101)
+        candles = [
+            WebSocketPremiumCandle(
+                580001,
+                "1minute",
+                now - timedelta(minutes=1),
+                100,
+                101,
+                99,
+                101,
+                1000,
+                2,
+            )
+        ]
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            101,
+            50000,
+            10000,
+            100,
+            101,
+        )
         session = get_session()
         try:
-            session.query(Candle).filter(Candle.symbol == "BANKNIFTY26JUL58000CE").delete()
+            session.query(Candle).filter(
+                Candle.symbol == "BANKNIFTY26JUL58000CE"
+            ).delete()
             session.commit()
         finally:
             session.close()
 
-        result = OptionPremiumConfirmationService(FakeWebSocketPremiumFeed(candles)).evaluate(contract=contract, side="BUY")
+        result = OptionPremiumConfirmationService(
+            FakeWebSocketPremiumFeed(candles)
+        ).evaluate(contract=contract, side="BUY")
 
         self.assertFalse(result["passed"])
         self.assertIn("premium_candle_builder_warming_up", result["reasons"])
-        self.assertEqual(result["details"]["premium_confirmation_block_reason"], "premium_candle_builder_warming_up")
+        self.assertEqual(
+            result["details"]["premium_confirmation_block_reason"],
+            "premium_candle_builder_warming_up",
+        )
 
     def test_selected_option_not_subscribed_returns_specific_reason(self) -> None:
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 101, 50000, 10000, 100, 101)
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            101,
+            50000,
+            10000,
+            100,
+            101,
+        )
         session = get_session()
         try:
-            session.query(Candle).filter(Candle.symbol == "BANKNIFTY26JUL58000CE").delete()
+            session.query(Candle).filter(
+                Candle.symbol == "BANKNIFTY26JUL58000CE"
+            ).delete()
             session.commit()
         finally:
             session.close()
 
-        result = OptionPremiumConfirmationService(FakeWebSocketPremiumFeed([], subscribed=False)).evaluate(contract=contract, side="BUY")
+        result = OptionPremiumConfirmationService(
+            FakeWebSocketPremiumFeed([], subscribed=False)
+        ).evaluate(contract=contract, side="BUY")
 
         self.assertFalse(result["passed"])
         self.assertIn("selected_option_not_subscribed_for_candles", result["reasons"])
 
     def test_no_current_session_candles_rejects_as_insufficient(self) -> None:
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 101, 50000, 10000, 100, 101)
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            101,
+            50000,
+            10000,
+            100,
+            101,
+        )
         session = get_session()
         try:
-            session.query(Candle).filter(Candle.symbol == "BANKNIFTY26JUL58000CE").delete()
+            session.query(Candle).filter(
+                Candle.symbol == "BANKNIFTY26JUL58000CE"
+            ).delete()
             session.commit()
         finally:
             session.close()
 
-        result = OptionPremiumConfirmationService(FakeWebSocketPremiumFeed([], subscribed=True, ticks_seen=0)).evaluate(contract=contract, side="BUY")
+        result = OptionPremiumConfirmationService(
+            FakeWebSocketPremiumFeed([], subscribed=True, ticks_seen=0)
+        ).evaluate(contract=contract, side="BUY")
 
         self.assertFalse(result["passed"])
         self.assertIn("insufficient_current_session_premium_candles", result["reasons"])
 
     def test_ticks_seen_without_candles_returns_specific_reason(self) -> None:
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 580001, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 101, 50000, 10000, 100, 101)
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            580001,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            101,
+            50000,
+            10000,
+            100,
+            101,
+        )
         session = get_session()
         try:
-            session.query(Candle).filter(Candle.symbol == "BANKNIFTY26JUL58000CE").delete()
+            session.query(Candle).filter(
+                Candle.symbol == "BANKNIFTY26JUL58000CE"
+            ).delete()
             session.commit()
         finally:
             session.close()
 
-        result = OptionPremiumConfirmationService(FakeWebSocketPremiumFeed([], subscribed=True, ticks_seen=2)).evaluate(contract=contract, side="BUY")
+        result = OptionPremiumConfirmationService(
+            FakeWebSocketPremiumFeed([], subscribed=True, ticks_seen=2)
+        ).evaluate(contract=contract, side="BUY")
 
         self.assertFalse(result["passed"])
-        self.assertIn("websocket_ticks_available_but_no_candles_built", result["reasons"])
+        self.assertIn(
+            "websocket_ticks_available_but_no_candles_built", result["reasons"]
+        )
 
     def test_stale_premium_candles_cannot_create_signal(self) -> None:
         yesterday = datetime.now() - timedelta(days=1, hours=1)
@@ -1029,7 +1538,10 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.assertIn("premium_candles_stale_or_missing", result["reasons"])
         details = result["factor_scores"]["option_premium_confirmation"]["details"]
         self.assertFalse(details["premium_candle_freshness_passed"])
-        self.assertEqual(details["premium_candle_rejection_reason"], "premium_candles_stale_or_missing")
+        self.assertEqual(
+            details["premium_candle_rejection_reason"],
+            "premium_candles_stale_or_missing",
+        )
 
     def test_premium_diagnostics_expose_age_and_session_date(self) -> None:
         result = self._scanner_result(
@@ -1078,23 +1590,66 @@ class ScannerDataQualityTests(unittest.TestCase):
         quality = result["factor_scores"]["data_quality"]
         self.assertFalse(result["passed"])
         self.assertIn("option_quote_premium_mismatch", result["reasons"])
-        self.assertEqual(quality["selected_option"]["quote_key_used"], "NFO:BANKNIFTY26JUL58000CE")
-        self.assertEqual(quality["selected_option"]["token_validation_status"], "matched")
-        self.assertGreater(quality["mismatch"]["mismatch_pct"], settings.option_quote_premium_mismatch_tolerance_pct)
+        self.assertEqual(
+            quality["selected_option"]["quote_key_used"], "NFO:BANKNIFTY26JUL58000CE"
+        )
+        self.assertEqual(
+            quality["selected_option"]["token_validation_status"], "matched"
+        )
+        self.assertGreater(
+            quality["mismatch"]["mismatch_pct"],
+            settings.option_quote_premium_mismatch_tolerance_pct,
+        )
 
     def test_incomplete_oi_marks_pcr_and_max_pain_unavailable(self) -> None:
-        selected = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 1, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 100, 0, 0, 99, 101)
+        selected = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            1,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            100,
+            0,
+            0,
+            99,
+            101,
+        )
         contracts = [
             selected,
-            OptionContract("BANKNIFTY26JUL58000PE", "NFO", 2, "BANKNIFTY", "2099-07-26", 58000, "PE", 15, 100, 0, 0, 99, 101),
+            OptionContract(
+                "BANKNIFTY26JUL58000PE",
+                "NFO",
+                2,
+                "BANKNIFTY",
+                "2099-07-26",
+                58000,
+                "PE",
+                15,
+                100,
+                0,
+                0,
+                99,
+                101,
+            ),
         ]
 
-        result = OptionChainService().analyze(spot_price=58091, trend="bullish", side="BUY", selected=selected, contracts=contracts)
+        result = OptionChainService().analyze(
+            spot_price=58091,
+            trend="bullish",
+            side="BUY",
+            selected=selected,
+            contracts=contracts,
+        )
 
         self.assertIsNone(result["details"]["pcr_oi"])
         self.assertIsNone(result["details"]["max_pain"])
         self.assertFalse(result["details"]["oi_data_complete"])
-        self.assertIn("PCR/max pain unavailable because OI data is incomplete", result["reasons"])
+        self.assertIn(
+            "PCR/max pain unavailable because OI data is incomplete", result["reasons"]
+        )
 
     def test_vix_unavailable_reduces_regime_without_fake_confidence(self) -> None:
         result = MarketRegimeService().evaluate(
@@ -1106,23 +1661,49 @@ class ScannerDataQualityTests(unittest.TestCase):
             vix=None,
         )
 
-        self.assertIn("India VIX was unavailable; regime score reduced", result["reasons"])
+        self.assertIn(
+            "India VIX was unavailable; regime score reduced", result["reasons"]
+        )
         self.assertEqual(result["details"]["vix"], 0.0)
 
     def test_top_bank_unavailable_is_soft_context_not_hard_confidence(self) -> None:
-        contract = OptionContract("BANKNIFTY26JUL58000CE", "NFO", 1, "BANKNIFTY", "2099-07-26", 58000, "CE", 15, 100, 50000, 10000, 99, 101)
+        contract = OptionContract(
+            "BANKNIFTY26JUL58000CE",
+            "NFO",
+            1,
+            "BANKNIFTY",
+            "2099-07-26",
+            58000,
+            "CE",
+            15,
+            100,
+            50000,
+            10000,
+            99,
+            101,
+        )
         result = BankNiftyIntelligenceService().evaluate(
             trend="bullish",
-            snapshot={"price": 58091, "day_high": 58200, "day_low": 57800, "vwap": 58020},
+            snapshot={
+                "price": 58091,
+                "day_high": 58200,
+                "day_low": 57800,
+                "vwap": 58020,
+            },
             market_snapshots={"BANKNIFTY": {"price": 58091}, "NIFTY": {"price": 25000}},
             contract=contract,
             chain_contracts=[contract],
             prices={"entry_price": 100, "target_1": 120},
-            premium_eval={"passed": True, "details": {"last_close": 100, "option_vwap": 95}},
+            premium_eval={
+                "passed": True,
+                "details": {"last_close": 100, "option_vwap": 95},
+            },
             day_type_eval={"passed": True, "details": {}},
         )
 
-        self.assertIn("top bank constituent live data is incomplete", result["soft_reasons"])
+        self.assertIn(
+            "top bank constituent live data is incomplete", result["soft_reasons"]
+        )
         self.assertEqual(result["details"]["topBankAlignment"]["available"], 0)
 
 

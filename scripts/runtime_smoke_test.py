@@ -21,15 +21,28 @@ ENDPOINTS = [
     Endpoint("db_health", "/db/health", 3.0),
     Endpoint("runtime_status", "/runtime/status", 3.0),
     Endpoint("websocket_status", "/kite/websocket/status", 3.0),
-    Endpoint("scanner_opportunities", "/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3", 5.0),
+    Endpoint(
+        "scanner_opportunities",
+        "/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3",
+        5.0,
+    ),
     Endpoint("after_market_status", "/research/after-market/status", 3.0),
 ]
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Smoke-test runtime responsiveness for the option app.")
-    parser.add_argument("--base-url", default="http://localhost:8000", help="API base URL")
-    parser.add_argument("--timeout", type=float, default=None, help="Override per-endpoint timeout in seconds")
+    parser = argparse.ArgumentParser(
+        description="Smoke-test runtime responsiveness for the option app."
+    )
+    parser.add_argument(
+        "--base-url", default="http://localhost:8000", help="API base URL"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Override per-endpoint timeout in seconds",
+    )
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
@@ -56,13 +69,28 @@ def call_endpoint(url: str, timeout: float) -> dict[str, object]:
             payload = parse_json(body)
             ok = response.status < 500 and elapsed_ms <= timeout * 1000
             reason = payload.get("status") or payload.get("reason") or "ok"
-            return {"ok": ok, "status_code": response.status, "elapsed_ms": elapsed_ms, "reason": str(reason)}
+            return {
+                "ok": ok,
+                "status_code": response.status,
+                "elapsed_ms": elapsed_ms,
+                "reason": str(reason),
+            }
     except urllib.error.HTTPError as exc:
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
-        return {"ok": False, "status_code": exc.code, "elapsed_ms": elapsed_ms, "reason": str(exc)}
+        return {
+            "ok": False,
+            "status_code": exc.code,
+            "elapsed_ms": elapsed_ms,
+            "reason": str(exc),
+        }
     except Exception as exc:
         elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
-        return {"ok": False, "status_code": "error", "elapsed_ms": elapsed_ms, "reason": str(exc)}
+        return {
+            "ok": False,
+            "status_code": "error",
+            "elapsed_ms": elapsed_ms,
+            "reason": str(exc),
+        }
 
 
 def parse_json(body: str) -> dict[str, object]:

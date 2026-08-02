@@ -20,19 +20,27 @@ class MarketSessionService:
 
     def is_pre_market_window(self, now: datetime | None = None) -> bool:
         current = self._coerce_now(now)
-        return self.is_market_day(current) and self._time(settings.runtime_pre_market_start_time) <= current.time() < self._time(settings.runtime_market_open_time)
+        return self.is_market_day(current) and self._time(
+            settings.runtime_pre_market_start_time
+        ) <= current.time() < self._time(settings.runtime_market_open_time)
 
     def is_market_open(self, now: datetime | None = None) -> bool:
         current = self._coerce_now(now)
-        return self.is_market_day(current) and self._time(settings.runtime_market_open_time) <= current.time() <= self._time(settings.runtime_market_close_time)
+        return self.is_market_day(current) and self._time(
+            settings.runtime_market_open_time
+        ) <= current.time() <= self._time(settings.runtime_market_close_time)
 
     def is_market_closing_window(self, now: datetime | None = None) -> bool:
         current = self._coerce_now(now)
-        return self.is_market_day(current) and self._time(settings.runtime_market_closing_start_time) <= current.time() <= self._time(settings.runtime_market_close_time)
+        return self.is_market_day(current) and self._time(
+            settings.runtime_market_closing_start_time
+        ) <= current.time() <= self._time(settings.runtime_market_close_time)
 
     def is_after_market_window(self, now: datetime | None = None) -> bool:
         current = self._coerce_now(now)
-        return self.is_market_day(current) and current.time() >= self._time(settings.runtime_after_market_review_start_time)
+        return self.is_market_day(current) and current.time() >= self._time(
+            settings.runtime_after_market_review_start_time
+        )
 
     def should_run_live_modules(self, now: datetime | None = None) -> bool:
         return bool(settings.runtime_manual_override) or self.is_market_open(now)
@@ -45,7 +53,11 @@ class MarketSessionService:
         if settings.runtime_manual_override:
             return "MANUAL_OVERRIDE"
         if not self.is_market_day(current):
-            return "HOLIDAY" if current.date() in self._holiday_dates() else "MARKET_CLOSED"
+            return (
+                "HOLIDAY"
+                if current.date() in self._holiday_dates()
+                else "MARKET_CLOSED"
+            )
         if self.is_pre_market_window(current):
             return "PRE_MARKET"
         if self.is_market_closing_window(current):
@@ -66,7 +78,9 @@ class MarketSessionService:
             "manual_override": bool(settings.runtime_manual_override),
             "market_open": self.is_market_open(current),
             "should_run_live_modules": self.should_run_live_modules(current),
-            "should_run_after_market_review": self.should_run_after_market_review(current),
+            "should_run_after_market_review": self.should_run_after_market_review(
+                current
+            ),
             "trading_date": current.date().isoformat(),
             "timestamp": current.isoformat(sep=" "),
             "windows": {

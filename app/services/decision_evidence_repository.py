@@ -8,7 +8,11 @@ from typing import Any
 from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
-from app.services.database import DecisionOutcomeRecord, DecisionRiskEvidenceRecord, get_session
+from app.services.database import (
+    DecisionOutcomeRecord,
+    DecisionRiskEvidenceRecord,
+    get_session,
+)
 from app.services.strategy_lineage_service import current_strategy_lineage
 from app.services.time_utils import ist_now_naive
 
@@ -16,7 +20,14 @@ from app.services.time_utils import ist_now_naive
 class DecisionEvidenceRepository:
     """Append-only decision/risk evidence and episode outcome persistence."""
 
-    HORIZONS = ("30_seconds", "1_minute", "3_minutes", "5_minutes", "15_minutes", "session_cutoff")
+    HORIZONS = (
+        "30_seconds",
+        "1_minute",
+        "3_minutes",
+        "5_minutes",
+        "15_minutes",
+        "session_cutoff",
+    )
 
     def record_decision(
         self,
@@ -44,16 +55,34 @@ class DecisionEvidenceRepository:
             final_state=str(final_state),
             symbol=str(symbol or "BANKNIFTY").upper(),
             tradingsymbol=tradingsymbol,
-            strategy_version=str(payload.get("strategy_version") or lineage["strategy_version"]),
+            strategy_version=str(
+                payload.get("strategy_version") or lineage["strategy_version"]
+            ),
             config_hash=str(payload.get("config_hash") or lineage["config_hash"]),
             risk_policy_version=str(settings.risk_policy_version),
             trading_date=str(payload.get("trading_date") or now.date().isoformat()),
-            session_phase=str(payload.get("session_phase") or payload.get("market_session") or "unknown"),
+            session_phase=str(
+                payload.get("session_phase")
+                or payload.get("market_session")
+                or "unknown"
+            ),
             decision_context_json=json.dumps(payload, default=str, sort_keys=True),
-            gate_results_json=json.dumps(gate_results or {}, default=str, sort_keys=True),
-            active_risk_decision_json=json.dumps(active_risk_decision, default=str, sort_keys=True) if active_risk_decision is not None else None,
-            shadow_risk_decisions_json=json.dumps(shadow_risk_decisions, default=str, sort_keys=True) if shadow_risk_decisions is not None else None,
-            transition_timestamps_json=json.dumps(transition_timestamps or {}, default=str, sort_keys=True),
+            gate_results_json=json.dumps(
+                gate_results or {}, default=str, sort_keys=True
+            ),
+            active_risk_decision_json=json.dumps(
+                active_risk_decision, default=str, sort_keys=True
+            )
+            if active_risk_decision is not None
+            else None,
+            shadow_risk_decisions_json=json.dumps(
+                shadow_risk_decisions, default=str, sort_keys=True
+            )
+            if shadow_risk_decisions is not None
+            else None,
+            transition_timestamps_json=json.dumps(
+                transition_timestamps or {}, default=str, sort_keys=True
+            ),
         )
         session = get_session()
         try:
@@ -61,13 +90,29 @@ class DecisionEvidenceRepository:
             try:
                 session.commit()
                 session.refresh(record)
-                return {"id": record.id, "decision_id": record.decision_id, "episode_key": record.episode_key, "deduplicated": False}
+                return {
+                    "id": record.id,
+                    "decision_id": record.decision_id,
+                    "episode_key": record.episode_key,
+                    "deduplicated": False,
+                }
             except IntegrityError:
                 session.rollback()
-                existing = session.query(DecisionRiskEvidenceRecord).filter(DecisionRiskEvidenceRecord.decision_id == record.decision_id).first()
+                existing = (
+                    session.query(DecisionRiskEvidenceRecord)
+                    .filter(
+                        DecisionRiskEvidenceRecord.decision_id == record.decision_id
+                    )
+                    .first()
+                )
                 if existing is None:
                     raise
-                return {"id": existing.id, "decision_id": existing.decision_id, "episode_key": existing.episode_key, "deduplicated": True}
+                return {
+                    "id": existing.id,
+                    "decision_id": existing.decision_id,
+                    "episode_key": existing.episode_key,
+                    "deduplicated": True,
+                }
         finally:
             session.close()
 
@@ -104,12 +149,22 @@ class DecisionEvidenceRepository:
                 .first()
             )
             if existing is not None:
-                return {"id": existing.id, "episode_key": existing.episode_key, "horizon": existing.horizon, "deduplicated": True}
+                return {
+                    "id": existing.id,
+                    "episode_key": existing.episode_key,
+                    "horizon": existing.horizon,
+                    "deduplicated": True,
+                }
             session.add(record)
             try:
                 session.commit()
                 session.refresh(record)
-                return {"id": record.id, "episode_key": record.episode_key, "horizon": record.horizon, "deduplicated": False}
+                return {
+                    "id": record.id,
+                    "episode_key": record.episode_key,
+                    "horizon": record.horizon,
+                    "deduplicated": False,
+                }
             except IntegrityError:
                 session.rollback()
                 existing = (
@@ -123,7 +178,12 @@ class DecisionEvidenceRepository:
                 )
                 if existing is None:
                     raise
-                return {"id": existing.id, "episode_key": existing.episode_key, "horizon": existing.horizon, "deduplicated": True}
+                return {
+                    "id": existing.id,
+                    "episode_key": existing.episode_key,
+                    "horizon": existing.horizon,
+                    "deduplicated": True,
+                }
         finally:
             session.close()
 
@@ -138,13 +198,21 @@ class DecisionEvidenceRepository:
     ) -> dict[str, Any]:
         results: dict[str, Any] = {}
         for tier, decision in shadow_decisions.items():
-            quantity = int(decision.get("counterfactual_maximum_quantity") or decision.get("maximum_quantity") or 0)
-            pnl = ((float(exit_price) - float(entry_price)) - float(charges_per_unit)) * quantity
+            quantity = int(
+                decision.get("counterfactual_maximum_quantity")
+                or decision.get("maximum_quantity")
+                or 0
+            )
+            pnl = (
+                (float(exit_price) - float(entry_price)) - float(charges_per_unit)
+            ) * quantity
             results[tier] = {
                 "hypothetical_only": True,
                 "quantity": quantity,
                 "rupee_result": round(pnl, 2),
-                "return_on_equity_percent": round((pnl / max(float(account_equity), 0.01)) * 100.0, 4),
+                "return_on_equity_percent": round(
+                    (pnl / max(float(account_equity), 0.01)) * 100.0, 4
+                ),
                 "approved_risk_percent": decision.get("approved_risk_percent"),
                 "approved_risk_amount": decision.get("approved_risk_amount"),
             }
@@ -157,7 +225,11 @@ class DecisionEvidenceRepository:
     def get_decision(self, decision_id: str) -> dict[str, Any] | None:
         session = get_session()
         try:
-            row = session.query(DecisionRiskEvidenceRecord).filter(DecisionRiskEvidenceRecord.decision_id == decision_id).first()
+            row = (
+                session.query(DecisionRiskEvidenceRecord)
+                .filter(DecisionRiskEvidenceRecord.decision_id == decision_id)
+                .first()
+            )
             if row is None:
                 return None
             return {
@@ -167,9 +239,15 @@ class DecisionEvidenceRepository:
                 "final_state": row.final_state,
                 "context": json.loads(row.decision_context_json),
                 "gates": json.loads(row.gate_results_json),
-                "active_risk_decision": json.loads(row.active_risk_decision_json) if row.active_risk_decision_json else None,
-                "shadow_risk_decisions": json.loads(row.shadow_risk_decisions_json) if row.shadow_risk_decisions_json else None,
-                "created_at": row.created_at.isoformat(sep=" ") if isinstance(row.created_at, datetime) else str(row.created_at),
+                "active_risk_decision": json.loads(row.active_risk_decision_json)
+                if row.active_risk_decision_json
+                else None,
+                "shadow_risk_decisions": json.loads(row.shadow_risk_decisions_json)
+                if row.shadow_risk_decisions_json
+                else None,
+                "created_at": row.created_at.isoformat(sep=" ")
+                if isinstance(row.created_at, datetime)
+                else str(row.created_at),
             }
         finally:
             session.close()

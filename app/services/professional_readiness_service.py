@@ -35,7 +35,9 @@ class ProfessionalReadinessService:
     ) -> dict[str, Any]:
         symbol = symbol.upper()
         option_coverage = self.option_history_repository.coverage_summary(symbol)
-        opportunities = self.opportunity_analytics_service.analyze(symbol=symbol, limit=limit)
+        opportunities = self.opportunity_analytics_service.analyze(
+            symbol=symbol, limit=limit
+        )
         execution = self.execution_analytics_service.analyze(symbol=symbol, limit=limit)
         option_backtest = self.backtest_service.run_option_premium(
             symbol=symbol,
@@ -98,7 +100,8 @@ class ProfessionalReadinessService:
         walk_summary = walk_forward.get("summary", {})
         return {
             "strategy_lineage_consistency": {
-                "passed": not bool(opportunities.get("mixed_lineage")) and not bool(execution.get("mixed_lineage")),
+                "passed": not bool(opportunities.get("mixed_lineage"))
+                and not bool(execution.get("mixed_lineage")),
                 "opportunity_mixed_lineage": bool(opportunities.get("mixed_lineage")),
                 "execution_mixed_lineage": bool(execution.get("mixed_lineage")),
                 "message": "Readiness never combines different config hashes silently.",
@@ -124,21 +127,26 @@ class ProfessionalReadinessService:
                 "minimum": 20,
             },
             "execution_deviation": {
-                "passed": float(execution_quality.get("max_entry_deviation_pct") or 0.0) <= settings.max_entry_price_deviation_pct,
+                "passed": float(execution_quality.get("max_entry_deviation_pct") or 0.0)
+                <= settings.max_entry_price_deviation_pct,
                 "value": execution_quality.get("max_entry_deviation_pct"),
                 "maximum": settings.max_entry_price_deviation_pct,
             },
             "option_backtest_expectancy": {
-                "passed": option_backtest.get("status") == "ok" and float(backtest_summary.get("expectancy_pct") or 0.0) > 0,
+                "passed": option_backtest.get("status") == "ok"
+                and float(backtest_summary.get("expectancy_pct") or 0.0) > 0,
                 "value": backtest_summary.get("expectancy_pct"),
                 "minimum": 0,
                 "status": option_backtest.get("status"),
             },
             "walk_forward_passed": {
                 "passed": bool(walk_forward.get("passed"))
-                and int(walk_forward.get("fold_count") or 0) >= settings.readiness_min_validation_folds
-                and int(walk_summary.get("trades") or 0) >= settings.readiness_min_oos_trades
-                and int(walk_forward.get("out_of_sample_sessions") or 0) >= settings.readiness_min_oos_sessions,
+                and int(walk_forward.get("fold_count") or 0)
+                >= settings.readiness_min_validation_folds
+                and int(walk_summary.get("trades") or 0)
+                >= settings.readiness_min_oos_trades
+                and int(walk_forward.get("out_of_sample_sessions") or 0)
+                >= settings.readiness_min_oos_sessions,
                 "value": walk_summary.get("expectancy_pct"),
                 "status": walk_forward.get("status"),
                 "reasons": walk_forward.get("reasons", []),
@@ -150,33 +158,46 @@ class ProfessionalReadinessService:
                 "minimum_out_of_sample_sessions": settings.readiness_min_oos_sessions,
             },
             "walk_forward_after_cost_expectancy": {
-                "passed": int(walk_summary.get("trades") or 0) > 0 and float(walk_summary.get("expectancy_pct") or 0.0) > 0,
+                "passed": int(walk_summary.get("trades") or 0) > 0
+                and float(walk_summary.get("expectancy_pct") or 0.0) > 0,
                 "value": walk_summary.get("expectancy_pct"),
                 "minimum_exclusive": 0,
                 "message": "Zero-trade or non-positive after-cost expectancy cannot pass readiness.",
             },
             "walk_forward_profit_factor": {
                 "passed": walk_summary.get("profit_factor") is not None
-                and float(walk_summary.get("profit_factor")) >= settings.min_strategy_profit_factor,
+                and float(walk_summary.get("profit_factor"))
+                >= settings.min_strategy_profit_factor,
                 "value": walk_summary.get("profit_factor"),
                 "minimum": settings.min_strategy_profit_factor,
             },
             "walk_forward_drawdown": {
                 "passed": int(walk_summary.get("trades") or 0) > 0
-                and float(walk_summary.get("max_drawdown_pct") or 0.0) <= settings.readiness_max_drawdown_pct,
+                and float(walk_summary.get("max_drawdown_pct") or 0.0)
+                <= settings.readiness_max_drawdown_pct,
                 "value": walk_summary.get("max_drawdown_pct"),
                 "maximum": settings.readiness_max_drawdown_pct,
             },
             "walk_forward_regime_stability": {
-                "passed": bool((walk_forward.get("regime_stability") or {}).get("passed")),
+                "passed": bool(
+                    (walk_forward.get("regime_stability") or {}).get("passed")
+                ),
                 "value": walk_forward.get("regime_stability"),
-                "required_regimes": ["trend", "range", "volatile", "event_day", "expiry_day_when_enabled"],
+                "required_regimes": [
+                    "trend",
+                    "range",
+                    "volatile",
+                    "event_day",
+                    "expiry_day_when_enabled",
+                ],
             },
         }
 
     def _verdict(self, checks: dict[str, Any]) -> dict[str, Any]:
         passed = [name for name, check in checks.items() if bool(check.get("passed"))]
-        failed = [name for name, check in checks.items() if not bool(check.get("passed"))]
+        failed = [
+            name for name, check in checks.items() if not bool(check.get("passed"))
+        ]
         if len(failed) == 0:
             label = "ready_for_cautious_live_scaling"
         elif len(passed) >= max(1, len(checks) - 2):

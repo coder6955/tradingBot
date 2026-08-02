@@ -74,7 +74,10 @@ class MarketDataRuntimeServiceTests(unittest.TestCase):
             }
         )
 
-        with patch("app.services.market_data_runtime_service.load_access_token", return_value=None):
+        with patch(
+            "app.services.market_data_runtime_service.load_access_token",
+            return_value=None,
+        ):
             status = service.status()
 
         self.assertEqual(status["market_data_state"], "CONNECTED")

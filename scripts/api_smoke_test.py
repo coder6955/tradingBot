@@ -38,14 +38,38 @@ def check(method: str, path: str, timeout: float) -> dict[str, object]:
                 "status": response.status,
                 "seconds": round(elapsed, 3),
                 "ok": response.status < 500 and elapsed <= timeout,
-                "summary": payload.get("status") or payload.get("reason") or payload.get("message") or payload.get("count"),
+                "summary": payload.get("status")
+                or payload.get("reason")
+                or payload.get("message")
+                or payload.get("count"),
             }
     except HTTPError as exc:
-        return {"method": method, "path": path, "status": exc.code, "seconds": round(time.perf_counter() - started, 3), "ok": False, "summary": str(exc)}
+        return {
+            "method": method,
+            "path": path,
+            "status": exc.code,
+            "seconds": round(time.perf_counter() - started, 3),
+            "ok": False,
+            "summary": str(exc),
+        }
     except URLError as exc:
-        return {"method": method, "path": path, "status": "error", "seconds": round(time.perf_counter() - started, 3), "ok": False, "summary": str(exc.reason)}
+        return {
+            "method": method,
+            "path": path,
+            "status": "error",
+            "seconds": round(time.perf_counter() - started, 3),
+            "ok": False,
+            "summary": str(exc.reason),
+        }
     except TimeoutError:
-        return {"method": method, "path": path, "status": "timeout", "seconds": round(time.perf_counter() - started, 3), "ok": False, "summary": f">{timeout}s"}
+        return {
+            "method": method,
+            "path": path,
+            "status": "timeout",
+            "seconds": round(time.perf_counter() - started, 3),
+            "ok": False,
+            "summary": f">{timeout}s",
+        }
 
 
 def main() -> int:

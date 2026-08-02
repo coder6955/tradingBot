@@ -130,7 +130,8 @@ class FixedClockAutomationSupervisor(AutomationSupervisorService):
         self.fake_outcome_service = outcome_service or FakeOutcomeService()
         super().__init__(
             data_ingestion_service=FakeDataIngestionService(),
-            snapshot_collector_service=snapshot_collector_service or FakeSnapshotCollectorService(),
+            snapshot_collector_service=snapshot_collector_service
+            or FakeSnapshotCollectorService(),
             auto_trader_service=auto_trader_service or FakeAutoTraderService(),
             outcome_service=self.fake_outcome_service,
             risk_management_service=FakeRiskManagementService(),
@@ -145,33 +146,72 @@ class FixedClockAutomationSupervisor(AutomationSupervisorService):
 
 class AutomationSupervisorAfterMarketTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.original_stop_after_complete = settings.automation_stop_after_after_market_complete
-        self.original_enable_live_gap_backfill = settings.enable_live_option_candle_gap_backfill
-        self.original_live_gap_interval = settings.live_option_candle_backfill_interval_seconds
-        self.original_live_gap_timeframes = settings.live_option_candle_backfill_timeframes
+        self.original_stop_after_complete = (
+            settings.automation_stop_after_after_market_complete
+        )
+        self.original_enable_live_gap_backfill = (
+            settings.enable_live_option_candle_gap_backfill
+        )
+        self.original_live_gap_interval = (
+            settings.live_option_candle_backfill_interval_seconds
+        )
+        self.original_live_gap_timeframes = (
+            settings.live_option_candle_backfill_timeframes
+        )
         self.original_automation_enabled = settings.automation_enabled
-        object.__setattr__(settings, "automation_stop_after_after_market_complete", True)
+        object.__setattr__(
+            settings, "automation_stop_after_after_market_complete", True
+        )
         object.__setattr__(settings, "automation_enabled", False)
         object.__setattr__(settings, "enable_live_option_candle_gap_backfill", True)
-        object.__setattr__(settings, "live_option_candle_backfill_interval_seconds", 120)
-        object.__setattr__(settings, "live_option_candle_backfill_timeframes", "1minute")
+        object.__setattr__(
+            settings, "live_option_candle_backfill_interval_seconds", 120
+        )
+        object.__setattr__(
+            settings, "live_option_candle_backfill_timeframes", "1minute"
+        )
 
     def tearDown(self) -> None:
-        object.__setattr__(settings, "automation_stop_after_after_market_complete", self.original_stop_after_complete)
-        object.__setattr__(settings, "enable_live_option_candle_gap_backfill", self.original_enable_live_gap_backfill)
-        object.__setattr__(settings, "live_option_candle_backfill_interval_seconds", self.original_live_gap_interval)
-        object.__setattr__(settings, "live_option_candle_backfill_timeframes", self.original_live_gap_timeframes)
-        object.__setattr__(settings, "automation_enabled", self.original_automation_enabled)
+        object.__setattr__(
+            settings,
+            "automation_stop_after_after_market_complete",
+            self.original_stop_after_complete,
+        )
+        object.__setattr__(
+            settings,
+            "enable_live_option_candle_gap_backfill",
+            self.original_enable_live_gap_backfill,
+        )
+        object.__setattr__(
+            settings,
+            "live_option_candle_backfill_interval_seconds",
+            self.original_live_gap_interval,
+        )
+        object.__setattr__(
+            settings,
+            "live_option_candle_backfill_timeframes",
+            self.original_live_gap_timeframes,
+        )
+        object.__setattr__(
+            settings, "automation_enabled", self.original_automation_enabled
+        )
 
     def test_supervisor_runs_research_in_market_closed_branch(self) -> None:
         research = FakeAfterMarketResearchService()
-        supervisor = FixedClockAutomationSupervisor(now=datetime(2026, 7, 3, 16, 0), after_market_research_service=research)
+        supervisor = FixedClockAutomationSupervisor(
+            now=datetime(2026, 7, 3, 16, 0), after_market_research_service=research
+        )
 
         result = supervisor.run_once({"symbols": "BANKNIFTY"})
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(len(research.calls), 1)
-        self.assertTrue(any(action.get("action") == "after_market_research" for action in result["actions"]))
+        self.assertTrue(
+            any(
+                action.get("action") == "after_market_research"
+                for action in result["actions"]
+            )
+        )
 
     def test_supervisor_stops_intraday_services_after_market_close(self) -> None:
         research = FakeAfterMarketResearchService()
@@ -192,9 +232,24 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         self.assertFalse(auto_trader.running)
         self.assertFalse(snapshot_collector.running)
         self.assertFalse(outcome.running)
-        self.assertTrue(any(action.get("action") == "stop_auto_trader" for action in result["actions"]))
-        self.assertTrue(any(action.get("action") == "stop_snapshot_collector" for action in result["actions"]))
-        self.assertTrue(any(action.get("action") == "stop_outcome_monitor" for action in result["actions"]))
+        self.assertTrue(
+            any(
+                action.get("action") == "stop_auto_trader"
+                for action in result["actions"]
+            )
+        )
+        self.assertTrue(
+            any(
+                action.get("action") == "stop_snapshot_collector"
+                for action in result["actions"]
+            )
+        )
+        self.assertTrue(
+            any(
+                action.get("action") == "stop_outcome_monitor"
+                for action in result["actions"]
+            )
+        )
 
     def test_supervisor_does_not_repeat_after_market_outcome_evaluation(self) -> None:
         research = FakeAfterMarketResearchService()
@@ -213,12 +268,15 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         self.assertEqual(outcome.evaluate_calls, 1)
         self.assertTrue(
             any(
-                action.get("action") == "evaluate_open_opportunities" and action.get("status") == "skipped"
+                action.get("action") == "evaluate_open_opportunities"
+                and action.get("status") == "skipped"
                 for action in second["actions"]
             )
         )
 
-    def test_supervisor_does_not_call_outcome_evaluation_before_market_open(self) -> None:
+    def test_supervisor_does_not_call_outcome_evaluation_before_market_open(
+        self,
+    ) -> None:
         research = FakeAfterMarketResearchService()
         outcome = FakeOutcomeService()
         supervisor = FixedClockAutomationSupervisor(
@@ -233,34 +291,59 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         self.assertEqual(outcome.evaluate_calls, 0)
         self.assertTrue(
             any(
-                action.get("action") == "evaluate_open_opportunities" and action.get("reason") == "market_not_closed_for_day"
+                action.get("action") == "evaluate_open_opportunities"
+                and action.get("reason") == "market_not_closed_for_day"
                 for action in result["actions"]
             )
         )
 
     def test_supervisor_does_not_run_research_during_market_hours(self) -> None:
         research = FakeAfterMarketResearchService()
-        supervisor = FixedClockAutomationSupervisor(now=datetime(2026, 7, 3, 10, 30), after_market_research_service=research)
+        supervisor = FixedClockAutomationSupervisor(
+            now=datetime(2026, 7, 3, 10, 30), after_market_research_service=research
+        )
 
         result = supervisor.run_once({"symbols": "BANKNIFTY"})
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(research.calls, [])
-        self.assertFalse(any(action.get("action") == "after_market_research" for action in result["actions"]))
+        self.assertFalse(
+            any(
+                action.get("action") == "after_market_research"
+                for action in result["actions"]
+            )
+        )
 
-    def test_supervisor_runs_live_option_candle_gap_catchup_during_market_hours(self) -> None:
+    def test_supervisor_runs_live_option_candle_gap_catchup_during_market_hours(
+        self,
+    ) -> None:
         research = FakeAfterMarketResearchService()
-        supervisor = FixedClockAutomationSupervisor(now=datetime(2026, 7, 3, 10, 30), after_market_research_service=research)
+        supervisor = FixedClockAutomationSupervisor(
+            now=datetime(2026, 7, 3, 10, 30), after_market_research_service=research
+        )
 
         result = supervisor.run_once({"symbols": "BANKNIFTY"})
 
         self.assertEqual(result["status"], "ok")
         self.assertEqual(len(supervisor.data_ingestion_service.live_gap_calls), 1)
-        self.assertEqual(supervisor.data_ingestion_service.live_gap_calls[0]["symbols"], ["BANKNIFTY"])
-        self.assertEqual(supervisor.data_ingestion_service.live_gap_calls[0]["timeframes"], ["1minute"])
-        self.assertTrue(any(action.get("action") == "live_option_candle_gap_catchup" for action in result["actions"]))
+        self.assertEqual(
+            supervisor.data_ingestion_service.live_gap_calls[0]["symbols"],
+            ["BANKNIFTY"],
+        )
+        self.assertEqual(
+            supervisor.data_ingestion_service.live_gap_calls[0]["timeframes"],
+            ["1minute"],
+        )
+        self.assertTrue(
+            any(
+                action.get("action") == "live_option_candle_gap_catchup"
+                for action in result["actions"]
+            )
+        )
 
-    def test_running_supervisor_stops_after_after_market_pipeline_completes(self) -> None:
+    def test_running_supervisor_stops_after_after_market_pipeline_completes(
+        self,
+    ) -> None:
         research = FakeAfterMarketResearchService()
         outcome = FakeOutcomeService()
         supervisor = FixedClockAutomationSupervisor(
@@ -275,10 +358,15 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertFalse(supervisor.running)
         self.assertTrue(
-            any(action.get("action") == "automation_stop_after_after_market_complete" for action in result["actions"])
+            any(
+                action.get("action") == "automation_stop_after_after_market_complete"
+                for action in result["actions"]
+            )
         )
 
-    def test_boot_managed_supervisor_survives_after_market_for_next_session(self) -> None:
+    def test_boot_managed_supervisor_survives_after_market_for_next_session(
+        self,
+    ) -> None:
         object.__setattr__(settings, "automation_enabled", True)
         research = FakeAfterMarketResearchService()
         supervisor = FixedClockAutomationSupervisor(
@@ -292,7 +380,10 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertTrue(supervisor.running)
         self.assertFalse(
-            any(action.get("action") == "automation_stop_after_after_market_complete" for action in result["actions"])
+            any(
+                action.get("action") == "automation_stop_after_after_market_complete"
+                for action in result["actions"]
+            )
         )
 
     def test_start_records_and_recovers_unclean_previous_process_run(self) -> None:
@@ -319,9 +410,13 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         self.assertEqual(repository.finished[0]["run_id"], 1)
         self.assertEqual(repository.finished[0]["status"], "interrupted")
         self.assertEqual(repository.started[0]["job_name"], "automation_supervisor")
-        self.assertEqual(repository.started[0]["metadata"]["trigger"], "application_startup")
+        self.assertEqual(
+            repository.started[0]["metadata"]["trigger"], "application_startup"
+        )
         self.assertEqual(repository.finished[-1]["status"], "stopped")
-        self.assertEqual(repository.finished[-1]["metadata"]["stop_reason"], "test_shutdown")
+        self.assertEqual(
+            repository.finished[-1]["metadata"]["stop_reason"], "test_shutdown"
+        )
 
 
 if __name__ == "__main__":

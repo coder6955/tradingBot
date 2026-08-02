@@ -34,7 +34,9 @@ class _BuildingCandle:
 class UnderlyingCandleService:
     """Build canonical BANKNIFTY 1m/5m candles from exchange-timestamped ticks."""
 
-    def __init__(self, *, market_session_service: MarketSessionService | None = None) -> None:
+    def __init__(
+        self, *, market_session_service: MarketSessionService | None = None
+    ) -> None:
         self.market_session_service = market_session_service or MarketSessionService()
         self.symbol = str(settings.underlying_candle_symbol or "BANKNIFTY").upper()
         self.instrument_token: int | None = None
@@ -42,7 +44,9 @@ class UnderlyingCandleService:
         self._five_minute: _BuildingCandle | None = None
         self._last_completed_1m: _BuildingCandle | None = None
         self._last_cumulative_volume: float | None = None
-        self._persist_queue: queue.Queue[_BuildingCandle] = queue.Queue(maxsize=max(100, settings.websocket_candle_persist_queue_size))
+        self._persist_queue: queue.Queue[_BuildingCandle] = queue.Queue(
+            maxsize=max(100, settings.websocket_candle_persist_queue_size)
+        )
         self._stop = Event()
         self._worker: Thread | None = None
         self._lock = RLock()
@@ -66,7 +70,9 @@ class UnderlyingCandleService:
                 return {"started": True, "already_running": True}
             self._recover_last_completed()
             self._stop.clear()
-            self._worker = Thread(target=self._run, name="underlying-candle-persistence", daemon=True)
+            self._worker = Thread(
+                target=self._run, name="underlying-candle-persistence", daemon=True
+            )
             self._worker.start()
         return {"started": True}
 
@@ -80,7 +86,10 @@ class UnderlyingCandleService:
     def on_tick(self, tick: WebSocketTick) -> dict[str, Any]:
         if not settings.enable_underlying_candle_pipeline:
             return {"accepted": False, "reason": "underlying_candle_pipeline_disabled"}
-        if self.instrument_token is None or int(tick.instrument_token) != self.instrument_token:
+        if (
+            self.instrument_token is None
+            or int(tick.instrument_token) != self.instrument_token
+        ):
             return {"accepted": False, "reason": "not_underlying_token"}
         if tick.timestamp_source not in {"exchange_timestamp", "last_trade_time"}:
             return self._reject("exchange_timestamp_provenance_required")
@@ -120,25 +129,37 @@ class UnderlyingCandleService:
         try:
             result: dict[str, Any] = {}
             for timeframe in ("1minute", "5minute"):
-                query = session.query(Candle).filter(Candle.symbol == self.symbol, Candle.timeframe == timeframe)
+                query = session.query(Candle).filter(
+                    Candle.symbol == self.symbol, Candle.timeframe == timeframe
+                )
                 latest = query.order_by(Candle.timestamp.desc()).first()
                 result[timeframe] = {
                     "count": int(query.count()),
-                    "last_completed_candle": self._candle_dict(latest) if latest else None,
-                    "timestamp_source": getattr(latest, "timestamp_source", None) if latest else None,
-                    "data_quality": getattr(latest, "data_quality", None) if latest else "missing",
+                    "last_completed_candle": self._candle_dict(latest)
+                    if latest
+                    else None,
+                    "timestamp_source": getattr(latest, "timestamp_source", None)
+                    if latest
+                    else None,
+                    "data_quality": getattr(latest, "data_quality", None)
+                    if latest
+                    else "missing",
                 }
             return result
         finally:
             session.close()
 
-    def _roll_one_minute(self, minute: datetime, tick: WebSocketTick, volume_increment: float) -> None:
+    def _roll_one_minute(
+        self, minute: datetime, tick: WebSocketTick, volume_increment: float
+    ) -> None:
         if self._one_minute is not None and minute < self._one_minute.timestamp:
             self._reject("out_of_order_underlying_tick")
             return
         if self._one_minute is None:
             self._fill_restart_gaps(minute)
-            self._one_minute = self._new_live_candle("1minute", minute, tick, volume_increment)
+            self._one_minute = self._new_live_candle(
+                "1minute", minute, tick, volume_increment
+            )
             return
         if minute == self._one_minute.timestamp:
             self._update(self._one_minute, tick, volume_increment)
@@ -164,12 +185,16 @@ class UnderlyingCandleService:
             self._complete_one_minute(generated)
             cursor += timedelta(minutes=1)
         self._close_completed_five_minute_before(minute)
-        self._one_minute = self._new_live_candle("1minute", minute, tick, volume_increment)
+        self._one_minute = self._new_live_candle(
+            "1minute", minute, tick, volume_increment
+        )
 
     def _close_completed_five_minute_before(self, minute: datetime) -> None:
         if self._five_minute is None:
             return
-        current_bucket = minute.replace(minute=(minute.minute // 5) * 5, second=0, microsecond=0)
+        current_bucket = minute.replace(
+            minute=(minute.minute // 5) * 5, second=0, microsecond=0
+        )
         if self._five_minute.timestamp >= current_bucket:
             return
         completed = self._five_minute
@@ -197,16 +222,26 @@ class UnderlyingCandleService:
                 volume=candle.volume,
                 receive_timestamp=candle.receive_timestamp,
                 is_generated=candle.is_generated,
-                data_quality="generated_session_continuity" if candle.is_generated else "exchange_tick_complete",
+                data_quality="generated_session_continuity"
+                if candle.is_generated
+                else "exchange_tick_complete",
             )
             return
         if bucket == self._five_minute.timestamp:
-            self._five_minute.high_price = max(self._five_minute.high_price, candle.high_price)
-            self._five_minute.low_price = min(self._five_minute.low_price, candle.low_price)
+            self._five_minute.high_price = max(
+                self._five_minute.high_price, candle.high_price
+            )
+            self._five_minute.low_price = min(
+                self._five_minute.low_price, candle.low_price
+            )
             self._five_minute.close_price = candle.close_price
             self._five_minute.volume += candle.volume
-            self._five_minute.receive_timestamp = candle.receive_timestamp or self._five_minute.receive_timestamp
-            self._five_minute.is_generated = self._five_minute.is_generated and candle.is_generated
+            self._five_minute.receive_timestamp = (
+                candle.receive_timestamp or self._five_minute.receive_timestamp
+            )
+            self._five_minute.is_generated = (
+                self._five_minute.is_generated and candle.is_generated
+            )
             if not candle.is_generated:
                 self._five_minute.data_quality = "exchange_tick_complete"
             return
@@ -223,7 +258,9 @@ class UnderlyingCandleService:
             volume=candle.volume,
             receive_timestamp=candle.receive_timestamp,
             is_generated=candle.is_generated,
-            data_quality="generated_session_continuity" if candle.is_generated else "exchange_tick_complete",
+            data_quality="generated_session_continuity"
+            if candle.is_generated
+            else "exchange_tick_complete",
         )
 
     def _fill_restart_gaps(self, minute: datetime) -> None:
@@ -254,7 +291,11 @@ class UnderlyingCandleService:
             self._persist_queue.put_nowait(candle)
         except queue.Full:
             self.dropped_candles += 1
-            logger.critical("canonical_underlying_candle_queue_full timeframe=%s timestamp=%s", candle.timeframe, candle.timestamp)
+            logger.critical(
+                "canonical_underlying_candle_queue_full timeframe=%s timestamp=%s",
+                candle.timeframe,
+                candle.timestamp,
+            )
 
     def _run(self) -> None:
         while not self._stop.is_set() or not self._persist_queue.empty():
@@ -272,7 +313,11 @@ class UnderlyingCandleService:
         try:
             existing = (
                 session.query(Candle)
-                .filter(Candle.symbol == self.symbol, Candle.timeframe == candle.timeframe, Candle.timestamp == candle.timestamp)
+                .filter(
+                    Candle.symbol == self.symbol,
+                    Candle.timeframe == candle.timeframe,
+                    Candle.timestamp == candle.timestamp,
+                )
                 .first()
             )
             if existing is not None:
@@ -299,7 +344,11 @@ class UnderlyingCandleService:
             self.persisted_candles += 1
         except Exception:
             session.rollback()
-            logger.exception("canonical_underlying_candle_persist_failed timeframe=%s timestamp=%s", candle.timeframe, candle.timestamp)
+            logger.exception(
+                "canonical_underlying_candle_persist_failed timeframe=%s timestamp=%s",
+                candle.timeframe,
+                candle.timestamp,
+            )
         finally:
             session.close()
 
@@ -309,7 +358,12 @@ class UnderlyingCandleService:
         try:
             row = (
                 session.query(Candle)
-                .filter(Candle.symbol == self.symbol, Candle.timeframe == "1minute", Candle.timestamp >= now.replace(hour=0, minute=0, second=0, microsecond=0))
+                .filter(
+                    Candle.symbol == self.symbol,
+                    Candle.timeframe == "1minute",
+                    Candle.timestamp
+                    >= now.replace(hour=0, minute=0, second=0, microsecond=0),
+                )
                 .order_by(Candle.timestamp.desc())
                 .first()
             )
@@ -324,9 +378,14 @@ class UnderlyingCandleService:
                     volume=float(row.volume or 0.0),
                     receive_timestamp=getattr(row, "receive_timestamp", None),
                     is_generated=bool(getattr(row, "is_generated", 0)),
-                    data_quality=str(getattr(row, "data_quality", None) or "recovered_completed_candle"),
+                    data_quality=str(
+                        getattr(row, "data_quality", None)
+                        or "recovered_completed_candle"
+                    ),
                 )
-                bucket = row.timestamp.replace(minute=(row.timestamp.minute // 5) * 5, second=0, microsecond=0)
+                bucket = row.timestamp.replace(
+                    minute=(row.timestamp.minute // 5) * 5, second=0, microsecond=0
+                )
                 bucket_rows = (
                     session.query(Candle)
                     .filter(
@@ -347,8 +406,13 @@ class UnderlyingCandleService:
                         low_price=min(float(item.low_price) for item in bucket_rows),
                         close_price=float(bucket_rows[-1].close_price),
                         volume=sum(float(item.volume or 0.0) for item in bucket_rows),
-                        receive_timestamp=getattr(bucket_rows[-1], "receive_timestamp", None),
-                        is_generated=all(bool(getattr(item, "is_generated", 0)) for item in bucket_rows),
+                        receive_timestamp=getattr(
+                            bucket_rows[-1], "receive_timestamp", None
+                        ),
+                        is_generated=all(
+                            bool(getattr(item, "is_generated", 0))
+                            for item in bucket_rows
+                        ),
                         data_quality="recovered_completed_1m_aggregate",
                     )
         finally:
@@ -362,7 +426,9 @@ class UnderlyingCandleService:
             return 0.0
         return max(0.0, current - previous)
 
-    def _new_live_candle(self, timeframe: str, timestamp: datetime, tick: WebSocketTick, volume: float) -> _BuildingCandle:
+    def _new_live_candle(
+        self, timeframe: str, timestamp: datetime, tick: WebSocketTick, volume: float
+    ) -> _BuildingCandle:
         return _BuildingCandle(
             timeframe=timeframe,
             timestamp=timestamp,
@@ -371,15 +437,21 @@ class UnderlyingCandleService:
             low_price=float(tick.price),
             close_price=float(tick.price),
             volume=volume,
-            receive_timestamp=(tick.receive_timestamp or ist_now_naive()).replace(tzinfo=None),
+            receive_timestamp=(tick.receive_timestamp or ist_now_naive()).replace(
+                tzinfo=None
+            ),
         )
 
-    def _update(self, candle: _BuildingCandle, tick: WebSocketTick, volume: float) -> None:
+    def _update(
+        self, candle: _BuildingCandle, tick: WebSocketTick, volume: float
+    ) -> None:
         candle.high_price = max(candle.high_price, float(tick.price))
         candle.low_price = min(candle.low_price, float(tick.price))
         candle.close_price = float(tick.price)
         candle.volume += volume
-        candle.receive_timestamp = (tick.receive_timestamp or ist_now_naive()).replace(tzinfo=None)
+        candle.receive_timestamp = (tick.receive_timestamp or ist_now_naive()).replace(
+            tzinfo=None
+        )
 
     def _reject(self, reason: str) -> dict[str, Any]:
         self.rejected_ticks += 1
@@ -405,7 +477,9 @@ class UnderlyingCandleService:
             "low": candle.low_price,
             "close": candle.close_price,
             "volume": candle.volume,
-            "receive_timestamp": candle.receive_timestamp.isoformat(sep=" ") if candle.receive_timestamp else None,
+            "receive_timestamp": candle.receive_timestamp.isoformat(sep=" ")
+            if candle.receive_timestamp
+            else None,
             "timestamp_source": candle.timestamp_source,
             "is_generated": bool(candle.is_generated),
             "data_quality": candle.data_quality,

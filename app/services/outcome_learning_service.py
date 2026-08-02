@@ -21,11 +21,15 @@ class OutcomeLearningService:
         self._history_cache: list[dict[str, Any]] | None = None
         self._history_cache_at: datetime | None = None
 
-    def evaluate(self, *, symbol: str, action: str, factor_scores: dict[str, Any]) -> dict[str, Any]:
+    def evaluate(
+        self, *, symbol: str, action: str, factor_scores: dict[str, Any]
+    ) -> dict[str, Any]:
         if not settings.enable_outcome_learning_guard:
             return {"enabled": False, "passed": True, "reasons": [], "details": {}}
 
-        groups = self._candidate_groups(symbol=symbol, action=action, factor_scores=factor_scores)
+        groups = self._candidate_groups(
+            symbol=symbol, action=action, factor_scores=factor_scores
+        )
         history = self._closed_history()
         stats = self._group_stats(history)
         matched = []
@@ -38,13 +42,29 @@ class OutcomeLearningService:
                 continue
             confidence = self._sample_confidence(int(item["trades"]))
             if confidence in {"insufficient", "weak"}:
-                matched.append({**item, "group": group, "used_as_guard": False, "sample_confidence": confidence, "reason": "sample size too small for blocking"})
+                matched.append(
+                    {
+                        **item,
+                        "group": group,
+                        "used_as_guard": False,
+                        "sample_confidence": confidence,
+                        "reason": "sample size too small for blocking",
+                    }
+                )
                 continue
             item_passed = (
                 item["expectancy_pct"] >= settings.min_outcome_learning_expectancy_pct
                 and item["win_rate_pct"] >= settings.min_outcome_learning_win_rate_pct
             )
-            matched.append({**item, "group": group, "used_as_guard": True, "passed": item_passed, "sample_confidence": confidence})
+            matched.append(
+                {
+                    **item,
+                    "group": group,
+                    "used_as_guard": True,
+                    "passed": item_passed,
+                    "sample_confidence": confidence,
+                }
+            )
             if not item_passed:
                 passed = False
                 reasons.append(
@@ -80,9 +100,7 @@ class OutcomeLearningService:
             reverse=True,
         )
         credible = [
-            {"group": group, **item}
-            for group, item in stats
-            if item["trades"] >= 50
+            {"group": group, **item} for group, item in stats if item["trades"] >= 50
         ]
         weak = [
             item
@@ -126,7 +144,11 @@ class OutcomeLearningService:
                 .limit(settings.outcome_learning_lookback)
                 .all()
             )
-            history = [self._history_item(record) for record in records if record.outcome in self.WIN_OUTCOMES | self.LOSS_OUTCOMES]
+            history = [
+                self._history_item(record)
+                for record in records
+                if record.outcome in self.WIN_OUTCOMES | self.LOSS_OUTCOMES
+            ]
             self._history_cache = list(history)
             self._history_cache_at = now
             return history
@@ -138,14 +160,23 @@ class OutcomeLearningService:
         pnl_pct = 0.0
         if record.entry_price and record.exit_price is not None:
             multiplier = 1 if record.side == "BUY" else -1
-            pnl_pct = ((record.exit_price - record.entry_price) / max(record.entry_price, 0.01)) * 100 * multiplier
+            pnl_pct = (
+                (
+                    (record.exit_price - record.entry_price)
+                    / max(record.entry_price, 0.01)
+                )
+                * 100
+                * multiplier
+            )
         return {
             "symbol": record.symbol,
             "action": record.action,
             "outcome": record.outcome,
             "pnl_pct": pnl_pct,
             "factor_scores": factors,
-            "groups": self._candidate_groups(symbol=record.symbol, action=record.action, factor_scores=factors),
+            "groups": self._candidate_groups(
+                symbol=record.symbol, action=record.action, factor_scores=factors
+            ),
         }
 
     def _group_stats(self, history: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -159,8 +190,16 @@ class OutcomeLearningService:
             wins = [item for item in items if item["outcome"] in self.WIN_OUTCOMES]
             losses = [item for item in items if item["outcome"] in self.LOSS_OUTCOMES]
             pnl_values = [float(item["pnl_pct"]) for item in items]
-            avg_win = sum(float(item["pnl_pct"]) for item in wins) / len(wins) if wins else 0.0
-            avg_loss = abs(sum(float(item["pnl_pct"]) for item in losses) / len(losses)) if losses else 0.0
+            avg_win = (
+                sum(float(item["pnl_pct"]) for item in wins) / len(wins)
+                if wins
+                else 0.0
+            )
+            avg_loss = (
+                abs(sum(float(item["pnl_pct"]) for item in losses) / len(losses))
+                if losses
+                else 0.0
+            )
             gross_win = sum(max(float(item["pnl_pct"]), 0.0) for item in items)
             gross_loss = abs(sum(min(float(item["pnl_pct"]), 0.0) for item in items))
             stats[group] = {
@@ -168,11 +207,17 @@ class OutcomeLearningService:
                 "sample_confidence": self._sample_confidence(len(items)),
                 "wins": len(wins),
                 "losses": len(losses),
-                "win_rate_pct": round((len(wins) / len(items)) * 100, 2) if items else 0.0,
-                "expectancy_pct": round(sum(pnl_values) / len(pnl_values), 3) if pnl_values else 0.0,
+                "win_rate_pct": round((len(wins) / len(items)) * 100, 2)
+                if items
+                else 0.0,
+                "expectancy_pct": round(sum(pnl_values) / len(pnl_values), 3)
+                if pnl_values
+                else 0.0,
                 "avg_win_pct": round(avg_win, 3),
                 "avg_loss_pct": round(avg_loss, 3),
-                "profit_factor": round(gross_win / gross_loss, 3) if gross_loss else None,
+                "profit_factor": round(gross_win / gross_loss, 3)
+                if gross_loss
+                else None,
             }
         return stats
 
@@ -185,15 +230,25 @@ class OutcomeLearningService:
             return "stronger"
         return "high"
 
-    def _candidate_groups(self, *, symbol: str, action: str, factor_scores: dict[str, Any]) -> list[str]:
+    def _candidate_groups(
+        self, *, symbol: str, action: str, factor_scores: dict[str, Any]
+    ) -> list[str]:
         groups = [
             f"symbol:{symbol.upper()}",
             f"action:{action.upper()}",
             f"symbol_action:{symbol.upper()}:{action.upper()}",
         ]
-        setup_type = self._nested_str(factor_scores, "signal", "setup_type") or self._nested_str(factor_scores, "setup_type")
+        setup_type = self._nested_str(
+            factor_scores, "signal", "setup_type"
+        ) or self._nested_str(factor_scores, "setup_type")
         if not setup_type:
-            setup_type = "directional_put_buy" if action.upper() == "BUY_PE" else "directional_call_buy" if action.upper() == "BUY_CE" else ""
+            setup_type = (
+                "directional_put_buy"
+                if action.upper() == "BUY_PE"
+                else "directional_call_buy"
+                if action.upper() == "BUY_CE"
+                else ""
+            )
         if setup_type:
             groups.append(f"setup:{setup_type}")
 
@@ -201,13 +256,17 @@ class OutcomeLearningService:
         if day_type:
             groups.append(f"day_type:{day_type}")
 
-        time_bucket = self._nested_str(factor_scores, "time_bucket_edge", "details", "bucket")
+        time_bucket = self._nested_str(
+            factor_scores, "time_bucket_edge", "details", "bucket"
+        )
         if time_bucket:
             groups.append(f"time_bucket:{time_bucket}")
             if action:
                 groups.append(f"time_bucket_action:{time_bucket}:{action.upper()}")
 
-        premium_score = self._nested_float(factor_scores, "option_premium_confirmation", "score")
+        premium_score = self._nested_float(
+            factor_scores, "option_premium_confirmation", "score"
+        )
         if premium_score is not None:
             groups.append(f"premium_confirmation:{self._score_bucket(premium_score)}")
 

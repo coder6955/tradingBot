@@ -59,13 +59,19 @@ def summarize_returns(
         "wins": len(wins),
         "losses": len(losses),
         "open_or_unclassified": unclassified,
-        "win_rate_pct": round((len(wins) / closed_count) * 100, 2) if closed_count else 0.0,
+        "win_rate_pct": round((len(wins) / closed_count) * 100, 2)
+        if closed_count
+        else 0.0,
         "average_win": round(gross_win / len(wins), 2) if wins else 0.0,
         "average_loss": round(gross_loss / len(losses), 2) if losses else 0.0,
-        "expectancy": round((sum(wins) + sum(losses)) / closed_count, 2) if closed_count else 0.0,
+        "expectancy": round((sum(wins) + sum(losses)) / closed_count, 2)
+        if closed_count
+        else 0.0,
         "profit_factor": round(gross_win / gross_loss, 2) if gross_loss else None,
         "max_drawdown": round(max_drawdown(returns), 2),
-        "avg_time_in_trade_minutes": round(sum(times) / len(times), 2) if times else 0.0,
+        "avg_time_in_trade_minutes": round(sum(times) / len(times), 2)
+        if times
+        else 0.0,
         "total_pnl": round(sum(returns), 2),
     }
 
@@ -82,7 +88,12 @@ def summarize_groups(
     for row in rows:
         groups.setdefault(key_fn(row), []).append(row)
     return {
-        key: summarize_returns(items, pnl_fn=pnl_fn, outcome_fn=outcome_fn, time_in_trade_fn=time_in_trade_fn)
+        key: summarize_returns(
+            items,
+            pnl_fn=pnl_fn,
+            outcome_fn=outcome_fn,
+            time_in_trade_fn=time_in_trade_fn,
+        )
         for key, items in sorted(groups.items())
     }
 

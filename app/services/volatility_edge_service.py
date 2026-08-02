@@ -57,7 +57,9 @@ class VolatilityEdgeService:
         banknifty_snapshot = (market_snapshots or {}).get("BANKNIFTY") or {}
         spot_price = self._snapshot_price(banknifty_snapshot)
 
-        candles = self._recent_candles(symbol.upper(), settings.candle_confirmation_timeframe, limit=160)
+        candles = self._recent_candles(
+            symbol.upper(), settings.candle_confirmation_timeframe, limit=160
+        )
         realized = self._realized_volatility(candles)
         if spot_price is None:
             spot_price = realized.get("last_close")
@@ -74,27 +76,44 @@ class VolatilityEdgeService:
         )
 
         if not candles:
-            reasons.append(f"{self.UNKNOWN_DATA_MISSING}: Bank Nifty candle history unavailable")
+            reasons.append(
+                f"{self.UNKNOWN_DATA_MISSING}: Bank Nifty candle history unavailable"
+            )
         if selected_iv is None and vix is None:
-            reasons.append(f"{self.UNKNOWN_DATA_MISSING}: selected option IV and India VIX unavailable")
+            reasons.append(
+                f"{self.UNKNOWN_DATA_MISSING}: selected option IV and India VIX unavailable"
+            )
         if realized["realized_volatility"] is None:
-            reasons.append(f"{self.UNKNOWN_DATA_MISSING}: realized volatility unavailable")
+            reasons.append(
+                f"{self.UNKNOWN_DATA_MISSING}: realized volatility unavailable"
+            )
         if iv_history["sample_count"] < settings.vol_edge_min_iv_samples:
             reasons.append(f"{self.UNKNOWN_DATA_MISSING}: insufficient IV history")
 
-        iv_vs_rv = self._iv_vs_realized(selected_iv, vix, realized["realized_volatility"])
-        score, scoring_reasons = self._score(iv_vs_rv, iv_history, expansion, expected_move)
+        iv_vs_rv = self._iv_vs_realized(
+            selected_iv, vix, realized["realized_volatility"]
+        )
+        score, scoring_reasons = self._score(
+            iv_vs_rv, iv_history, expansion, expected_move
+        )
         reasons.extend(scoring_reasons)
-        classification = self._classification(iv_vs_rv, iv_history, expansion, expected_move, reasons, score)
+        classification = self._classification(
+            iv_vs_rv, iv_history, expansion, expected_move, reasons, score
+        )
         edge_label, main_risk = self._edge_label(classification, score, expected_move)
-        passed = bool(score >= settings.min_volatility_edge_score and not self._has_unknown_only_block(reasons))
+        passed = bool(
+            score >= settings.min_volatility_edge_score
+            and not self._has_unknown_only_block(reasons)
+        )
 
         details = {
             "action": action,
             "side": side.upper(),
             "selected_iv": self._round(selected_iv),
             "india_vix": self._round(vix),
-            "iv_source": "selected_option" if selected_iv is not None else ("india_vix" if vix is not None else "unknown"),
+            "iv_source": "selected_option"
+            if selected_iv is not None
+            else ("india_vix" if vix is not None else "unknown"),
             "iv_rank": iv_history["iv_rank"],
             "iv_percentile": iv_history["iv_percentile"],
             "iv_history_sample_count": iv_history["sample_count"],
@@ -118,11 +137,15 @@ class VolatilityEdgeService:
             "iv_crush_risk": self._iv_crush_risk(iv_vs_rv, iv_history, expansion),
             "expected_move_from_iv": expected_move["expected_move_from_iv"],
             "expected_move_from_atr": expected_move["expected_move_from_atr"],
-            "expected_move_from_recent_range": expected_move["expected_move_from_recent_range"],
+            "expected_move_from_recent_range": expected_move[
+                "expected_move_from_recent_range"
+            ],
             "required_move_for_target": expected_move["required_move_for_target"],
             "expected_move_coverage_iv": expected_move["expected_move_coverage_iv"],
             "expected_move_coverage_atr": expected_move["expected_move_coverage_atr"],
-            "expected_move_coverage_range": expected_move["expected_move_coverage_range"],
+            "expected_move_coverage_range": expected_move[
+                "expected_move_coverage_range"
+            ],
             "best_expected_move_coverage": expected_move["best_expected_move_coverage"],
             "expected_move_label": expected_move["label"],
             "min_expected_move_coverage": settings.vol_edge_min_expected_move_coverage,
@@ -140,7 +163,9 @@ class VolatilityEdgeService:
             "details": details,
         }
 
-    def _recent_candles(self, symbol: str, timeframe: str, *, limit: int) -> list[Candle]:
+    def _recent_candles(
+        self, symbol: str, timeframe: str, *, limit: int
+    ) -> list[Candle]:
         key = ("candles", symbol, timeframe, int(limit))
         cached = self._history_cache_get(key)
         if cached is not None:
@@ -171,14 +196,28 @@ class VolatilityEdgeService:
             return cached[1]
 
     def _history_cache_set(self, key: tuple[Any, ...], value: Any) -> None:
-        expires = time.monotonic() + max(1.0, float(settings.volatility_history_cache_ttl_seconds))
+        expires = time.monotonic() + max(
+            1.0, float(settings.volatility_history_cache_ttl_seconds)
+        )
         with self._history_cache_lock:
             self._history_cache[key] = (expires, value)
 
     def _realized_volatility(self, candles: list[Candle]) -> dict[str, Any]:
-        closes = [float(candle.close_price) for candle in candles if float(candle.close_price or 0) > 0]
-        highs = [float(candle.high_price) for candle in candles if float(candle.high_price or 0) > 0]
-        lows = [float(candle.low_price) for candle in candles if float(candle.low_price or 0) > 0]
+        closes = [
+            float(candle.close_price)
+            for candle in candles
+            if float(candle.close_price or 0) > 0
+        ]
+        highs = [
+            float(candle.high_price)
+            for candle in candles
+            if float(candle.high_price or 0) > 0
+        ]
+        lows = [
+            float(candle.low_price)
+            for candle in candles
+            if float(candle.low_price or 0) > 0
+        ]
         intraday = self._annualized_log_return_vol(closes, periods_per_year=252 * 75)
         daily = self._daily_realized_vol(candles)
         last_close = closes[-1] if closes else None
@@ -208,8 +247,14 @@ class VolatilityEdgeService:
             "candles_used": len(closes),
         }
 
-    def _annualized_log_return_vol(self, closes: list[float], *, periods_per_year: int) -> float | None:
-        returns = [math.log(closes[idx] / closes[idx - 1]) for idx in range(1, len(closes)) if closes[idx - 1] > 0 and closes[idx] > 0]
+    def _annualized_log_return_vol(
+        self, closes: list[float], *, periods_per_year: int
+    ) -> float | None:
+        returns = [
+            math.log(closes[idx] / closes[idx - 1])
+            for idx in range(1, len(closes))
+            if closes[idx - 1] > 0 and closes[idx] > 0
+        ]
         if len(returns) < 8:
             return None
         return stdev(returns) * math.sqrt(periods_per_year) * 100
@@ -218,7 +263,11 @@ class VolatilityEdgeService:
         daily_close: dict[str, float] = {}
         for candle in candles:
             timestamp = candle.timestamp
-            key = timestamp.date().isoformat() if isinstance(timestamp, datetime) else str(timestamp)[:10]
+            key = (
+                timestamp.date().isoformat()
+                if isinstance(timestamp, datetime)
+                else str(timestamp)[:10]
+            )
             daily_close[key] = float(candle.close_price)
         closes = [daily_close[key] for key in sorted(daily_close)]
         if len(closes) < 5:
@@ -234,17 +283,26 @@ class VolatilityEdgeService:
             high = float(candle.high_price)
             low = float(candle.low_price)
             close = float(candle.close_price)
-            ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+            ranges.append(
+                max(high - low, abs(high - previous_close), abs(low - previous_close))
+            )
             previous_close = close
         if not ranges or previous_close <= 0:
             return None
         return (mean(ranges[-14:]) / previous_close) * 100
 
-    def _iv_history(self, contract: OptionContract | None, selected_iv: float | None, vix: float | None) -> dict[str, Any]:
+    def _iv_history(
+        self,
+        contract: OptionContract | None,
+        selected_iv: float | None,
+        vix: float | None,
+    ) -> dict[str, Any]:
         values: list[float] = []
         source = "unavailable"
         if contract is not None:
-            cutoff = ist_now_naive() - timedelta(days=settings.vol_edge_iv_lookback_days)
+            cutoff = ist_now_naive() - timedelta(
+                days=settings.vol_edge_iv_lookback_days
+            )
             session = get_session()
             try:
                 rows = (
@@ -257,7 +315,9 @@ class VolatilityEdgeService:
                     .order_by(OptionQuoteSnapshot.timestamp.asc())
                     .all()
                 )
-                values = [iv for raw in rows if (iv := self._normalize_iv(raw[0])) is not None]
+                values = [
+                    iv for raw in rows if (iv := self._normalize_iv(raw[0])) is not None
+                ]
                 if values:
                     source = "selected_option_iv_history"
             finally:
@@ -281,7 +341,9 @@ class VolatilityEdgeService:
         low = min(values)
         high = max(values)
         rank = 50.0 if high == low else ((current_iv - low) / (high - low)) * 100
-        percentile = (sum(1 for value in values if value <= current_iv) / len(values)) * 100
+        percentile = (
+            sum(1 for value in values if value <= current_iv) / len(values)
+        ) * 100
         return {
             "iv_rank": self._round(max(0.0, min(100.0, rank))),
             "iv_percentile": self._round(max(0.0, min(100.0, percentile))),
@@ -291,21 +353,35 @@ class VolatilityEdgeService:
         }
 
     def _recent_vix_values(self) -> list[float]:
-        candles = self._recent_candles("INDIAVIX", settings.candle_confirmation_timeframe, limit=max(settings.vol_edge_min_iv_samples, 60))
-        return [float(candle.close_price) for candle in candles if float(candle.close_price or 0) > 0]
+        candles = self._recent_candles(
+            "INDIAVIX",
+            settings.candle_confirmation_timeframe,
+            limit=max(settings.vol_edge_min_iv_samples, 60),
+        )
+        return [
+            float(candle.close_price)
+            for candle in candles
+            if float(candle.close_price or 0) > 0
+        ]
 
-    def _expansion_state(self, contract: OptionContract | None, premium_eval: dict[str, Any] | None) -> dict[str, Any]:
+    def _expansion_state(
+        self, contract: OptionContract | None, premium_eval: dict[str, Any] | None
+    ) -> dict[str, Any]:
         iv_change_pct = self._recent_option_iv_change(contract)
         vix_change_pct = self._recent_vix_change()
         premium_range_expansion_ratio = self._premium_range_expansion(contract)
-        premium_details = premium_eval.get("details", {}) if isinstance(premium_eval, dict) else {}
+        premium_details = (
+            premium_eval.get("details", {}) if isinstance(premium_eval, dict) else {}
+        )
         breakout = bool(premium_details.get("breakout"))
         iv_expansion_supported = (
             (iv_change_pct is not None and iv_change_pct > 1.0)
             or (vix_change_pct is not None and vix_change_pct > 1.0)
             or ((premium_range_expansion_ratio or 0.0) >= 1.10 and breakout)
         )
-        iv_contraction_risk = (iv_change_pct is not None and iv_change_pct < -1.0) or (vix_change_pct is not None and vix_change_pct < -1.0)
+        iv_contraction_risk = (iv_change_pct is not None and iv_change_pct < -1.0) or (
+            vix_change_pct is not None and vix_change_pct < -1.0
+        )
         return {
             "iv_change_pct": self._round(iv_change_pct),
             "vix_change_pct": self._round(vix_change_pct),
@@ -329,7 +405,11 @@ class VolatilityEdgeService:
                 .limit(10)
                 .all()
             )
-            values = [iv for raw in reversed(rows) if (iv := self._normalize_iv(raw[0])) is not None]
+            values = [
+                iv
+                for raw in reversed(rows)
+                if (iv := self._normalize_iv(raw[0])) is not None
+            ]
         finally:
             session.close()
         if len(values) < 2 or values[0] <= 0:
@@ -345,8 +425,13 @@ class VolatilityEdgeService:
     def _premium_range_expansion(self, contract: OptionContract | None) -> float | None:
         if contract is None:
             return None
-        candles = self._recent_candles(contract.tradingsymbol, settings.candle_confirmation_timeframe, limit=8)
-        ranges = [max(float(candle.high_price) - float(candle.low_price), 0.0) for candle in candles]
+        candles = self._recent_candles(
+            contract.tradingsymbol, settings.candle_confirmation_timeframe, limit=8
+        )
+        ranges = [
+            max(float(candle.high_price) - float(candle.low_price), 0.0)
+            for candle in candles
+        ]
         if len(ranges) < 6:
             return None
         previous = mean(ranges[-6:-3])
@@ -365,15 +450,23 @@ class VolatilityEdgeService:
         prices: dict[str, float] | None,
         expected_move_check: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        days_to_expiry = self._nested_float(option_quality, "details", "greeks", "days_to_expiry")
-        delta = abs(self._nested_float(option_quality, "details", "greeks", "delta") or 0.0)
+        days_to_expiry = self._nested_float(
+            option_quality, "details", "greeks", "days_to_expiry"
+        )
+        delta = abs(
+            self._nested_float(option_quality, "details", "greeks", "delta") or 0.0
+        )
         entry = self._dict_float(prices, "entry_price")
         target = self._dict_float(prices, "target_1")
         expected_from_iv = None
         expected_from_atr = None
         expected_from_range = None
         if spot_price and selected_iv and days_to_expiry is not None:
-            expected_from_iv = spot_price * (selected_iv / 100.0) * math.sqrt(max(days_to_expiry, 1.0) / 365.0)
+            expected_from_iv = (
+                spot_price
+                * (selected_iv / 100.0)
+                * math.sqrt(max(days_to_expiry, 1.0) / 365.0)
+            )
         atr_pct = realized.get("banknifty_atr_pct")
         if spot_price and atr_pct:
             expected_from_atr = spot_price * (float(atr_pct) / 100.0)
@@ -390,7 +483,11 @@ class VolatilityEdgeService:
         coverage_iv = self._coverage(expected_from_iv, required)
         coverage_atr = self._coverage(expected_from_atr, required)
         coverage_range = self._coverage(expected_from_range, required)
-        coverages = [value for value in [coverage_iv, coverage_atr, coverage_range] if value is not None]
+        coverages = [
+            value
+            for value in [coverage_iv, coverage_atr, coverage_range]
+            if value is not None
+        ]
         best = max(coverages) if coverages else None
         if best is None:
             label = "unknown"
@@ -412,10 +509,19 @@ class VolatilityEdgeService:
             "label": label,
         }
 
-    def _iv_vs_realized(self, selected_iv: float | None, vix: float | None, realized_volatility: float | None) -> dict[str, Any]:
+    def _iv_vs_realized(
+        self,
+        selected_iv: float | None,
+        vix: float | None,
+        realized_volatility: float | None,
+    ) -> dict[str, Any]:
         iv = selected_iv if selected_iv is not None else vix
         if iv is None or realized_volatility is None or realized_volatility <= 0:
-            return {"iv_to_rv_ratio": None, "iv_minus_rv": None, "label": "UNKNOWN_DATA_MISSING"}
+            return {
+                "iv_to_rv_ratio": None,
+                "iv_minus_rv": None,
+                "label": "UNKNOWN_DATA_MISSING",
+            }
         ratio = iv / realized_volatility
         if ratio > settings.vol_edge_max_iv_to_rv_ratio_for_buy:
             label = "IV_TOO_EXPENSIVE"
@@ -423,7 +529,11 @@ class VolatilityEdgeService:
             label = "IV_CHEAP_RELATIVE_TO_RV"
         else:
             label = "IV_REASONABLE"
-        return {"iv_to_rv_ratio": self._round(ratio), "iv_minus_rv": self._round(iv - realized_volatility), "label": label}
+        return {
+            "iv_to_rv_ratio": self._round(ratio),
+            "iv_minus_rv": self._round(iv - realized_volatility),
+            "label": label,
+        }
 
     def _score(
         self,
@@ -481,7 +591,10 @@ class VolatilityEdgeService:
             return "iv_crush_risk"
         if expected_move["label"] == "weak":
             return "insufficient_expected_move"
-        if expansion["iv_expansion_supported"] and iv_vs_rv["label"] != "IV_TOO_EXPENSIVE":
+        if (
+            expansion["iv_expansion_supported"]
+            and iv_vs_rv["label"] != "IV_TOO_EXPENSIVE"
+        ):
             return "iv_expansion_supported"
         if iv_vs_rv["label"] == "IV_TOO_EXPENSIVE":
             return "expensive"
@@ -491,11 +604,18 @@ class VolatilityEdgeService:
             return "not_suitable_for_option_buying"
         return "fair"
 
-    def _edge_label(self, classification: str, score: int, expected_move: dict[str, Any]) -> tuple[str, str]:
+    def _edge_label(
+        self, classification: str, score: int, expected_move: dict[str, Any]
+    ) -> tuple[str, str]:
         if classification == "unknown_data_missing":
             return "unknown", "data_missing"
         if classification in {"iv_crush_risk", "expensive"}:
-            return "unfavorable", "iv_crush" if classification == "iv_crush_risk" else "overpriced_premium"
+            return (
+                "unfavorable",
+                "iv_crush"
+                if classification == "iv_crush_risk"
+                else "overpriced_premium",
+            )
         if classification == "insufficient_expected_move":
             return "unfavorable", "insufficient_realized_move"
         if classification == "not_suitable_for_option_buying":
@@ -504,17 +624,33 @@ class VolatilityEdgeService:
             return "favorable", "none"
         return "neutral", "none"
 
-    def _iv_crush_risk(self, iv_vs_rv: dict[str, Any], iv_history: dict[str, Any], expansion: dict[str, Any]) -> bool:
+    def _iv_crush_risk(
+        self,
+        iv_vs_rv: dict[str, Any],
+        iv_history: dict[str, Any],
+        expansion: dict[str, Any],
+    ) -> bool:
         iv_rank = iv_history.get("iv_rank")
-        high_rank = iv_rank is not None and float(iv_rank) >= settings.vol_edge_iv_crush_warning_threshold
+        high_rank = (
+            iv_rank is not None
+            and float(iv_rank) >= settings.vol_edge_iv_crush_warning_threshold
+        )
         expensive = iv_vs_rv.get("label") == "IV_TOO_EXPENSIVE"
-        return bool((high_rank or expensive) and not expansion.get("iv_expansion_supported"))
+        return bool(
+            (high_rank or expensive) and not expansion.get("iv_expansion_supported")
+        )
 
     def _has_unknown_only_block(self, reasons: list[str]) -> bool:
-        return any(str(reason).startswith(self.UNKNOWN_DATA_MISSING) for reason in reasons)
+        return any(
+            str(reason).startswith(self.UNKNOWN_DATA_MISSING) for reason in reasons
+        )
 
     def _selected_iv(self, option_quality: dict[str, Any] | None) -> float | None:
-        return self._normalize_iv(self._nested_float(option_quality, "details", "greeks", "implied_volatility"))
+        return self._normalize_iv(
+            self._nested_float(
+                option_quality, "details", "greeks", "implied_volatility"
+            )
+        )
 
     def _normalize_iv(self, value: object) -> float | None:
         if value is None:
@@ -534,7 +670,9 @@ class VolatilityEdgeService:
             return None
         return self._safe_float(snapshot.get("price") or snapshot.get("last_price"))
 
-    def _coverage(self, expected_move: float | None, required_move: float | None) -> float | None:
+    def _coverage(
+        self, expected_move: float | None, required_move: float | None
+    ) -> float | None:
         if expected_move is None or required_move is None or required_move <= 0:
             return None
         return expected_move / required_move

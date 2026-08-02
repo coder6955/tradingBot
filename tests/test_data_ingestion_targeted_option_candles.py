@@ -5,7 +5,12 @@ from datetime import datetime, timedelta
 
 from app.config import settings
 from app.services.data_ingestion_service import DataIngestionService
-from app.services.database import Candle, RejectedOpportunityRecord, get_session, init_db
+from app.services.database import (
+    Candle,
+    RejectedOpportunityRecord,
+    get_session,
+    init_db,
+)
 from app.services.rejected_opportunity_repository import RejectedOpportunityRepository
 from app.services.trade_setup_service import OptionContract
 
@@ -53,9 +58,15 @@ class TargetedOptionCandleBackfillTests(unittest.TestCase):
             "live_option_candle_backfill_session_start_time": settings.live_option_candle_backfill_session_start_time,
             "live_option_candle_backfill_max_historical_calls_per_run": settings.live_option_candle_backfill_max_historical_calls_per_run,
         }
-        object.__setattr__(settings, "live_option_candle_backfill_market_open_on_first_seen", True)
-        object.__setattr__(settings, "live_option_candle_backfill_session_start_time", "09:15")
-        object.__setattr__(settings, "live_option_candle_backfill_max_historical_calls_per_run", 6)
+        object.__setattr__(
+            settings, "live_option_candle_backfill_market_open_on_first_seen", True
+        )
+        object.__setattr__(
+            settings, "live_option_candle_backfill_session_start_time", "09:15"
+        )
+        object.__setattr__(
+            settings, "live_option_candle_backfill_max_historical_calls_per_run", 6
+        )
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.temp_db.close()
         init_db(f"sqlite:///{self.temp_db.name}")
@@ -70,7 +81,9 @@ class TargetedOptionCandleBackfillTests(unittest.TestCase):
         except PermissionError:
             pass
 
-    def test_relevant_contract_backfill_uses_rejected_contract_token_and_reports_coverage(self) -> None:
+    def test_relevant_contract_backfill_uses_rejected_contract_token_and_reports_coverage(
+        self,
+    ) -> None:
         rejected_repo = RejectedOpportunityRepository()
         contract = OptionContract(
             tradingsymbol="BANKNIFTY26JUL58000CE",
@@ -94,7 +107,9 @@ class TargetedOptionCandleBackfillTests(unittest.TestCase):
             score=78,
             reasons=["premium confirmation failed"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            factor_scores={
+                "prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}
+            },
             market_session="REGULAR_MARKET",
             learning_eligible=True,
         )
@@ -112,7 +127,9 @@ class TargetedOptionCandleBackfillTests(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["contracts_found"], 1)
         self.assertEqual(result["contracts_attempted"], 1)
-        self.assertEqual({call[3] for call in self.provider.historical_calls}, {"1minute", "5minute"})
+        self.assertEqual(
+            {call[3] for call in self.provider.historical_calls}, {"1minute", "5minute"}
+        )
         self.assertGreater(result["inserted"], 0)
         one_minute = result["coverage_after"]["by_timeframe"]["1minute"]
         self.assertEqual(one_minute["data_quality"], "high_confidence")
@@ -142,12 +159,16 @@ class TargetedOptionCandleBackfillTests(unittest.TestCase):
             score=78,
             reasons=["premium confirmation failed"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            factor_scores={
+                "prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}
+            },
             market_session="REGULAR_MARKET",
             learning_eligible=True,
         )
         self._set_rejection_created_at(rejected.id, datetime(2026, 7, 13, 15, 7))
-        self._save_candle("BANKNIFTY26JUL58000CE", "1minute", datetime(2026, 7, 13, 15, 7))
+        self._save_candle(
+            "BANKNIFTY26JUL58000CE", "1minute", datetime(2026, 7, 13, 15, 7)
+        )
         self._save_candle("WS_TOKEN:580001", "1minute", datetime(2026, 7, 13, 15, 8))
         self._save_candle("WS_TOKEN:580001", "1minute", datetime(2026, 7, 13, 15, 9))
         self._save_candle("WS_TOKEN:580001", "1minute", datetime(2026, 7, 13, 15, 10))
@@ -166,7 +187,9 @@ class TargetedOptionCandleBackfillTests(unittest.TestCase):
         self.assertEqual(row["stored_symbol_rows"], 1)
         self.assertEqual(row["websocket_token_rows"], 3)
 
-    def test_live_relevant_backfill_repairs_missing_closed_intraday_option_candles(self) -> None:
+    def test_live_relevant_backfill_repairs_missing_closed_intraday_option_candles(
+        self,
+    ) -> None:
         rejected_repo = RejectedOpportunityRepository()
         contract = OptionContract(
             tradingsymbol="BANKNIFTY26JUL58000CE",
@@ -190,13 +213,19 @@ class TargetedOptionCandleBackfillTests(unittest.TestCase):
             score=78,
             reasons=["premium confirmation failed"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            factor_scores={
+                "prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}
+            },
             market_session="REGULAR_MARKET",
             learning_eligible=True,
         )
         self._set_rejection_created_at(rejected.id, datetime(2026, 7, 13, 10, 50))
-        self._save_candle("BANKNIFTY26JUL58000CE", "1minute", datetime(2026, 7, 13, 9, 15))
-        self._save_candle("BANKNIFTY26JUL58000CE", "1minute", datetime(2026, 7, 13, 11, 0))
+        self._save_candle(
+            "BANKNIFTY26JUL58000CE", "1minute", datetime(2026, 7, 13, 9, 15)
+        )
+        self._save_candle(
+            "BANKNIFTY26JUL58000CE", "1minute", datetime(2026, 7, 13, 11, 0)
+        )
         service = DataIngestionService(kite_provider_factory=lambda: self.provider)
 
         result = service.backfill_live_relevant_option_candle_gaps(
@@ -243,7 +272,9 @@ class TargetedOptionCandleBackfillTests(unittest.TestCase):
             score=78,
             reasons=["premium confirmation failed"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            factor_scores={
+                "prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}
+            },
             market_session="REGULAR_MARKET",
             learning_eligible=True,
         )
@@ -270,7 +301,9 @@ class TargetedOptionCandleBackfillTests(unittest.TestCase):
         self.assertEqual(timeframe_result["start_policy"], "market_open_first_seen")
 
     def test_live_option_backfill_respects_historical_call_limit(self) -> None:
-        object.__setattr__(settings, "live_option_candle_backfill_max_historical_calls_per_run", 1)
+        object.__setattr__(
+            settings, "live_option_candle_backfill_max_historical_calls_per_run", 1
+        )
         rejected_repo = RejectedOpportunityRepository()
         contract = OptionContract(
             tradingsymbol="BANKNIFTY26JUL58000CE",
@@ -294,7 +327,9 @@ class TargetedOptionCandleBackfillTests(unittest.TestCase):
             score=78,
             reasons=["premium confirmation failed"],
             contract=contract,
-            factor_scores={"prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}},
+            factor_scores={
+                "prices": {"entry_price": 100, "stop_loss": 90, "target_1": 120}
+            },
             market_session="REGULAR_MARKET",
             learning_eligible=True,
         )
@@ -313,7 +348,10 @@ class TargetedOptionCandleBackfillTests(unittest.TestCase):
 
         self.assertEqual(result["historical_calls"], 1)
         self.assertEqual(len(self.provider.historical_calls), 1)
-        self.assertEqual(result["results"][0]["timeframes"]["5minute"]["reason"], "historical_call_limit_reached")
+        self.assertEqual(
+            result["results"][0]["timeframes"]["5minute"]["reason"],
+            "historical_call_limit_reached",
+        )
 
     def _set_rejection_created_at(self, rejection_id: int, value: datetime) -> None:
         session = get_session()

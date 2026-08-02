@@ -23,10 +23,17 @@ class RawTickCaptureService:
     """Bounded asynchronous persistence for replay-relevant market ticks."""
 
     RISK_OWNER_PREFIXES = ("armed:", "active_trade")
-    CAPTURE_OWNER_PREFIXES = ("core_market", "banknifty_prewarm", "armed:", "active_trade")
+    CAPTURE_OWNER_PREFIXES = (
+        "core_market",
+        "banknifty_prewarm",
+        "armed:",
+        "active_trade",
+    )
 
     def __init__(self, *, queue_size: int | None = None) -> None:
-        self._queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=max(1, int(queue_size or settings.raw_tick_queue_size)))
+        self._queue: queue.Queue[dict[str, Any]] = queue.Queue(
+            maxsize=max(1, int(queue_size or settings.raw_tick_queue_size))
+        )
         self._stop = Event()
         self._worker: Thread | None = None
         self._sequence = count(time.time_ns())
@@ -49,7 +56,9 @@ class RawTickCaptureService:
             if self._worker is not None and self._worker.is_alive():
                 return {"started": True, "already_running": True}
             self._stop.clear()
-            self._worker = Thread(target=self._run, name="raw-tick-persistence", daemon=True)
+            self._worker = Thread(
+                target=self._run, name="raw-tick-persistence", daemon=True
+            )
             self._worker.start()
         return {"started": True}
 
@@ -75,10 +84,16 @@ class RawTickCaptureService:
             return {"captured": False, "reason": "tick_context_not_relevant"}
         if self._worker is None or not self._worker.is_alive():
             self.start()
-        risk_sensitive = any(owner.startswith(self.RISK_OWNER_PREFIXES) for owner in owner_list)
+        risk_sensitive = any(
+            owner.startswith(self.RISK_OWNER_PREFIXES) for owner in owner_list
+        )
         lineage = current_strategy_lineage()
         receive = (tick.receive_timestamp or ist_now_naive()).replace(tzinfo=None)
-        exchange = tick.timestamp.replace(tzinfo=None) if tick.timestamp_source != "local_receive_time" else None
+        exchange = (
+            tick.timestamp.replace(tzinfo=None)
+            if tick.timestamp_source != "local_receive_time"
+            else None
+        )
         item = {
             "sequence": next(self._sequence),
             "session_date": receive.date().isoformat(),
@@ -91,7 +106,9 @@ class RawTickCaptureService:
                 {"buy": list(tick.buy_depth), "sell": list(tick.sell_depth)},
                 default=str,
             ),
-            "cumulative_volume": float(tick.volume) if tick.volume is not None else None,
+            "cumulative_volume": float(tick.volume)
+            if tick.volume is not None
+            else None,
             "exchange_timestamp": exchange,
             "receive_timestamp": receive,
             "timestamp_source": str(tick.timestamp_source),
@@ -114,7 +131,11 @@ class RawTickCaptureService:
                 return self._record_drop(item, risk_sensitive=risk_sensitive)
         with self._lock:
             self.captured_count += 1
-        return {"captured": True, "sequence": item["sequence"], "risk_sensitive": risk_sensitive}
+        return {
+            "captured": True,
+            "sequence": item["sequence"],
+            "risk_sensitive": risk_sensitive,
+        }
 
     def flush(self, *, timeout_seconds: float = 5.0) -> bool:
         deadline = time.monotonic() + max(0.0, timeout_seconds)
@@ -123,10 +144,16 @@ class RawTickCaptureService:
         return self._queue.unfinished_tasks == 0
 
     def cleanup_retention(self, *, now: datetime | None = None) -> dict[str, Any]:
-        cutoff = (now or ist_now_naive()).replace(tzinfo=None) - timedelta(days=max(1, int(settings.raw_tick_retention_days)))
+        cutoff = (now or ist_now_naive()).replace(tzinfo=None) - timedelta(
+            days=max(1, int(settings.raw_tick_retention_days))
+        )
         session = get_session()
         try:
-            deleted = int(session.query(RawTickRecord).filter(RawTickRecord.receive_timestamp < cutoff).delete(synchronize_session=False))
+            deleted = int(
+                session.query(RawTickRecord)
+                .filter(RawTickRecord.receive_timestamp < cutoff)
+                .delete(synchronize_session=False)
+            )
             session.commit()
         finally:
             session.close()
@@ -147,9 +174,15 @@ class RawTickCaptureService:
             "evicted_warm_count": self.evicted_warm_count,
             "persist_failure_count": self.persist_failure_count,
             "capture_gap_critical": self.dropped_risk_count > 0,
-            "last_capture_gap": dict(self.last_capture_gap) if self.last_capture_gap else None,
-            "last_persisted_at": self.last_persisted_at.isoformat(sep=" ") if self.last_persisted_at else None,
-            "last_cleanup_at": self.last_cleanup_at.isoformat(sep=" ") if self.last_cleanup_at else None,
+            "last_capture_gap": dict(self.last_capture_gap)
+            if self.last_capture_gap
+            else None,
+            "last_persisted_at": self.last_persisted_at.isoformat(sep=" ")
+            if self.last_persisted_at
+            else None,
+            "last_cleanup_at": self.last_cleanup_at.isoformat(sep=" ")
+            if self.last_cleanup_at
+            else None,
             "last_cleanup_deleted": self.last_cleanup_deleted,
             "retention_days": settings.raw_tick_retention_days,
         }
@@ -174,7 +207,9 @@ class RawTickCaptureService:
         session = get_session()
         try:
             for item in batch:
-                payload = {key: value for key, value in item.items() if key != "risk_sensitive"}
+                payload = {
+                    key: value for key, value in item.items() if key != "risk_sensitive"
+                }
                 session.add(RawTickRecord(**payload))
             session.commit()
             with self._lock:
@@ -189,14 +224,19 @@ class RawTickCaptureService:
             session.close()
 
     def _capture_relevant(self, owners: list[str]) -> bool:
-        return any(any(owner.startswith(prefix) for prefix in self.CAPTURE_OWNER_PREFIXES) for owner in owners)
+        return any(
+            any(owner.startswith(prefix) for prefix in self.CAPTURE_OWNER_PREFIXES)
+            for owner in owners
+        )
 
     def _evict_one_warm_item(self) -> bool:
         with self._queue.mutex:
             for index, queued in enumerate(self._queue.queue):
                 if not bool(queued.get("risk_sensitive")):
                     del self._queue.queue[index]
-                    self._queue.unfinished_tasks = max(0, self._queue.unfinished_tasks - 1)
+                    self._queue.unfinished_tasks = max(
+                        0, self._queue.unfinished_tasks - 1
+                    )
                     self._queue.not_full.notify()
                     with self._lock:
                         self.evicted_warm_count += 1
@@ -204,7 +244,9 @@ class RawTickCaptureService:
                     return True
         return False
 
-    def _record_drop(self, item: dict[str, Any], *, risk_sensitive: bool) -> dict[str, Any]:
+    def _record_drop(
+        self, item: dict[str, Any], *, risk_sensitive: bool
+    ) -> dict[str, Any]:
         with self._lock:
             if risk_sensitive:
                 self.dropped_risk_count += 1
@@ -219,4 +261,8 @@ class RawTickCaptureService:
             }
         if risk_sensitive:
             logger.critical("risk_sensitive_raw_tick_dropped %s", self.last_capture_gap)
-        return {"captured": False, "reason": "raw_tick_queue_full", "risk_sensitive": risk_sensitive}
+        return {
+            "captured": False,
+            "reason": "raw_tick_queue_full",
+            "risk_sensitive": risk_sensitive,
+        }

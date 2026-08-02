@@ -18,8 +18,20 @@ from app.services.trade_repository import TradeRepository
 class _Provider:
     def instruments(self, exchange=None):
         if exchange == "NFO":
-            return [{"tradingsymbol": "BANKNIFTY26JUL58000CE", "exchange": "NFO", "instrument_token": 123}]
-        return [{"tradingsymbol": "NIFTY BANK", "name": "NIFTY BANK", "instrument_token": 260105}]
+            return [
+                {
+                    "tradingsymbol": "BANKNIFTY26JUL58000CE",
+                    "exchange": "NFO",
+                    "instrument_token": 123,
+                }
+            ]
+        return [
+            {
+                "tradingsymbol": "NIFTY BANK",
+                "name": "NIFTY BANK",
+                "instrument_token": 260105,
+            }
+        ]
 
 
 class _Feed:
@@ -40,7 +52,9 @@ class _Feed:
         return {}
 
 
-def _tick(*, ltp: float, bid: float | None, buy_depth=(), ask: float | None = None) -> PriceTick:
+def _tick(
+    *, ltp: float, bid: float | None, buy_depth=(), ask: float | None = None
+) -> PriceTick:
     return PriceTick(
         instrument="NFO:BANKNIFTY26JUL58000CE",
         instrument_token=123,
@@ -58,7 +72,15 @@ def _tick(*, ltp: float, bid: float | None, buy_depth=(), ask: float | None = No
 class ExecutablePriceServiceTests(unittest.TestCase):
     def test_depth_weighted_price_covers_position(self) -> None:
         result = ExecutablePriceService().for_long_exit(
-            _tick(ltp=112, bid=111, ask=112, buy_depth=({"price": 111, "quantity": 10}, {"price": 110, "quantity": 10})),
+            _tick(
+                ltp=112,
+                bid=111,
+                ask=112,
+                buy_depth=(
+                    {"price": 111, "quantity": 10},
+                    {"price": 110, "quantity": 10},
+                ),
+            ),
             quantity=15,
         )
 
@@ -67,7 +89,9 @@ class ExecutablePriceServiceTests(unittest.TestCase):
         self.assertTrue(result.live_safe)
 
     def test_ltp_only_spike_is_not_executable(self) -> None:
-        result = ExecutablePriceService().for_long_exit(_tick(ltp=130, bid=None), quantity=15)
+        result = ExecutablePriceService().for_long_exit(
+            _tick(ltp=130, bid=None), quantity=15
+        )
 
         self.assertIsNone(result.executable_price)
         self.assertFalse(result.target_supported)
@@ -75,7 +99,15 @@ class ExecutablePriceServiceTests(unittest.TestCase):
 
     def test_thin_partial_depth_uses_worst_visible_bid_and_blocks_target(self) -> None:
         result = ExecutablePriceService().for_long_exit(
-            _tick(ltp=112, bid=110, ask=112, buy_depth=({"price": 110, "quantity": 5}, {"price": 107, "quantity": 3})),
+            _tick(
+                ltp=112,
+                bid=110,
+                ask=112,
+                buy_depth=(
+                    {"price": 110, "quantity": 5},
+                    {"price": 107, "quantity": 3},
+                ),
+            ),
             quantity=15,
         )
 
@@ -126,7 +158,13 @@ class ExecutableTradeExitTests(unittest.TestCase):
             quantity=15,
             score=90,
         )
-        return self.repo.create_trade(signal, mode="paper", status="filled", requested_quantity=15, placed_quantity=15)
+        return self.repo.create_trade(
+            signal,
+            mode="paper",
+            status="filled",
+            requested_quantity=15,
+            placed_quantity=15,
+        )
 
     def _service(self, tick: PriceTick) -> TradeExitService:
         return TradeExitService(
@@ -146,7 +184,12 @@ class ExecutableTradeExitTests(unittest.TestCase):
 
     def test_stop_gap_uses_conservative_partial_depth_price(self) -> None:
         trade = self._trade()
-        tick = _tick(ltp=88, bid=86, ask=89, buy_depth=({"price": 86, "quantity": 5}, {"price": 84, "quantity": 5}))
+        tick = _tick(
+            ltp=88,
+            bid=86,
+            ask=89,
+            buy_depth=({"price": 86, "quantity": 5}, {"price": 84, "quantity": 5}),
+        )
 
         result = self._service(tick).evaluate_once()
         updated = self.repo.get_trade(int(trade.id))
@@ -154,7 +197,9 @@ class ExecutableTradeExitTests(unittest.TestCase):
         self.assertTrue(result["results"][0]["closed"])
         self.assertEqual(result["results"][0]["outcome"], "stop_loss")
         self.assertEqual(updated.exit_price, 84)
-        self.assertEqual(updated.exit_execution_source, "partial_depth_conservative_bid")
+        self.assertEqual(
+            updated.exit_execution_source, "partial_depth_conservative_bid"
+        )
 
     def test_simultaneous_stop_and_time_exit_attributes_stop_first(self) -> None:
         trade = SimpleNamespace(
@@ -170,7 +215,9 @@ class ExecutableTradeExitTests(unittest.TestCase):
         )
         object.__setattr__(settings, "option_time_stop_minutes", 15)
 
-        decision = self._service(_tick(ltp=85, bid=85))._outcome_for_price(_Provider(), trade, 85)
+        decision = self._service(_tick(ltp=85, bid=85))._outcome_for_price(
+            _Provider(), trade, 85
+        )
 
         self.assertEqual(decision["first_triggered"], "stop_loss")
         self.assertEqual(decision["triggered_rules"][:2], ["stop_loss", "time_exit"])

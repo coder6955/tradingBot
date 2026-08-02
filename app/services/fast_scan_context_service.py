@@ -44,13 +44,20 @@ class FastScanContextService:
         created_at: datetime | None = None,
     ) -> dict[str, Any]:
         refresh_at = (created_at or ist_now_naive()).replace(tzinfo=None)
-        new_completed = {name: tuple(deepcopy(rows)) for name, rows in (completed_candles or {}).items()}
+        new_completed = {
+            name: tuple(deepcopy(rows))
+            for name, rows in (completed_candles or {}).items()
+        }
         with self._lock:
             previous = self._context
         if previous is not None:
             elapsed = max(0.0, (refresh_at - previous.created_at).total_seconds())
-            candle_changed = self._candle_markers(previous.completed_candles) != self._candle_markers(new_completed)
-            if not candle_changed and elapsed < max(30.0, min(60.0, float(settings.fast_scan_context_refresh_seconds))):
+            candle_changed = self._candle_markers(
+                previous.completed_candles
+            ) != self._candle_markers(new_completed)
+            if not candle_changed and elapsed < max(
+                30.0, min(60.0, float(settings.fast_scan_context_refresh_seconds))
+            ):
                 return self.status()
         lineage = current_strategy_lineage()
         context = FastScanContext(
@@ -67,7 +74,9 @@ class FastScanContextService:
             self._context = context
         return self.status()
 
-    def validate(self, *, symbol: str = "BANKNIFTY", now: datetime | None = None) -> dict[str, Any]:
+    def validate(
+        self, *, symbol: str = "BANKNIFTY", now: datetime | None = None
+    ) -> dict[str, Any]:
         with self._lock:
             context = self._context
         if context is None:
@@ -76,11 +85,26 @@ class FastScanContextService:
         age = max(0.0, (current - context.created_at).total_seconds())
         lineage = current_strategy_lineage()
         if age > settings.fast_scan_context_max_age_seconds:
-            return {"passed": False, "reason": "fast_scan_context_stale", "age_seconds": round(age, 3)}
-        if context.config_hash != lineage["config_hash"] or context.strategy_version != lineage["strategy_version"]:
-            return {"passed": False, "reason": "fast_scan_context_config_mismatch", "age_seconds": round(age, 3)}
+            return {
+                "passed": False,
+                "reason": "fast_scan_context_stale",
+                "age_seconds": round(age, 3),
+            }
+        if (
+            context.config_hash != lineage["config_hash"]
+            or context.strategy_version != lineage["strategy_version"]
+        ):
+            return {
+                "passed": False,
+                "reason": "fast_scan_context_config_mismatch",
+                "age_seconds": round(age, 3),
+            }
         if symbol.upper() not in context.symbols:
-            return {"passed": False, "reason": "fast_scan_symbol_not_prepared", "age_seconds": round(age, 3)}
+            return {
+                "passed": False,
+                "reason": "fast_scan_symbol_not_prepared",
+                "age_seconds": round(age, 3),
+            }
         return {
             "passed": True,
             "age_seconds": round(age, 3),
@@ -89,7 +113,9 @@ class FastScanContextService:
             "config_hash": context.config_hash,
         }
 
-    def validate_candidate(self, event: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+    def validate_candidate(
+        self, event: dict[str, Any], *, now: datetime | None = None
+    ) -> dict[str, Any]:
         """Validate one cached direction without broker, database or persistence fallback."""
         current = (now or ist_now_naive()).replace(tzinfo=None)
         base = self.validate(symbol="BANKNIFTY", now=current)
@@ -97,12 +123,23 @@ class FastScanContextService:
             return self._remember({**base, "stage": "fast_candidate_rejected"})
         direction = str(event.get("direction") or "").lower()
         if direction not in {"bullish", "bearish"}:
-            return self._remember({**base, "passed": False, "reason": "fast_candidate_direction_invalid"})
+            return self._remember(
+                {**base, "passed": False, "reason": "fast_candidate_direction_invalid"}
+            )
         with self._lock:
             context = self._context
-        candidate = deepcopy((context.candidates if context else {}).get(direction) or {})
+        candidate = deepcopy(
+            (context.candidates if context else {}).get(direction) or {}
+        )
         if not candidate:
-            return self._remember({**base, "passed": False, "reason": "fast_candidate_not_prewarmed", "direction": direction})
+            return self._remember(
+                {
+                    **base,
+                    "passed": False,
+                    "reason": "fast_candidate_not_prewarmed",
+                    "direction": direction,
+                }
+            )
 
         for key, reason in (
             ("directional_agreement", "one_minute_and_five_minute_direction_disagree"),
@@ -112,40 +149,107 @@ class FastScanContextService:
             ("risk_preflight", "fast_candidate_risk_preflight_failed"),
         ):
             if candidate.get(key) is not True:
-                return self._remember({**base, "passed": False, "reason": reason, "direction": direction})
+                return self._remember(
+                    {**base, "passed": False, "reason": reason, "direction": direction}
+                )
 
         health = self._websocket_health()
         if not health.get("connected") or health.get("entry_blocking_gap"):
-            reason = "fast_candidate_websocket_disconnected" if not health.get("connected") else "fast_candidate_data_gap_active"
-            return self._remember({**base, "passed": False, "reason": reason, "direction": direction})
+            reason = (
+                "fast_candidate_websocket_disconnected"
+                if not health.get("connected")
+                else "fast_candidate_data_gap_active"
+            )
+            return self._remember(
+                {**base, "passed": False, "reason": reason, "direction": direction}
+            )
 
         token = self._safe_int(candidate.get("instrument_token"))
-        tick = self.websocket_price_feed.get_latest_tick(token) if token and self.websocket_price_feed is not None else None
+        tick = (
+            self.websocket_price_feed.get_latest_tick(token)
+            if token and self.websocket_price_feed is not None
+            else None
+        )
         if tick is None:
-            return self._remember({**base, "passed": False, "reason": "prewarmed_option_quote_missing", "direction": direction})
-        quote_at = (getattr(tick, "receive_timestamp", None) or getattr(tick, "timestamp", None))
-        quote_at = quote_at.replace(tzinfo=None) if isinstance(quote_at, datetime) else None
+            return self._remember(
+                {
+                    **base,
+                    "passed": False,
+                    "reason": "prewarmed_option_quote_missing",
+                    "direction": direction,
+                }
+            )
+        quote_at = getattr(tick, "receive_timestamp", None) or getattr(
+            tick, "timestamp", None
+        )
+        quote_at = (
+            quote_at.replace(tzinfo=None) if isinstance(quote_at, datetime) else None
+        )
         quote_age = max(0.0, (current - quote_at).total_seconds()) if quote_at else None
         if quote_age is None or quote_age > settings.websocket_price_stale_seconds:
-            return self._remember({**base, "passed": False, "reason": "prewarmed_option_quote_stale", "quote_age_seconds": quote_age})
+            return self._remember(
+                {
+                    **base,
+                    "passed": False,
+                    "reason": "prewarmed_option_quote_stale",
+                    "quote_age_seconds": quote_age,
+                }
+            )
 
         last = self._safe_float(getattr(tick, "price", None))
         bid = self._safe_float(getattr(tick, "bid", None))
         ask = self._safe_float(getattr(tick, "ask", None))
-        depth = sum(self._safe_float(level.get("quantity") or level.get("qty")) for level in (getattr(tick, "buy_depth", ()) or ()))
+        depth = sum(
+            self._safe_float(level.get("quantity") or level.get("qty"))
+            for level in (getattr(tick, "buy_depth", ()) or ())
+        )
         if min(last, bid, ask) <= 0 or ask < bid:
-            return self._remember({**base, "passed": False, "reason": "prewarmed_option_quote_not_executable"})
+            return self._remember(
+                {
+                    **base,
+                    "passed": False,
+                    "reason": "prewarmed_option_quote_not_executable",
+                }
+            )
         spread_pct = ((ask - bid) / max(last, 0.01)) * 100.0
         if spread_pct > settings.max_execution_spread_pct:
-            return self._remember({**base, "passed": False, "reason": "prewarmed_option_spread_too_wide", "spread_pct": round(spread_pct, 3)})
+            return self._remember(
+                {
+                    **base,
+                    "passed": False,
+                    "reason": "prewarmed_option_spread_too_wide",
+                    "spread_pct": round(spread_pct, 3),
+                }
+            )
         if depth < settings.contract_min_depth_quantity:
-            return self._remember({**base, "passed": False, "reason": "prewarmed_option_bid_depth_insufficient", "bid_depth_quantity": depth})
+            return self._remember(
+                {
+                    **base,
+                    "passed": False,
+                    "reason": "prewarmed_option_bid_depth_insufficient",
+                    "bid_depth_quantity": depth,
+                }
+            )
         if self._safe_float(getattr(tick, "volume", None)) <= 0:
-            return self._remember({**base, "passed": False, "reason": "prewarmed_option_participation_missing"})
+            return self._remember(
+                {
+                    **base,
+                    "passed": False,
+                    "reason": "prewarmed_option_participation_missing",
+                }
+            )
 
         trigger = self._safe_float(candidate.get("entry_trigger_price"))
         if trigger <= 0 or min(last, bid) < trigger:
-            return self._remember({**base, "passed": False, "reason": "premium_trigger_not_confirmed", "confirmation_price": min(last, bid), "trigger": trigger})
+            return self._remember(
+                {
+                    **base,
+                    "passed": False,
+                    "reason": "premium_trigger_not_confirmed",
+                    "confirmation_price": min(last, bid),
+                    "trigger": trigger,
+                }
+            )
         stop = self._safe_float(candidate.get("stop_loss"))
         target = self._safe_float(candidate.get("target_1"))
         original_entry = self._safe_float(candidate.get("entry_price"))
@@ -158,7 +262,9 @@ class FastScanContextService:
             spread_pct=spread_pct,
             observations=[original_entry, last, bid, ask],
             volatility_scale=self._safe_float(candidate.get("opportunity_scale")),
-            expected_move_coverage=self._optional_float(candidate.get("expected_move_coverage")),
+            expected_move_coverage=self._optional_float(
+                candidate.get("expected_move_coverage")
+            ),
             room_to_level_pct=self._optional_float(candidate.get("room_to_level_pct")),
             breakout_accepted=bool(candidate.get("breakout_accepted")),
         )
@@ -187,7 +293,9 @@ class FastScanContextService:
                 "remaining_risk_reward": opportunity["remaining_risk_reward"],
                 "normalized_chase": opportunity["normalized_chase"],
                 "opportunity": opportunity,
-                "action": "promote_precomputed_plan_to_armed_entry" if plan else "observe_existing_armed_entry",
+                "action": "promote_precomputed_plan_to_armed_entry"
+                if plan
+                else "observe_existing_armed_entry",
                 "plan": plan,
             }
         )
@@ -201,7 +309,9 @@ class FastScanContextService:
             {
                 "max_age_seconds": settings.fast_scan_context_max_age_seconds,
                 "timeframes": ["1minute", "5minute"],
-                "candidate_directions": sorted((context.candidates if context else {}).keys()),
+                "candidate_directions": sorted(
+                    (context.candidates if context else {}).keys()
+                ),
                 "last_decision": last_decision,
             }
         )
@@ -213,7 +323,10 @@ class FastScanContextService:
         health = getattr(self.websocket_price_feed, "entry_health", None)
         if callable(health):
             return dict(health())
-        return {"connected": bool(getattr(self.websocket_price_feed, "connected", False)), "entry_blocking_gap": False}
+        return {
+            "connected": bool(getattr(self.websocket_price_feed, "connected", False)),
+            "entry_blocking_gap": False,
+        }
 
     def _remember(self, decision: dict[str, Any]) -> dict[str, Any]:
         payload = {**decision, "decided_at": ist_now_naive().isoformat(sep=" ")}
@@ -238,7 +351,9 @@ class FastScanContextService:
         parsed = self._safe_float(value)
         return parsed if parsed > 0 else None
 
-    def _candle_markers(self, candles: dict[str, tuple[dict[str, Any], ...]]) -> tuple[tuple[str, str], ...]:
+    def _candle_markers(
+        self, candles: dict[str, tuple[dict[str, Any], ...]]
+    ) -> tuple[tuple[str, str], ...]:
         return tuple(
             sorted(
                 (

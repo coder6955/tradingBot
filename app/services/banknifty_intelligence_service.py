@@ -14,8 +14,15 @@ from app.services.trade_setup_service import OptionContract
 class BankNiftyIntelligenceService:
     """Bank Nifty-specific quality filters around the generic scanner flow."""
 
-    def __init__(self, *, snapshot_path: str | Path | None = None, today: Callable[[], date] | None = None) -> None:
-        self.snapshot_path = Path(snapshot_path or settings.banknifty_constituent_snapshot_file)
+    def __init__(
+        self,
+        *,
+        snapshot_path: str | Path | None = None,
+        today: Callable[[], date] | None = None,
+    ) -> None:
+        self.snapshot_path = Path(
+            snapshot_path or settings.banknifty_constituent_snapshot_file
+        )
         self._today = today or date.today
         self.constituent_snapshot = self._load_constituent_snapshot()
         self.constituents = list(self.constituent_snapshot["constituents"])
@@ -27,7 +34,9 @@ class BankNiftyIntelligenceService:
         """Return dashboard-safe metadata for the reviewed constituent snapshot."""
         snapshot = self.constituent_snapshot
         return {
-            "status": "ok" if snapshot.get("valid") and not snapshot.get("stale") else "attention",
+            "status": "ok"
+            if snapshot.get("valid") and not snapshot.get("stale")
+            else "attention",
             "snapshot_file": str(self.snapshot_path),
             "source_date": snapshot.get("source_date"),
             "effective_date": snapshot.get("effective_date"),
@@ -64,18 +73,35 @@ class BankNiftyIntelligenceService:
         candles: list[Candle] | None = None,
     ) -> dict[str, Any]:
         if not settings.enable_banknifty_intelligence:
-            return {"enabled": False, "score": 100, "passed": True, "hard_reasons": [], "soft_reasons": [], "details": {}}
+            return {
+                "enabled": False,
+                "score": 100,
+                "passed": True,
+                "hard_reasons": [],
+                "soft_reasons": [],
+                "details": {},
+            }
 
         bullish = trend.lower() == "bullish"
         top_banks = self._top_bank_alignment(bullish, market_snapshots)
         private_psu = self._private_psu_strength(top_banks)
         relative = self._relative_strength(bullish, market_snapshots)
-        opening = self._opening_range_status(bullish, float(snapshot.get("price") or 0.0), candles=candles)
-        expected_move = self._expected_move_check(bullish=bullish, snapshot=snapshot, contract=contract, prices=prices, candles=candles)
+        opening = self._opening_range_status(
+            bullish, float(snapshot.get("price") or 0.0), candles=candles
+        )
+        expected_move = self._expected_move_check(
+            bullish=bullish,
+            snapshot=snapshot,
+            contract=contract,
+            prices=prices,
+            candles=candles,
+        )
         dte = self._dte_mode(contract.expiry)
         event = self._event_day_mode()
         zone = self._round_zone(float(snapshot.get("price") or 0.0), bullish)
-        near_atm = self._near_atm_pressure(float(snapshot.get("price") or 0.0), bullish, chain_contracts, contract)
+        near_atm = self._near_atm_pressure(
+            float(snapshot.get("price") or 0.0), bullish, chain_contracts, contract
+        )
         day = self._day_quality(day_type_eval, snapshot, top_banks, premium_eval)
 
         hard_reasons: list[str] = []
@@ -83,16 +109,31 @@ class BankNiftyIntelligenceService:
         if top_banks["hard_gate_eligible"]:
             if top_banks["alignment"] < settings.banknifty_top_bank_min_alignment:
                 hard_reasons.append("top banks are mixed against Bank Nifty direction")
-            if top_banks["against_weight"] >= settings.banknifty_opposing_heavyweight_weight:
-                hard_reasons.append("opposing heavyweight bank participation is too large")
-            if top_banks["direction_count"] < settings.banknifty_top_bank_min_direction_count:
+            if (
+                top_banks["against_weight"]
+                >= settings.banknifty_opposing_heavyweight_weight
+            ):
+                hard_reasons.append(
+                    "opposing heavyweight bank participation is too large"
+                )
+            if (
+                top_banks["direction_count"]
+                < settings.banknifty_top_bank_min_direction_count
+            ):
                 soft_reasons.append("constituent participation is too narrow")
             if top_banks["one_bank_pull"]:
-                soft_reasons.append("Bank Nifty move appears concentrated in one heavyweight")
+                soft_reasons.append(
+                    "Bank Nifty move appears concentrated in one heavyweight"
+                )
         else:
             soft_reasons.append(str(top_banks["hard_gate_ineligible_reason"]))
-            if top_banks["hard_gate_ineligible_reason"] == "top bank constituent live data is incomplete":
-                soft_reasons.append("top bank constituent live weight coverage is incomplete")
+            if (
+                top_banks["hard_gate_ineligible_reason"]
+                == "top bank constituent live data is incomplete"
+            ):
+                soft_reasons.append(
+                    "top bank constituent live weight coverage is incomplete"
+                )
 
         if relative["extreme_against"]:
             hard_reasons.append(relative["reason"])
@@ -104,22 +145,44 @@ class BankNiftyIntelligenceService:
         if opening["status"] in {"failed_breakout", "failed_breakdown"}:
             soft_reasons.append(opening["reason"])
 
-        premium_details = premium_eval.get("details", {}) if isinstance(premium_eval.get("details"), dict) else {}
-        if settings.enable_option_premium_confirmation and not premium_eval.get("passed", False):
-            hard_reasons.extend(str(reason) for reason in premium_eval.get("reasons", ["option premium is not expanding"]))
-        if premium_details.get("option_vwap") and premium_details.get("last_close") and float(premium_details["last_close"]) < float(premium_details["option_vwap"]):
+        premium_details = (
+            premium_eval.get("details", {})
+            if isinstance(premium_eval.get("details"), dict)
+            else {}
+        )
+        if settings.enable_option_premium_confirmation and not premium_eval.get(
+            "passed", False
+        ):
+            hard_reasons.extend(
+                str(reason)
+                for reason in premium_eval.get(
+                    "reasons", ["option premium is not expanding"]
+                )
+            )
+        if (
+            premium_details.get("option_vwap")
+            and premium_details.get("last_close")
+            and float(premium_details["last_close"])
+            < float(premium_details["option_vwap"])
+        ):
             hard_reasons.append("option premium is below option VWAP")
 
         if not expected_move["passed"]:
             soft_reasons.append(expected_move["reason"])
         if dte["risk"] == "near_expiry" and not premium_eval.get("passed", False):
-            hard_reasons.append("near-expiry option buying needs strong premium expansion")
+            hard_reasons.append(
+                "near-expiry option buying needs strong premium expansion"
+            )
         if dte["risk"] == "far_expiry" and expected_move["coverage"] < 1.25:
-            soft_reasons.append("far-expiry option needs stronger move to justify premium")
+            soft_reasons.append(
+                "far-expiry option needs stronger move to justify premium"
+            )
         if event["is_event_day"] and not event["post_event_confirmation_window"]:
             soft_reasons.append("event day requires post-event confirmation")
         if zone["zoneRisk"] == "trapped":
-            soft_reasons.append("Bank Nifty is near a major round-number zone; require breakout confirmation")
+            soft_reasons.append(
+                "Bank Nifty is near a major round-number zone; require breakout confirmation"
+            )
         elif zone["zoneRisk"] != "clear":
             soft_reasons.append(zone["reason"])
         if not near_atm["supports"]:
@@ -127,7 +190,19 @@ class BankNiftyIntelligenceService:
         if day["dayType"] in {"range", "choppy_no_trade"}:
             hard_reasons.append(day["dayTypeReason"])
 
-        score = self._score(top_banks, private_psu, relative, opening, expected_move, dte, event, zone, near_atm, day, premium_eval)
+        score = self._score(
+            top_banks,
+            private_psu,
+            relative,
+            opening,
+            expected_move,
+            dte,
+            event,
+            zone,
+            near_atm,
+            day,
+            premium_eval,
+        )
         trade_quality = self._trade_quality(score, hard_reasons, soft_reasons)
         return {
             "enabled": True,
@@ -155,12 +230,18 @@ class BankNiftyIntelligenceService:
                 "dayTypeReason": day["dayTypeReason"],
                 "noTradeReasons": list(dict.fromkeys(hard_reasons)),
                 "tradeQuality": trade_quality,
-                "confidenceReason": self._confidence_reason(trade_quality, hard_reasons, soft_reasons),
-                "invalidationReason": "; ".join(hard_reasons[:3]) if hard_reasons else "",
+                "confidenceReason": self._confidence_reason(
+                    trade_quality, hard_reasons, soft_reasons
+                ),
+                "invalidationReason": "; ".join(hard_reasons[:3])
+                if hard_reasons
+                else "",
             },
         }
 
-    def _top_bank_alignment(self, bullish: bool, market_snapshots: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    def _top_bank_alignment(
+        self, bullish: bool, market_snapshots: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
         rows: list[dict[str, Any]] = []
         support_weight = 0.0
         against_weight = 0.0
@@ -180,7 +261,14 @@ class BankNiftyIntelligenceService:
             supports = move > 0.05 if bullish else move < -0.05
             opposes = move < -0.05 if bullish else move > 0.05
             contribution = move * weight
-            rows.append({**bank, "move_pct": round(move, 3), "supports": supports, "contribution": round(contribution, 4)})
+            rows.append(
+                {
+                    **bank,
+                    "move_pct": round(move, 3),
+                    "supports": supports,
+                    "contribution": round(contribution, 4),
+                }
+            )
             available_weight += weight
             capped_weight = min(weight, cap)
             capped_available_weight += capped_weight
@@ -192,14 +280,24 @@ class BankNiftyIntelligenceService:
                 opposite_count += 1
                 against_weight += weight
                 capped_against_weight += capped_weight
-        alignment = capped_support_weight / capped_available_weight if capped_available_weight else 0.0
-        top_contribution = max((abs(float(row["contribution"])) for row in rows), default=0.0)
+        alignment = (
+            capped_support_weight / capped_available_weight
+            if capped_available_weight
+            else 0.0
+        )
+        top_contribution = max(
+            (abs(float(row["contribution"])) for row in rows), default=0.0
+        )
         total_contribution = sum(abs(float(row["contribution"])) for row in rows)
         total_weight = float(self.constituent_snapshot["total_weight"])
         coverage = available_weight / total_weight if total_weight else 0.0
         stale = bool(self.constituent_snapshot["stale"])
         valid = bool(self.constituent_snapshot["valid"])
-        hard_gate_eligible = valid and not stale and coverage >= settings.banknifty_constituent_min_weight_coverage
+        hard_gate_eligible = (
+            valid
+            and not stale
+            and coverage >= settings.banknifty_constituent_min_weight_coverage
+        )
         if stale:
             ineligible_reason = "Bank Nifty constituent weights are stale"
         elif not valid:
@@ -209,19 +307,30 @@ class BankNiftyIntelligenceService:
         return {
             "available": len(rows),
             "alignment": round(alignment, 3),
-            "uncapped_alignment": round(support_weight / available_weight, 3) if available_weight else 0.0,
+            "uncapped_alignment": round(support_weight / available_weight, 3)
+            if available_weight
+            else 0.0,
             "available_weight": round(available_weight, 4),
             "coverage_by_weight": round(coverage, 4),
             "support_weight": round(support_weight, 4),
             "against_weight": round(against_weight, 4),
-            "weightedDirectionalContribution": round(sum(float(row["contribution"]) for row in rows), 4),
+            "weightedDirectionalContribution": round(
+                sum(float(row["contribution"]) for row in rows), 4
+            ),
             "direction_count": direction_count,
             "opposite_count": opposite_count,
-            "broad_based": direction_count >= settings.banknifty_top_bank_min_direction_count and alignment >= settings.banknifty_top_bank_min_alignment,
-            "one_bank_pull": total_contribution > 0 and top_contribution / total_contribution > 0.55,
+            "broad_based": direction_count
+            >= settings.banknifty_top_bank_min_direction_count
+            and alignment >= settings.banknifty_top_bank_min_alignment,
+            "one_bank_pull": total_contribution > 0
+            and top_contribution / total_contribution > 0.55,
             "hard_gate_eligible": hard_gate_eligible,
             "hard_gate_ineligible_reason": ineligible_reason,
-            "snapshot": {key: value for key, value in self.constituent_snapshot.items() if key != "constituents"},
+            "snapshot": {
+                key: value
+                for key, value in self.constituent_snapshot.items()
+                if key != "constituents"
+            },
             "banks": rows,
         }
 
@@ -275,7 +384,8 @@ class BankNiftyIntelligenceService:
             "constituents": rows,
             "total_weight": round(total_weight, 6),
             "age_days": age_days,
-            "stale": age_days is None or age_days > settings.banknifty_constituent_max_age_days,
+            "stale": age_days is None
+            or age_days > settings.banknifty_constituent_max_age_days,
             "valid": not errors,
             "validation_errors": errors,
         }
@@ -286,24 +396,48 @@ class BankNiftyIntelligenceService:
         psu = [row for row in rows if row.get("group") == "psu"]
         private_strength = self._weighted_strength(private)
         psu_strength = self._weighted_strength(psu)
-        sbi = next((float(row.get("move_pct") or 0.0) for row in rows if row.get("symbol") == "SBIN"), 0.0)
-        hdfc_icici = sum(float(row.get("move_pct") or 0.0) * float(row.get("weight") or 0.0) for row in rows if row.get("symbol") in {"HDFCBANK", "ICICIBANK"})
+        sbi = next(
+            (
+                float(row.get("move_pct") or 0.0)
+                for row in rows
+                if row.get("symbol") == "SBIN"
+            ),
+            0.0,
+        )
+        hdfc_icici = sum(
+            float(row.get("move_pct") or 0.0) * float(row.get("weight") or 0.0)
+            for row in rows
+            if row.get("symbol") in {"HDFCBANK", "ICICIBANK"}
+        )
         return {
             "privateBankStrength": round(private_strength, 3),
             "psuBankStrength": round(psu_strength, 3),
-            "privateVsPsuAgreement": (private_strength >= 0 and psu_strength >= 0) or (private_strength <= 0 and psu_strength <= 0),
+            "privateVsPsuAgreement": (private_strength >= 0 and psu_strength >= 0)
+            or (private_strength <= 0 and psu_strength <= 0),
             "sbiStandaloneImpact": round(sbi, 3),
             "hdfcIciciCombinedImpact": round(hdfc_icici, 4),
         }
 
-    def _relative_strength(self, bullish: bool, market_snapshots: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    def _relative_strength(
+        self, bullish: bool, market_snapshots: dict[str, dict[str, Any]]
+    ) -> dict[str, Any]:
         bank = self._pct_move(market_snapshots.get("BANKNIFTY", {}))
         nifty = self._pct_move(market_snapshots.get("NIFTY", {}))
         if bank is None or nifty is None:
-            return {"available": False, "value": 0.0, "supports": True, "extreme_against": False, "reason": "relative strength data unavailable"}
+            return {
+                "available": False,
+                "value": 0.0,
+                "supports": True,
+                "extreme_against": False,
+                "reason": "relative strength data unavailable",
+            }
         value = bank - nifty
         supports = value >= 0 if bullish else value <= 0
-        extreme_against = value < -settings.banknifty_extreme_divergence_pct if bullish else value > settings.banknifty_extreme_divergence_pct
+        extreme_against = (
+            value < -settings.banknifty_extreme_divergence_pct
+            if bullish
+            else value > settings.banknifty_extreme_divergence_pct
+        )
         return {
             "available": True,
             "bankNiftyMovePct": round(bank, 3),
@@ -311,18 +445,36 @@ class BankNiftyIntelligenceService:
             "value": round(value, 3),
             "supports": supports,
             "extreme_against": extreme_against,
-            "reason": "Bank Nifty relative strength supports trade" if supports else "Bank Nifty relative strength diverges against trade",
+            "reason": "Bank Nifty relative strength supports trade"
+            if supports
+            else "Bank Nifty relative strength diverges against trade",
         }
 
-    def _opening_range_status(self, bullish: bool, price: float, *, candles: list[Candle] | None = None) -> dict[str, Any]:
-        candles = list(candles) if candles is not None else self._today_candles("BANKNIFTY")
+    def _opening_range_status(
+        self, bullish: bool, price: float, *, candles: list[Candle] | None = None
+    ) -> dict[str, Any]:
+        candles = (
+            list(candles) if candles is not None else self._today_candles("BANKNIFTY")
+        )
         if not candles:
-            return {"status": "unavailable", "passed": True, "reason": "opening range candles unavailable"}
+            return {
+                "status": "unavailable",
+                "passed": True,
+                "reason": "opening range candles unavailable",
+            }
         now = ist_now_naive().time()
         first_trade = self._parse_time(settings.banknifty_first_trade_time)
         if now < first_trade:
-            return {"status": "pre_opening_range_complete", "passed": False, "reason": "opening range is not complete"}
-        opening = self._candles_between(candles, settings.banknifty_opening_range_start, settings.banknifty_opening_range_end)
+            return {
+                "status": "pre_opening_range_complete",
+                "passed": False,
+                "reason": "opening range is not complete",
+            }
+        opening = self._candles_between(
+            candles,
+            settings.banknifty_opening_range_start,
+            settings.banknifty_opening_range_end,
+        )
         opening = opening or candles[:3]
         high = max(float(candle.high_price) for candle in opening)
         low = min(float(candle.low_price) for candle in opening)
@@ -335,11 +487,27 @@ class BankNiftyIntelligenceService:
             status = "inside_opening_range"
             reason = "Bank Nifty is inside opening range"
         elif bullish and last_close > high:
-            status = "breakout" if previous >= high or last_close > previous else "failed_breakout"
-            reason = "opening range breakout confirmed" if status == "breakout" else "opening breakout is not holding"
+            status = (
+                "breakout"
+                if previous >= high or last_close > previous
+                else "failed_breakout"
+            )
+            reason = (
+                "opening range breakout confirmed"
+                if status == "breakout"
+                else "opening breakout is not holding"
+            )
         elif (not bullish) and last_close < low:
-            status = "breakdown" if previous <= low or last_close < previous else "failed_breakdown"
-            reason = "opening range breakdown confirmed" if status == "breakdown" else "opening breakdown is not holding"
+            status = (
+                "breakdown"
+                if previous <= low or last_close < previous
+                else "failed_breakdown"
+            )
+            reason = (
+                "opening range breakdown confirmed"
+                if status == "breakdown"
+                else "opening breakdown is not holding"
+            )
         else:
             status = "opposite_side"
             reason = "Bank Nifty is on the wrong side of opening range"
@@ -363,16 +531,27 @@ class BankNiftyIntelligenceService:
         prices: dict[str, float],
         candles: list[Candle] | None = None,
     ) -> dict[str, Any]:
-        candles = list(candles)[-30:] if candles is not None else self._recent_candles("BANKNIFTY", limit=30)
+        candles = (
+            list(candles)[-30:]
+            if candles is not None
+            else self._recent_candles("BANKNIFTY", limit=30)
+        )
         atr = self._atr(candles)
         price = float(snapshot.get("price") or 0.0)
         if price <= 0 or atr <= 0:
             atr = max(price * 0.004, 100.0)
         zone = self._round_zone(price, bullish)
         distance_to_zone = float(zone.get("distanceToZone") or atr)
-        realistic_move = min(max(atr * 0.9, price * 0.0025), distance_to_zone if distance_to_zone > 0 else atr)
+        realistic_move = min(
+            max(atr * 0.9, price * 0.0025),
+            distance_to_zone if distance_to_zone > 0 else atr,
+        )
         delta = self._approx_delta(contract)
-        required_move = max((float(prices["target_1"]) - float(prices["entry_price"])) / max(delta, 0.10), 1.0)
+        required_move = max(
+            (float(prices["target_1"]) - float(prices["entry_price"]))
+            / max(delta, 0.10),
+            1.0,
+        )
         coverage = realistic_move / required_move if required_move > 0 else 0.0
         passed = coverage >= settings.banknifty_expected_move_min_coverage
         return {
@@ -381,7 +560,9 @@ class BankNiftyIntelligenceService:
             "requiredMovePoints": round(required_move, 2),
             "coverage": round(coverage, 2),
             "approxDelta": round(delta, 2),
-            "reason": "expected Bank Nifty move can justify option target" if passed else "expected move is smaller than option premium target requirement",
+            "reason": "expected Bank Nifty move can justify option target"
+            if passed
+            else "expected move is smaller than option premium target requirement",
         }
 
     def _dte_mode(self, expiry: str) -> dict[str, Any]:
@@ -403,9 +584,15 @@ class BankNiftyIntelligenceService:
 
     def _event_day_mode(self) -> dict[str, Any]:
         today = ist_today().isoformat()
-        events = [item.strip() for item in settings.banknifty_event_dates.split(",") if item.strip()]
+        events = [
+            item.strip()
+            for item in settings.banknifty_event_dates.split(",")
+            if item.strip()
+        ]
         is_event = today in events
-        after = ist_now_naive().time() >= self._parse_time(settings.banknifty_event_preferred_after_time)
+        after = ist_now_naive().time() >= self._parse_time(
+            settings.banknifty_event_preferred_after_time
+        )
         return {
             "is_event_day": is_event,
             "mode": "event_day" if is_event else "normal",
@@ -415,7 +602,12 @@ class BankNiftyIntelligenceService:
 
     def _round_zone(self, price: float, bullish: bool) -> dict[str, Any]:
         if price <= 0:
-            return {"nearestMajorZone": 0, "distanceToZone": 0, "zoneRisk": "unknown", "reason": "price unavailable"}
+            return {
+                "nearestMajorZone": 0,
+                "distanceToZone": 0,
+                "zoneRisk": "unknown",
+                "reason": "price unavailable",
+            }
         major = settings.banknifty_major_zone_points
         lower = int(price // major) * major
         upper = lower + major
@@ -424,7 +616,9 @@ class BankNiftyIntelligenceService:
         very_major = target_zone % settings.banknifty_very_major_zone_points == 0
         if distance <= settings.banknifty_zone_risk_points:
             zone_risk = "trapped" if very_major else "near_major_zone"
-        elif (upper - lower) > 0 and min(price - lower, upper - price) / (upper - lower) < 0.18:
+        elif (upper - lower) > 0 and min(price - lower, upper - price) / (
+            upper - lower
+        ) < 0.18:
             zone_risk = "near_zone"
         else:
             zone_risk = "clear"
@@ -433,12 +627,25 @@ class BankNiftyIntelligenceService:
             "distanceToZone": round(distance, 2),
             "zoneRisk": zone_risk,
             "veryMajorZone": very_major,
-            "reason": "near Bank Nifty round-number supply/demand zone" if zone_risk != "clear" else "clear of immediate major round zone",
+            "reason": "near Bank Nifty round-number supply/demand zone"
+            if zone_risk != "clear"
+            else "clear of immediate major round zone",
         }
 
-    def _near_atm_pressure(self, spot: float, bullish: bool, contracts: list[OptionContract], selected: OptionContract) -> dict[str, Any]:
+    def _near_atm_pressure(
+        self,
+        spot: float,
+        bullish: bool,
+        contracts: list[OptionContract],
+        selected: OptionContract,
+    ) -> dict[str, Any]:
         if not contracts or spot <= 0:
-            return {"supports": True, "score": 50, "reason": "near-ATM option-chain data unavailable", "strikes": []}
+            return {
+                "supports": True,
+                "score": 50,
+                "reason": "near-ATM option-chain data unavailable",
+                "strikes": [],
+            }
         step = self._strike_step(contracts)
         atm = round(spot / step) * step
         strikes = {atm - 2 * step, atm - step, atm, atm + step, atm + 2 * step}
@@ -460,22 +667,63 @@ class BankNiftyIntelligenceService:
             "nearAtmCallOi": round(call_oi, 2),
             "nearAtmPutOi": round(put_oi, 2),
             "strikes": sorted(strikes),
-            "reason": "near-ATM option-chain pressure supports trade" if supports else "near-ATM option-chain pressure is not supportive",
+            "reason": "near-ATM option-chain pressure supports trade"
+            if supports
+            else "near-ATM option-chain pressure is not supportive",
         }
 
-    def _day_quality(self, day_type_eval: dict[str, Any], snapshot: dict[str, Any], top_banks: dict[str, Any], premium_eval: dict[str, Any]) -> dict[str, str]:
-        details = day_type_eval.get("details", {}) if isinstance(day_type_eval.get("details"), dict) else {}
+    def _day_quality(
+        self,
+        day_type_eval: dict[str, Any],
+        snapshot: dict[str, Any],
+        top_banks: dict[str, Any],
+        premium_eval: dict[str, Any],
+    ) -> dict[str, str]:
+        details = (
+            day_type_eval.get("details", {})
+            if isinstance(day_type_eval.get("details"), dict)
+            else {}
+        )
         day_type = str(details.get("day_type") or "unknown")
         price = float(snapshot.get("price") or 0.0)
         vwap = float(snapshot.get("vwap") or 0.0)
         near_vwap = price > 0 and vwap > 0 and abs(price - vwap) / price < 0.0015
-        if near_vwap and not top_banks.get("broad_based") and not premium_eval.get("passed", False):
-            return {"dayType": "choppy_no_trade", "dayTypeReason": "near flat VWAP, mixed top banks, and flat option premium"}
+        if (
+            near_vwap
+            and not top_banks.get("broad_based")
+            and not premium_eval.get("passed", False)
+        ):
+            return {
+                "dayType": "choppy_no_trade",
+                "dayTypeReason": "near flat VWAP, mixed top banks, and flat option premium",
+            }
         if day_type in {"rotation_range", "range"}:
-            return {"dayType": "range", "dayTypeReason": "range day blocks option buying"}
-        return {"dayType": day_type, "dayTypeReason": "; ".join(str(reason) for reason in day_type_eval.get("reasons", [])) or "day type acceptable"}
+            return {
+                "dayType": "range",
+                "dayTypeReason": "range day blocks option buying",
+            }
+        return {
+            "dayType": day_type,
+            "dayTypeReason": "; ".join(
+                str(reason) for reason in day_type_eval.get("reasons", [])
+            )
+            or "day type acceptable",
+        }
 
-    def _score(self, top_banks: dict[str, Any], private_psu: dict[str, Any], relative: dict[str, Any], opening: dict[str, Any], expected_move: dict[str, Any], dte: dict[str, Any], event: dict[str, Any], zone: dict[str, Any], near_atm: dict[str, Any], day: dict[str, str], premium_eval: dict[str, Any]) -> int:
+    def _score(
+        self,
+        top_banks: dict[str, Any],
+        private_psu: dict[str, Any],
+        relative: dict[str, Any],
+        opening: dict[str, Any],
+        expected_move: dict[str, Any],
+        dte: dict[str, Any],
+        event: dict[str, Any],
+        zone: dict[str, Any],
+        near_atm: dict[str, Any],
+        day: dict[str, str],
+        premium_eval: dict[str, Any],
+    ) -> int:
         score = 35
         score += int(top_banks.get("alignment", 0) * 20)
         if top_banks.get("broad_based"):
@@ -506,7 +754,9 @@ class BankNiftyIntelligenceService:
         capped = max(0, min(100, score))
         return min(capped, 88) if event_day else capped
 
-    def _trade_quality(self, score: int, hard_reasons: list[str], soft_reasons: list[str]) -> str:
+    def _trade_quality(
+        self, score: int, hard_reasons: list[str], soft_reasons: list[str]
+    ) -> str:
         if hard_reasons:
             return "NO_TRADE"
         if score >= 92 and not soft_reasons:
@@ -517,7 +767,9 @@ class BankNiftyIntelligenceService:
             return "B"
         return "C"
 
-    def _confidence_reason(self, quality: str, hard_reasons: list[str], soft_reasons: list[str]) -> str:
+    def _confidence_reason(
+        self, quality: str, hard_reasons: list[str], soft_reasons: list[str]
+    ) -> str:
         if hard_reasons:
             return "No-trade: " + "; ".join(hard_reasons[:3])
         if soft_reasons:
@@ -526,7 +778,9 @@ class BankNiftyIntelligenceService:
 
     def _pct_move(self, snapshot: dict[str, Any]) -> float | None:
         price = float(snapshot.get("price") or 0.0)
-        previous = float(snapshot.get("previous_day_close") or snapshot.get("day_open") or 0.0)
+        previous = float(
+            snapshot.get("previous_day_close") or snapshot.get("day_open") or 0.0
+        )
         if price <= 0 or previous <= 0:
             return None
         return ((price - previous) / previous) * 100
@@ -535,15 +789,25 @@ class BankNiftyIntelligenceService:
         total_weight = sum(float(row.get("weight") or 0.0) for row in rows)
         if total_weight <= 0:
             return 0.0
-        return sum(float(row.get("move_pct") or 0.0) * float(row.get("weight") or 0.0) for row in rows) / total_weight
+        return (
+            sum(
+                float(row.get("move_pct") or 0.0) * float(row.get("weight") or 0.0)
+                for row in rows
+            )
+            / total_weight
+        )
 
-    def _recent_candles(self, symbol: str, timeframe: str = "5minute", limit: int = 30) -> list[Candle]:
+    def _recent_candles(
+        self, symbol: str, timeframe: str = "5minute", limit: int = 30
+    ) -> list[Candle]:
         session = get_session()
         try:
             return list(
                 reversed(
                     session.query(Candle)
-                    .filter(Candle.symbol == symbol.upper(), Candle.timeframe == timeframe)
+                    .filter(
+                        Candle.symbol == symbol.upper(), Candle.timeframe == timeframe
+                    )
                     .order_by(Candle.timestamp.desc())
                     .limit(limit)
                     .all()
@@ -559,14 +823,21 @@ class BankNiftyIntelligenceService:
             end = datetime.combine(ist_today(), time.max)
             return (
                 session.query(Candle)
-                .filter(Candle.symbol == symbol.upper(), Candle.timeframe == timeframe, Candle.timestamp >= start, Candle.timestamp <= end)
+                .filter(
+                    Candle.symbol == symbol.upper(),
+                    Candle.timeframe == timeframe,
+                    Candle.timestamp >= start,
+                    Candle.timestamp <= end,
+                )
                 .order_by(Candle.timestamp.asc())
                 .all()
             )
         finally:
             session.close()
 
-    def _candles_between(self, candles: list[Candle], start_text: str, end_text: str) -> list[Candle]:
+    def _candles_between(
+        self, candles: list[Candle], start_text: str, end_text: str
+    ) -> list[Candle]:
         start = self._parse_time(start_text)
         end = self._parse_time(end_text)
         return [candle for candle in candles if start <= candle.timestamp.time() <= end]
@@ -588,8 +859,14 @@ class BankNiftyIntelligenceService:
         return 0.50 if contract.option_type in {"CE", "PE"} else 0.40
 
     def _strike_step(self, contracts: list[OptionContract]) -> int:
-        strikes = sorted({int(contract.strike) for contract in contracts if contract.strike > 0})
-        diffs = [strikes[idx] - strikes[idx - 1] for idx in range(1, len(strikes)) if strikes[idx] > strikes[idx - 1]]
+        strikes = sorted(
+            {int(contract.strike) for contract in contracts if contract.strike > 0}
+        )
+        diffs = [
+            strikes[idx] - strikes[idx - 1]
+            for idx in range(1, len(strikes))
+            if strikes[idx] > strikes[idx - 1]
+        ]
         return min(diffs) if diffs else 100
 
     def _parse_time(self, value: str) -> time:

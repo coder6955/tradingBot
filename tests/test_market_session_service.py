@@ -22,7 +22,9 @@ class MarketSessionServiceTests(unittest.TestCase):
         self.assertEqual(self._mode(datetime(2026, 7, 3, 9, 10)), "PRE_MARKET")
         self.assertEqual(self._mode(datetime(2026, 7, 3, 9, 20)), "MARKET_OPEN")
         self.assertEqual(self._mode(datetime(2026, 7, 3, 15, 25)), "MARKET_CLOSING")
-        self.assertEqual(self._mode(datetime(2026, 7, 3, 15, 40)), "AFTER_MARKET_REVIEW")
+        self.assertEqual(
+            self._mode(datetime(2026, 7, 3, 15, 40)), "AFTER_MARKET_REVIEW"
+        )
 
     def test_live_modules_do_not_run_pre_market_or_after_market(self) -> None:
         pre_market = MarketSessionService(clock=lambda: datetime(2026, 7, 3, 9, 10))

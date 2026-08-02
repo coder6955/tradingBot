@@ -58,7 +58,9 @@ class RuntimeTradingConfigService:
 
     def apply(self, payload: dict[str, Any]) -> dict[str, Any]:
         mode = self._normalize_mode(str(payload.get("mode") or self.mode))
-        options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+        options = (
+            payload.get("options") if isinstance(payload.get("options"), dict) else {}
+        )
         merged = dict(self.OPTIONAL_DEFAULTS)
         for key in merged:
             if key in options:
@@ -71,9 +73,13 @@ class RuntimeTradingConfigService:
             merged["confirm_one_live_trade_at_a_time"] = True
         self.mode = mode
         self.options = merged
-        self.warning_acknowledged = bool(payload.get("warning_acknowledged", mode == "paper"))
+        self.warning_acknowledged = bool(
+            payload.get("warning_acknowledged", mode == "paper")
+        )
         self.confirmed_by = str(payload.get("confirmed_by") or "dashboard")
-        self.confirmed_at = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%d %b %Y, %I:%M:%S %p IST")
+        self.confirmed_at = datetime.now(ZoneInfo("Asia/Kolkata")).strftime(
+            "%d %b %Y, %I:%M:%S %p IST"
+        )
         self._apply_runtime_settings()
         return self.status()
 
@@ -134,7 +140,9 @@ class RuntimeTradingConfigService:
             {
                 "key": "broker_emergency_sl",
                 "label": "Broker emergency SL",
-                "default": bool(self.options.get("broker_emergency_sl", False)) if live_only else False,
+                "default": bool(self.options.get("broker_emergency_sl", False))
+                if live_only
+                else False,
                 "enabled": live_only,
                 "description": "Places a Zerodha SL-M SELL order after live entry fill, so broker has a backup stop-loss.",
             },
@@ -148,7 +156,9 @@ class RuntimeTradingConfigService:
             {
                 "key": "event_driven_live_entry",
                 "label": "Event-driven live entry",
-                "default": bool(self.options.get("event_driven_live_entry", False)) if live_only else False,
+                "default": bool(self.options.get("event_driven_live_entry", False))
+                if live_only
+                else False,
                 "enabled": live_only,
                 "description": "Allows live entry from armed WebSocket trigger flow. Keep off until paper evidence is strong.",
             },
@@ -169,7 +179,11 @@ class RuntimeTradingConfigService:
             {
                 "key": "websocket_live_gap_polling_fallback",
                 "label": "Live polling fallback",
-                "default": bool(self.options.get("websocket_live_gap_polling_fallback", False)) if live_only else False,
+                "default": bool(
+                    self.options.get("websocket_live_gap_polling_fallback", False)
+                )
+                if live_only
+                else False,
                 "enabled": live_only,
                 "description": "If WebSocket gaps during a live trade, temporarily uses Kite polling for active price checks.",
             },
@@ -183,7 +197,9 @@ class RuntimeTradingConfigService:
             {
                 "key": "paper_shadow_for_blocked_live",
                 "label": "Paper shadow for blocked live",
-                "default": bool(self.options.get("paper_shadow_for_blocked_live", True)),
+                "default": bool(
+                    self.options.get("paper_shadow_for_blocked_live", True)
+                ),
                 "enabled": True,
                 "description": "Keeps a paper/shadow record for blocked live setups so learning continues without placing a real order.",
             },
@@ -222,18 +238,34 @@ class RuntimeTradingConfigService:
                 object.__setattr__(settings, attr, overrides[env_key])
 
         object.__setattr__(settings, "default_order_mode", self.mode)
-        object.__setattr__(settings, "enable_broker_emergency_sl", bool(self.options.get("broker_emergency_sl", False)))
-        object.__setattr__(settings, "enable_partial_booking", bool(self.options.get("partial_booking", False)))
-        object.__setattr__(settings, "enable_event_driven_paper_entry", bool(self.options.get("event_driven_paper_entry", True)))
+        object.__setattr__(
+            settings,
+            "enable_broker_emergency_sl",
+            bool(self.options.get("broker_emergency_sl", False)),
+        )
+        object.__setattr__(
+            settings,
+            "enable_partial_booking",
+            bool(self.options.get("partial_booking", False)),
+        )
+        object.__setattr__(
+            settings,
+            "enable_event_driven_paper_entry",
+            bool(self.options.get("event_driven_paper_entry", True)),
+        )
         object.__setattr__(
             settings,
             "enable_event_driven_live_entry",
-            self.mode == "live" and bool(self.options.get("event_driven_live_entry", False)),
+            self.mode == "live"
+            and bool(self.options.get("event_driven_live_entry", False)),
         )
         object.__setattr__(
             settings,
             "websocket_live_gap_polling_fallback",
-            self.mode == "live" and bool(self.options.get("websocket_live_gap_polling_fallback", False)),
+            self.mode == "live"
+            and bool(self.options.get("websocket_live_gap_polling_fallback", False)),
         )
-        if self.mode == "live" and bool(self.options.get("confirm_one_live_trade_at_a_time", True)):
+        if self.mode == "live" and bool(
+            self.options.get("confirm_one_live_trade_at_a_time", True)
+        ):
             object.__setattr__(settings, "max_open_trades", 1)

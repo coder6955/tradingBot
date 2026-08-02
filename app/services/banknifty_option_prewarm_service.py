@@ -11,7 +11,11 @@ from app.services.trade_setup_service import TradeSetupService
 class BankNiftyOptionPrewarmService:
     """Subscribe a tiny near-ATM Bank Nifty option set for premium candle warm-up."""
 
-    def __init__(self, websocket_price_feed: Any | None = None, trade_setup_service: TradeSetupService | None = None) -> None:
+    def __init__(
+        self,
+        websocket_price_feed: Any | None = None,
+        trade_setup_service: TradeSetupService | None = None,
+    ) -> None:
         self.websocket_price_feed = websocket_price_feed
         self.trade_setup_service = trade_setup_service or TradeSetupService()
         self.last_refresh_at: datetime | None = None
@@ -21,7 +25,9 @@ class BankNiftyOptionPrewarmService:
         self.last_reason: str | None = None
         self.last_subscription: dict[str, Any] = {}
 
-    def prewarm(self, *, spot_price: float, option_instruments: list[dict[str, Any]]) -> dict[str, Any]:
+    def prewarm(
+        self, *, spot_price: float, option_instruments: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         if not settings.enable_banknifty_option_prewarm:
             self.last_reason = "prewarm_disabled"
             return self.status(extra={"refreshed": False})
@@ -32,8 +38,14 @@ class BankNiftyOptionPrewarmService:
             self.last_reason = "spot_price_unavailable"
             return self.status(extra={"refreshed": False})
 
-        candidates = self._candidates(spot_price=spot_price, option_instruments=option_instruments)
-        tokens = {int(item["instrument_token"]) for item in candidates if self._safe_int(item.get("instrument_token"))}
+        candidates = self._candidates(
+            spot_price=spot_price, option_instruments=option_instruments
+        )
+        tokens = {
+            int(item["instrument_token"])
+            for item in candidates
+            if self._safe_int(item.get("instrument_token"))
+        }
         atm = self._atm_strike(candidates, spot_price)
         if not tokens:
             self.last_reason = "near_atm_candidates_unavailable"
@@ -43,13 +55,17 @@ class BankNiftyOptionPrewarmService:
             self.last_reason = "prewarm_already_current"
             return self.status(extra={"refreshed": False})
 
-        replace = getattr(self.websocket_price_feed, "replace_owner_subscriptions", None)
+        replace = getattr(
+            self.websocket_price_feed, "replace_owner_subscriptions", None
+        )
         subscribe = getattr(self.websocket_price_feed, "subscribe", None)
         if not callable(replace) and not callable(subscribe):
             self.last_reason = "websocket_subscribe_unavailable"
             return self.status(extra={"refreshed": False})
         if callable(replace):
-            register_symbol = getattr(self.websocket_price_feed, "register_token_symbol", None)
+            register_symbol = getattr(
+                self.websocket_price_feed, "register_token_symbol", None
+            )
             if callable(register_symbol):
                 for item in candidates:
                     token = self._safe_int(item.get("instrument_token"))
@@ -69,8 +85,14 @@ class BankNiftyOptionPrewarmService:
         self.last_refresh_at = ist_now_naive()
         self.last_atm_strike = atm
         self.last_tokens = set(tokens)
-        self.last_tradingsymbols = [str(item.get("tradingsymbol")) for item in candidates if item.get("tradingsymbol")]
-        self.last_reason = str(self.last_subscription.get("reason") or "prewarm_subscribed")
+        self.last_tradingsymbols = [
+            str(item.get("tradingsymbol"))
+            for item in candidates
+            if item.get("tradingsymbol")
+        ]
+        self.last_reason = str(
+            self.last_subscription.get("reason") or "prewarm_subscribed"
+        )
         return self.status(extra={"refreshed": True})
 
     def status(self, *, extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -78,7 +100,9 @@ class BankNiftyOptionPrewarmService:
             "prewarm_enabled": settings.enable_banknifty_option_prewarm,
             "prewarm_tokens": sorted(self.last_tokens),
             "prewarm_tradingsymbols": list(self.last_tradingsymbols),
-            "prewarm_last_refresh_at": self.last_refresh_at.isoformat(sep=" ") if self.last_refresh_at else None,
+            "prewarm_last_refresh_at": self.last_refresh_at.isoformat(sep=" ")
+            if self.last_refresh_at
+            else None,
             "prewarm_reason": self.last_reason,
             "prewarm_atm_strike": self.last_atm_strike,
             "prewarm_subscription": self.last_subscription,
@@ -87,8 +111,12 @@ class BankNiftyOptionPrewarmService:
             payload.update(extra)
         return payload
 
-    def _candidates(self, *, spot_price: float, option_instruments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        expiry = self.trade_setup_service.nearest_expiry(option_instruments, "BANKNIFTY")
+    def _candidates(
+        self, *, spot_price: float, option_instruments: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        expiry = self.trade_setup_service.nearest_expiry(
+            option_instruments, "BANKNIFTY"
+        )
         if expiry is None:
             return []
         contracts = [
@@ -105,33 +133,75 @@ class BankNiftyOptionPrewarmService:
         atm = min(strikes, key=lambda strike: abs(strike - spot_price))
         idx = strikes.index(atm)
         depth = max(0, int(settings.banknifty_prewarm_strike_depth))
-        wanted_strikes = set(strikes[max(0, idx - depth): min(len(strikes), idx + depth + 1)])
+        wanted_strikes = set(
+            strikes[max(0, idx - depth) : min(len(strikes), idx + depth + 1)]
+        )
         wanted: list[dict[str, Any]] = []
         seen: set[tuple[float, str]] = set()
         for item in contracts:
             strike = float(item.get("strike") or 0.0)
             option_type = str(item.get("instrument_type") or "").upper()
             key = (strike, option_type)
-            if strike in wanted_strikes and option_type in {"CE", "PE"} and key not in seen:
+            if (
+                strike in wanted_strikes
+                and option_type in {"CE", "PE"}
+                and key not in seen
+            ):
                 wanted.append(item)
                 seen.add(key)
-        return sorted(wanted, key=lambda item: (float(item.get("strike") or 0.0), str(item.get("instrument_type") or "")))
+        return sorted(
+            wanted,
+            key=lambda item: (
+                float(item.get("strike") or 0.0),
+                str(item.get("instrument_type") or ""),
+            ),
+        )
 
-    def _refresh_due(self, atm_strike: float | None, *, spot_price: float, candidates: list[dict[str, Any]]) -> bool:
+    def _refresh_due(
+        self,
+        atm_strike: float | None,
+        *,
+        spot_price: float,
+        candidates: list[dict[str, Any]],
+    ) -> bool:
         if self.last_refresh_at is None or not self.last_tokens:
             return True
-        if atm_strike is not None and self.last_atm_strike is not None and atm_strike != self.last_atm_strike:
-            strikes = sorted({self._safe_float(item.get("strike")) for item in candidates if self._safe_float(item.get("strike")) > 0})
-            steps = [strikes[index] - strikes[index - 1] for index in range(1, len(strikes)) if strikes[index] > strikes[index - 1]]
+        if (
+            atm_strike is not None
+            and self.last_atm_strike is not None
+            and atm_strike != self.last_atm_strike
+        ):
+            strikes = sorted(
+                {
+                    self._safe_float(item.get("strike"))
+                    for item in candidates
+                    if self._safe_float(item.get("strike")) > 0
+                }
+            )
+            steps = [
+                strikes[index] - strikes[index - 1]
+                for index in range(1, len(strikes))
+                if strikes[index] > strikes[index - 1]
+            ]
             step = min(steps) if steps else abs(atm_strike - self.last_atm_strike)
-            threshold = step * max(0.5, settings.banknifty_prewarm_rotation_hysteresis_pct / 100.0)
+            threshold = step * max(
+                0.5, settings.banknifty_prewarm_rotation_hysteresis_pct / 100.0
+            )
             if abs(spot_price - self.last_atm_strike) >= threshold:
                 return True
         elapsed = (ist_now_naive() - self.last_refresh_at).total_seconds()
         return elapsed >= max(1, settings.banknifty_prewarm_refresh_seconds)
 
-    def _atm_strike(self, candidates: list[dict[str, Any]], spot_price: float) -> float | None:
-        strikes = sorted({float(item.get("strike") or 0.0) for item in candidates if self._safe_float(item.get("strike")) > 0})
+    def _atm_strike(
+        self, candidates: list[dict[str, Any]], spot_price: float
+    ) -> float | None:
+        strikes = sorted(
+            {
+                float(item.get("strike") or 0.0)
+                for item in candidates
+                if self._safe_float(item.get("strike")) > 0
+            }
+        )
         if not strikes:
             return None
         return min(strikes, key=lambda strike: abs(strike - spot_price))
@@ -139,7 +209,9 @@ class BankNiftyOptionPrewarmService:
     def _banknifty_option(self, item: dict[str, Any]) -> bool:
         name = str(item.get("name") or "").upper().replace(" ", "")
         tradingsymbol = str(item.get("tradingsymbol") or "").upper()
-        return (name == "BANKNIFTY" or tradingsymbol.startswith("BANKNIFTY")) and str(item.get("instrument_type")) in {"CE", "PE"}
+        return (name == "BANKNIFTY" or tradingsymbol.startswith("BANKNIFTY")) and str(
+            item.get("instrument_type")
+        ) in {"CE", "PE"}
 
     def _safe_int(self, value: Any) -> int | None:
         try:

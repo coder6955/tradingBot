@@ -43,10 +43,20 @@ TABLES = {
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Reset Bank Nifty research data and ingest fresh Kite candles.")
-    parser.add_argument("--confirm", action="store_true", help="Required to delete existing research/trade history.")
-    parser.add_argument("--days", type=int, default=180, help="Underlying Bank Nifty candle lookback.")
-    parser.add_argument("--option-days", type=int, default=45, help="Current-option candle lookback.")
+    parser = argparse.ArgumentParser(
+        description="Reset Bank Nifty research data and ingest fresh Kite candles."
+    )
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Required to delete existing research/trade history.",
+    )
+    parser.add_argument(
+        "--days", type=int, default=180, help="Underlying Bank Nifty candle lookback."
+    )
+    parser.add_argument(
+        "--option-days", type=int, default=45, help="Current-option candle lookback."
+    )
     parser.add_argument("--timeframe", default="5minute")
     parser.add_argument("--strike-window-pct", type=float, default=3.0)
     parser.add_argument("--max-option-contracts", type=int, default=40)
@@ -55,7 +65,13 @@ def main() -> None:
     init_db()
     before = counts()
     if not args.confirm:
-        print({"status": "dry_run", "before": before, "message": "Run with --confirm to delete and rebuild."})
+        print(
+            {
+                "status": "dry_run",
+                "before": before,
+                "message": "Run with --confirm to delete and rebuild.",
+            }
+        )
         return
 
     reset_tables()
@@ -67,7 +83,9 @@ def main() -> None:
         option_history_repository=OptionHistoryRepository(),
         greeks_service=GreeksService(),
     )
-    underlying = ingest_underlying_in_chunks(ingestion, timeframe=args.timeframe, days=args.days)
+    underlying = ingest_underlying_in_chunks(
+        ingestion, timeframe=args.timeframe, days=args.days
+    )
     option_candles = ingestion.ingest_option_candles(
         symbols=["BANKNIFTY"],
         timeframe=args.timeframe,
@@ -96,7 +114,9 @@ def main() -> None:
 def counts() -> dict[str, int]:
     session = get_session()
     try:
-        return {name: int(session.query(model).count()) for name, model in TABLES.items()}
+        return {
+            name: int(session.query(model).count()) for name, model in TABLES.items()
+        }
     finally:
         session.close()
 
@@ -104,7 +124,14 @@ def counts() -> dict[str, int]:
 def reset_tables() -> None:
     session = get_session()
     try:
-        for model in (TradeRecord, OpportunityRecord, SignalRecord, StrategyValidationRecord, OptionQuoteSnapshot, Candle):
+        for model in (
+            TradeRecord,
+            OpportunityRecord,
+            SignalRecord,
+            StrategyValidationRecord,
+            OptionQuoteSnapshot,
+            Candle,
+        ):
             session.query(model).delete(synchronize_session=False)
         session.commit()
     except Exception:
@@ -114,7 +141,9 @@ def reset_tables() -> None:
         session.close()
 
 
-def ingest_underlying_in_chunks(ingestion: DataIngestionService, *, timeframe: str, days: int) -> dict[str, Any]:
+def ingest_underlying_in_chunks(
+    ingestion: DataIngestionService, *, timeframe: str, days: int
+) -> dict[str, Any]:
     to_dt = ist_now_naive()
     from_dt = to_dt - timedelta(days=days)
     chunk_days = 90

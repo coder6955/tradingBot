@@ -17,7 +17,9 @@ from app.services.indicator_service import compute_ema, compute_macd, compute_rs
 from app.services.market_regime_service import MarketRegimeService
 from app.services.multi_timeframe_context_service import MultiTimeframeContextService
 from app.services.execution_realism_service import ExecutionRealismService
-from app.services.option_premium_confirmation_service import OptionPremiumConfirmationService
+from app.services.option_premium_confirmation_service import (
+    OptionPremiumConfirmationService,
+)
 from app.services.option_quality_service import OptionQualityService
 from app.services.trade_setup_service import OptionContract, TradeSetupService
 
@@ -90,13 +92,25 @@ class HistoricalScannerReplayFeed:
         self.symbol = symbol.upper()
         self.timeframe = timeframe
         self.underlying = list(underlying)
-        self.underlying_timeframes = {str(name): list(rows) for name, rows in (underlying_timeframes or {timeframe: underlying}).items()}
+        self.underlying_timeframes = {
+            str(name): list(rows)
+            for name, rows in (underlying_timeframes or {timeframe: underlying}).items()
+        }
         self.option_candles = option_candles
         self.option_snapshots = option_snapshots or {}
         self.current_index = 0
-        self._call_counts = {"historical_snapshot": 0, "historical_quotes": 0, "historical_instruments": 0}
-        self._token_by_symbol = {name: 900000 + idx for idx, name in enumerate(sorted(option_candles), start=1)}
-        self._cached_symbol_candles: dict[str, list[Candle]] = {self.symbol: self.underlying}
+        self._call_counts = {
+            "historical_snapshot": 0,
+            "historical_quotes": 0,
+            "historical_instruments": 0,
+        }
+        self._token_by_symbol = {
+            name: 900000 + idx
+            for idx, name in enumerate(sorted(option_candles), start=1)
+        }
+        self._cached_symbol_candles: dict[str, list[Candle]] = {
+            self.symbol: self.underlying
+        }
 
     @property
     def current_timestamp(self) -> datetime:
@@ -121,8 +135,12 @@ class HistoricalScannerReplayFeed:
                 "trend_bullish": False,
                 "market_context": "unavailable",
             }
-        completed_by = self.current_timestamp - timedelta(minutes=1 if self.timeframe == "1minute" else 5)
-        rows = [row for row in candles if self._as_datetime(row.timestamp) <= completed_by]
+        completed_by = self.current_timestamp - timedelta(
+            minutes=1 if self.timeframe == "1minute" else 5
+        )
+        rows = [
+            row for row in candles if self._as_datetime(row.timestamp) <= completed_by
+        ]
         if not rows:
             return {
                 "symbol": clean_symbol,
@@ -170,15 +188,33 @@ class HistoricalScannerReplayFeed:
     def call_counts(self) -> dict[str, Any]:
         return dict(self._call_counts)
 
-    def candles_for(self, symbol: str, *, current_session_only: bool = False, limit: int | None = None) -> list[Candle]:
-        completed_by = self.current_timestamp - timedelta(minutes=1 if self.timeframe == "1minute" else 5)
-        rows = [row for row in self._candles_for_symbol(symbol.upper()) if self._as_datetime(row.timestamp) <= completed_by]
+    def candles_for(
+        self,
+        symbol: str,
+        *,
+        current_session_only: bool = False,
+        limit: int | None = None,
+    ) -> list[Candle]:
+        completed_by = self.current_timestamp - timedelta(
+            minutes=1 if self.timeframe == "1minute" else 5
+        )
+        rows = [
+            row
+            for row in self._candles_for_symbol(symbol.upper())
+            if self._as_datetime(row.timestamp) <= completed_by
+        ]
         if current_session_only:
             session_date = self.current_timestamp.date()
-            rows = [row for row in rows if self._as_datetime(row.timestamp).date() == session_date]
+            rows = [
+                row
+                for row in rows
+                if self._as_datetime(row.timestamp).date() == session_date
+            ]
         return rows[-limit:] if limit else rows
 
-    def candles_for_timeframe(self, timeframe: str, *, limit: int | None = None) -> list[Candle]:
+    def candles_for_timeframe(
+        self, timeframe: str, *, limit: int | None = None
+    ) -> list[Candle]:
         minutes = 1 if timeframe == "1minute" else 5
         completed_by = self.current_timestamp - timedelta(minutes=minutes)
         rows = [
@@ -188,12 +224,28 @@ class HistoricalScannerReplayFeed:
         ]
         return rows[-limit:] if limit else rows
 
-    def option_candles_for(self, tradingsymbol: str, *, current_session_only: bool = False, limit: int | None = None) -> list[Candle]:
-        completed_by = self.current_timestamp - timedelta(minutes=1 if self.timeframe == "1minute" else 5)
-        rows = [row for row in self.option_candles.get(tradingsymbol, []) if self._as_datetime(row.timestamp) <= completed_by]
+    def option_candles_for(
+        self,
+        tradingsymbol: str,
+        *,
+        current_session_only: bool = False,
+        limit: int | None = None,
+    ) -> list[Candle]:
+        completed_by = self.current_timestamp - timedelta(
+            minutes=1 if self.timeframe == "1minute" else 5
+        )
+        rows = [
+            row
+            for row in self.option_candles.get(tradingsymbol, [])
+            if self._as_datetime(row.timestamp) <= completed_by
+        ]
         if current_session_only:
             session_date = self.current_timestamp.date()
-            rows = [row for row in rows if self._as_datetime(row.timestamp).date() == session_date]
+            rows = [
+                row
+                for row in rows
+                if self._as_datetime(row.timestamp).date() == session_date
+            ]
         return rows[-limit:] if limit else rows
 
     def _snapshot_from_rows(self, symbol: str, rows: list[Candle]) -> dict[str, Any]:
@@ -209,15 +261,45 @@ class HistoricalScannerReplayFeed:
         last = rows[-1]
         last_time = self._as_datetime(last.timestamp)
         current_date = last_time.date()
-        today_rows = [row for row in rows if self._as_datetime(row.timestamp).date() == current_date]
-        previous_rows = [row for row in rows if self._as_datetime(row.timestamp).date() < current_date]
+        today_rows = [
+            row
+            for row in rows
+            if self._as_datetime(row.timestamp).date() == current_date
+        ]
+        previous_rows = [
+            row
+            for row in rows
+            if self._as_datetime(row.timestamp).date() < current_date
+        ]
         price = closes[-1]
-        day_high = max(float(row.high_price) for row in today_rows) if today_rows else float(last.high_price)
-        day_low = min(float(row.low_price) for row in today_rows) if today_rows else float(last.low_price)
-        day_open = float(today_rows[0].open_price) if today_rows else float(last.open_price)
-        previous_day_high = max(float(row.high_price) for row in previous_rows) if previous_rows else max(highs[-20:])
-        previous_day_low = min(float(row.low_price) for row in previous_rows) if previous_rows else min(lows[-20:])
-        previous_day_close = float(previous_rows[-1].close_price) if previous_rows else closes[max(0, len(closes) - 2)]
+        day_high = (
+            max(float(row.high_price) for row in today_rows)
+            if today_rows
+            else float(last.high_price)
+        )
+        day_low = (
+            min(float(row.low_price) for row in today_rows)
+            if today_rows
+            else float(last.low_price)
+        )
+        day_open = (
+            float(today_rows[0].open_price) if today_rows else float(last.open_price)
+        )
+        previous_day_high = (
+            max(float(row.high_price) for row in previous_rows)
+            if previous_rows
+            else max(highs[-20:])
+        )
+        previous_day_low = (
+            min(float(row.low_price) for row in previous_rows)
+            if previous_rows
+            else min(lows[-20:])
+        )
+        previous_day_close = (
+            float(previous_rows[-1].close_price)
+            if previous_rows
+            else closes[max(0, len(closes) - 2)]
+        )
         avg_volume = sum(volumes[-20:]) / max(len(volumes[-20:]), 1)
         volume_confirmed = volumes[-1] >= avg_volume * 1.10 if avg_volume > 0 else False
         vwap = self._vwap(today_rows or rows[-20:])
@@ -271,7 +353,9 @@ class HistoricalScannerReplayFeed:
                 "last_price": float(snapshot.last_price or 0.0),
                 "volume": float(snapshot.volume or 0.0),
                 "oi": float(snapshot.open_interest or 0.0),
-                "quote_timestamp": self._as_datetime(snapshot.timestamp).isoformat(sep=" "),
+                "quote_timestamp": self._as_datetime(snapshot.timestamp).isoformat(
+                    sep=" "
+                ),
                 "source": "historical_option_quote_snapshot",
                 "depth": {
                     "buy": [{"price": float(snapshot.bid or 0.0)}],
@@ -324,31 +408,62 @@ class HistoricalScannerReplayFeed:
             session.close()
 
     def _parse_option_symbol(self, symbol: str) -> dict[str, Any] | None:
-        match = re.search(r"(?P<day>\d{2})(?P<month>[A-Z]{3})(?P<strike>\d+(?:\.\d+)?)(?P<option_type>CE|PE)$", symbol.upper())
+        match = re.search(
+            r"(?P<day>\d{2})(?P<month>[A-Z]{3})(?P<strike>\d+(?:\.\d+)?)(?P<option_type>CE|PE)$",
+            symbol.upper(),
+        )
         if not match:
-            fallback = re.search(r"(?P<strike>\d+(?:\.\d+)?)(?P<option_type>CE|PE)$", symbol.upper())
+            fallback = re.search(
+                r"(?P<strike>\d+(?:\.\d+)?)(?P<option_type>CE|PE)$", symbol.upper()
+            )
             if not fallback:
                 return None
-            return {"expiry": self.current_timestamp.date(), "strike": float(fallback.group("strike")), "option_type": fallback.group("option_type")}
+            return {
+                "expiry": self.current_timestamp.date(),
+                "strike": float(fallback.group("strike")),
+                "option_type": fallback.group("option_type"),
+            }
         year = self.current_timestamp.year
         try:
-            expiry = datetime.strptime(f"{year}-{match.group('month')}-{int(match.group('day'))}", "%Y-%b-%d").date()
+            expiry = datetime.strptime(
+                f"{year}-{match.group('month')}-{int(match.group('day'))}", "%Y-%b-%d"
+            ).date()
         except ValueError:
             expiry = self.current_timestamp.date()
-        return {"expiry": expiry, "strike": float(match.group("strike")), "option_type": match.group("option_type")}
+        return {
+            "expiry": expiry,
+            "strike": float(match.group("strike")),
+            "option_type": match.group("option_type"),
+        }
 
     def _vwap(self, rows: list[Candle]) -> float:
         total_volume = sum(float(row.volume or 0.0) for row in rows)
         if total_volume <= 0:
             return sum(float(row.close_price) for row in rows) / max(len(rows), 1)
-        return sum(((float(row.high_price) + float(row.low_price) + float(row.close_price)) / 3) * float(row.volume or 0.0) for row in rows) / total_volume
+        return (
+            sum(
+                (
+                    (
+                        float(row.high_price)
+                        + float(row.low_price)
+                        + float(row.close_price)
+                    )
+                    / 3
+                )
+                * float(row.volume or 0.0)
+                for row in rows
+            )
+            / total_volume
+        )
 
     def _approx_adx(self, rows: list[Candle]) -> float:
         recent = rows[-14:] if len(rows) >= 14 else rows
         if len(recent) < 2:
             return 15.0
         move = abs(float(recent[-1].close_price) - float(recent[0].close_price))
-        ranges = [max(float(row.high_price) - float(row.low_price), 0.01) for row in recent]
+        ranges = [
+            max(float(row.high_price) - float(row.low_price), 0.01) for row in recent
+        ]
         strength = move / max(sum(ranges), 0.01)
         return max(10.0, min(35.0, 12.0 + strength * 45.0))
 
@@ -364,15 +479,26 @@ class BacktestPremiumConfirmationService(OptionPremiumConfirmationService):
         self.feed = feed
 
     def _recent_candles(self, symbol: str, timeframe: str, limit: int) -> list[Candle]:
-        return self.feed.option_candles_for(symbol, current_session_only=True, limit=limit)
+        return self.feed.option_candles_for(
+            symbol, current_session_only=True, limit=limit
+        )
 
-    def _freshness_payload(self, *, source: str, first: datetime | None, last: datetime | None, symbol: str | None = None) -> dict[str, Any]:
+    def _freshness_payload(
+        self,
+        *,
+        source: str,
+        first: datetime | None,
+        last: datetime | None,
+        symbol: str | None = None,
+    ) -> dict[str, Any]:
         now = self.feed.current_timestamp
         session_date = now.date()
         age = max(0.0, (now - last).total_seconds()) if last else None
         candle_date = last.date().isoformat() if last else None
         max_age = self._max_age_seconds(source)
-        passed = bool(last and last.date() == session_date and age is not None and age <= max_age)
+        passed = bool(
+            last and last.date() == session_date and age is not None and age <= max_age
+        )
         reason = None if passed else "premium_candles_stale_or_missing"
         payload = {
             "option_candle_ingestion_enabled": settings.automation_intraday_candle_sync,
@@ -386,25 +512,43 @@ class BacktestPremiumConfirmationService(OptionPremiumConfirmationService):
             "premium_candle_rejection_reason": reason,
             "premium_candle_max_age_seconds": max_age,
             "selected_option_candle_source": source,
-            "selected_option_last_candle_age_seconds": round(age, 3) if age is not None else None,
+            "selected_option_last_candle_age_seconds": round(age, 3)
+            if age is not None
+            else None,
         }
         payload.update(self._current_session_candle_status(symbol or ""))
         return payload
 
     def _missing_freshness(self, source: str, reason: str) -> dict[str, Any]:
         payload = super()._missing_freshness(source, reason)
-        payload["current_market_session_date"] = self.feed.current_timestamp.date().isoformat()
+        payload["current_market_session_date"] = (
+            self.feed.current_timestamp.date().isoformat()
+        )
         return payload
 
     def _current_session_candle_status(self, symbol: str) -> dict[str, Any]:
-        rows = self.feed.option_candles_for(symbol, current_session_only=True) if symbol else []
+        rows = (
+            self.feed.option_candles_for(symbol, current_session_only=True)
+            if symbol
+            else []
+        )
         latest = rows[-1].timestamp if rows else None
-        latest_dt = latest.replace(tzinfo=None) if isinstance(latest, datetime) else latest
-        age = max(0.0, (self.feed.current_timestamp - latest_dt).total_seconds()) if isinstance(latest_dt, datetime) else None
+        latest_dt = (
+            latest.replace(tzinfo=None) if isinstance(latest, datetime) else latest
+        )
+        age = (
+            max(0.0, (self.feed.current_timestamp - latest_dt).total_seconds())
+            if isinstance(latest_dt, datetime)
+            else None
+        )
         return {
-            "latest_current_session_option_candle": latest_dt.isoformat(sep=" ") if isinstance(latest_dt, datetime) else None,
+            "latest_current_session_option_candle": latest_dt.isoformat(sep=" ")
+            if isinstance(latest_dt, datetime)
+            else None,
             "selected_option_candle_count_today": len(rows),
-            "selected_option_last_candle_age_seconds": round(age, 3) if age is not None else None,
+            "selected_option_last_candle_age_seconds": round(age, 3)
+            if age is not None
+            else None,
         }
 
 
@@ -423,13 +567,25 @@ class BacktestMarketRegimeService(MarketRegimeService):
     def calendar_check(self, symbol: str) -> dict[str, Any]:
         today = self.feed.current_timestamp.date().isoformat()
         reasons: list[str] = []
-        blocked_dates = {item.strip() for item in settings.blocked_event_dates.split(",") if item.strip()}
+        blocked_dates = {
+            item.strip()
+            for item in settings.blocked_event_dates.split(",")
+            if item.strip()
+        }
         if today in blocked_dates:
             reasons.append(f"{today} is configured as a blocked event date")
-        blocked_symbols = {item.strip().upper() for item in settings.blocked_symbols.split(",") if item.strip()}
+        blocked_symbols = {
+            item.strip().upper()
+            for item in settings.blocked_symbols.split(",")
+            if item.strip()
+        }
         if symbol.upper() in blocked_symbols:
             reasons.append(f"{symbol.upper()} is configured as blocked")
-        return {"passed": not reasons, "reasons": reasons, "timestamp": self.feed.current_timestamp.isoformat()}
+        return {
+            "passed": not reasons,
+            "reasons": reasons,
+            "timestamp": self.feed.current_timestamp.isoformat(),
+        }
 
 
 class BacktestGreeksService(GreeksService):
@@ -448,7 +604,14 @@ class BacktestTradeSetupService(TradeSetupService):
         super().__init__()
         self.feed = feed
 
-    def risk_checks(self, score: int, contract: OptionContract, entry_price: float, side: str, enforce_budget: bool = False) -> list[str]:
+    def risk_checks(
+        self,
+        score: int,
+        contract: OptionContract,
+        entry_price: float,
+        side: str,
+        enforce_budget: bool = False,
+    ) -> list[str]:
         failures: list[str] = []
         if self.liquidity_score(contract) < settings.min_option_liquidity_score:
             failures.append("option liquidity is below threshold")
@@ -456,7 +619,11 @@ class BacktestTradeSetupService(TradeSetupService):
             if entry_price < settings.min_option_buy_premium:
                 failures.append("option premium is below minimum configured for buying")
             expiry = self._parse_expiry(contract.expiry)
-            if settings.block_expiry_day_option_buying and expiry is not None and expiry <= self.feed.current_timestamp.date():
+            if (
+                settings.block_expiry_day_option_buying
+                and expiry is not None
+                and expiry <= self.feed.current_timestamp.date()
+            ):
                 failures.append("expiry-day option buying is blocked")
         else:
             if not settings.allow_option_selling:
@@ -469,7 +636,9 @@ class BacktestTradeSetupService(TradeSetupService):
             failures.append("option open interest is below threshold")
         return failures
 
-    def _option_premium_structure(self, tradingsymbol: str, timeframe: str = "5minute", limit: int = 24) -> dict[str, float]:
+    def _option_premium_structure(
+        self, tradingsymbol: str, timeframe: str = "5minute", limit: int = 24
+    ) -> dict[str, float]:
         candles = self.feed.option_candles_for(tradingsymbol, limit=limit)
         if len(candles) < 4:
             return {"atr": 0.0, "swing_low": 0.0, "swing_high": 0.0}
@@ -478,7 +647,9 @@ class BacktestTradeSetupService(TradeSetupService):
         for candle in candles[1:]:
             high = float(candle.high_price)
             low = float(candle.low_price)
-            true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+            true_ranges.append(
+                max(high - low, abs(high - previous_close), abs(low - previous_close))
+            )
             previous_close = float(candle.close_price)
         recent = candles[-8:] if len(candles) >= 8 else candles
         return {
@@ -496,16 +667,36 @@ class BacktestBankNiftyIntelligenceService(BankNiftyIntelligenceService):
     def _today_candles(self, symbol: str, timeframe: str = "5minute") -> list[Candle]:
         return self.feed.candles_for(symbol, current_session_only=True)
 
-    def _recent_candles(self, symbol: str, timeframe: str = "5minute", limit: int = 30) -> list[Candle]:
+    def _recent_candles(
+        self, symbol: str, timeframe: str = "5minute", limit: int = 30
+    ) -> list[Candle]:
         return self.feed.candles_for(symbol, limit=limit)
 
-    def _opening_range_status(self, bullish: bool, price: float, *, candles: list[Candle] | None = None) -> dict[str, Any]:
-        candles = list(candles) if candles is not None else self._today_candles("BANKNIFTY")
+    def _opening_range_status(
+        self, bullish: bool, price: float, *, candles: list[Candle] | None = None
+    ) -> dict[str, Any]:
+        candles = (
+            list(candles) if candles is not None else self._today_candles("BANKNIFTY")
+        )
         if not candles:
-            return {"status": "unavailable", "passed": True, "reason": "opening range candles unavailable"}
-        if self.feed.current_timestamp.time() < self._parse_time(settings.banknifty_first_trade_time):
-            return {"status": "pre_opening_range_complete", "passed": False, "reason": "opening range is not complete"}
-        opening = self._candles_between(candles, settings.banknifty_opening_range_start, settings.banknifty_opening_range_end)
+            return {
+                "status": "unavailable",
+                "passed": True,
+                "reason": "opening range candles unavailable",
+            }
+        if self.feed.current_timestamp.time() < self._parse_time(
+            settings.banknifty_first_trade_time
+        ):
+            return {
+                "status": "pre_opening_range_complete",
+                "passed": False,
+                "reason": "opening range is not complete",
+            }
+        opening = self._candles_between(
+            candles,
+            settings.banknifty_opening_range_start,
+            settings.banknifty_opening_range_end,
+        )
         opening = opening or candles[:3]
         high = max(float(candle.high_price) for candle in opening)
         low = min(float(candle.low_price) for candle in opening)
@@ -518,11 +709,27 @@ class BacktestBankNiftyIntelligenceService(BankNiftyIntelligenceService):
             status = "inside_opening_range"
             reason = "Bank Nifty is inside opening range"
         elif bullish and last_close > high:
-            status = "breakout" if previous >= high or last_close > previous else "failed_breakout"
-            reason = "opening range breakout confirmed" if status == "breakout" else "opening breakout is not holding"
+            status = (
+                "breakout"
+                if previous >= high or last_close > previous
+                else "failed_breakout"
+            )
+            reason = (
+                "opening range breakout confirmed"
+                if status == "breakout"
+                else "opening breakout is not holding"
+            )
         elif (not bullish) and last_close < low:
-            status = "breakdown" if previous <= low or last_close < previous else "failed_breakdown"
-            reason = "opening range breakdown confirmed" if status == "breakdown" else "opening breakdown is not holding"
+            status = (
+                "breakdown"
+                if previous <= low or last_close < previous
+                else "failed_breakdown"
+            )
+            reason = (
+                "opening range breakdown confirmed"
+                if status == "breakdown"
+                else "opening breakdown is not holding"
+            )
         else:
             status = "opposite_side"
             reason = "Bank Nifty is on the wrong side of opening range"
@@ -556,9 +763,15 @@ class BacktestBankNiftyIntelligenceService(BankNiftyIntelligenceService):
 
     def _event_day_mode(self) -> dict[str, Any]:
         today = self.feed.current_timestamp.date().isoformat()
-        events = [item.strip() for item in settings.banknifty_event_dates.split(",") if item.strip()]
+        events = [
+            item.strip()
+            for item in settings.banknifty_event_dates.split(",")
+            if item.strip()
+        ]
         is_event = today in events
-        after = self.feed.current_timestamp.time() >= self._parse_time(settings.banknifty_event_preferred_after_time)
+        after = self.feed.current_timestamp.time() >= self._parse_time(
+            settings.banknifty_event_preferred_after_time
+        )
         return {
             "is_event_day": is_event,
             "mode": "event_day" if is_event else "normal",
@@ -582,7 +795,9 @@ class BacktestNoLookaheadGuard:
             "passed": True,
             "score": 50,
             "details": {},
-            "reasons": ["shadow diagnostic disabled in historical replay to prevent lookahead"],
+            "reasons": [
+                "shadow diagnostic disabled in historical replay to prevent lookahead"
+            ],
         }
 
 
@@ -590,7 +805,9 @@ class BacktestMultiTimeframeContextService(MultiTimeframeContextService):
     def __init__(self, feed: HistoricalScannerReplayFeed) -> None:
         self.feed = feed
 
-    def _load_bulk(self, symbol: str, *, as_of: datetime | None = None) -> dict[str, list[Candle]]:
+    def _load_bulk(
+        self, symbol: str, *, as_of: datetime | None = None
+    ) -> dict[str, list[Candle]]:
         return {
             "1minute": self.feed.candles_for_timeframe("1minute", limit=80),
             "5minute": self.feed.candles_for_timeframe("5minute", limit=80),
@@ -604,16 +821,34 @@ class BacktestService:
         "baseline": {},
         "without_rsi": {"disabled": {"rsi"}},
         "without_macd": {"disabled": {"macd"}},
-        "without_adx": {"unsupported": "ADX is not stored in historical candle backtest inputs yet."},
-        "without_pcr": {"unsupported": "PCR is option-chain context and not part of candle replay yet."},
-        "without_max_pain": {"unsupported": "Max pain is option-chain context and not part of candle replay yet."},
-        "without_nifty_context": {"unsupported": "Nifty context is live scanner context and not part of single-symbol replay yet."},
-        "without_vix_context": {"unsupported": "VIX context is live scanner context and not part of single-symbol replay yet."},
-        "without_premium_confirmation": {"unsupported": "Premium confirmation requires live/stored option premium snapshots, not underlying-only signals."},
+        "without_adx": {
+            "unsupported": "ADX is not stored in historical candle backtest inputs yet."
+        },
+        "without_pcr": {
+            "unsupported": "PCR is option-chain context and not part of candle replay yet."
+        },
+        "without_max_pain": {
+            "unsupported": "Max pain is option-chain context and not part of candle replay yet."
+        },
+        "without_nifty_context": {
+            "unsupported": "Nifty context is live scanner context and not part of single-symbol replay yet."
+        },
+        "without_vix_context": {
+            "unsupported": "VIX context is live scanner context and not part of single-symbol replay yet."
+        },
+        "without_premium_confirmation": {
+            "unsupported": "Premium confirmation requires live/stored option premium snapshots, not underlying-only signals."
+        },
         "without_candle_confirmation": {"disabled": {"breakout"}},
-        "without_day_type_hard_gate": {"unsupported": "Day-type hard gate uses intraday context and is not represented in this option premium replay."},
-        "only_vwap_premium_quality": {"unsupported": "VWAP/premium/quality ablation needs stored VWAP and option-quality snapshots."},
-        "only_trend_quality_premium": {"unsupported": "Quality and premium confirmation are not fully represented in this candle signal replay."},
+        "without_day_type_hard_gate": {
+            "unsupported": "Day-type hard gate uses intraday context and is not represented in this option premium replay."
+        },
+        "only_vwap_premium_quality": {
+            "unsupported": "VWAP/premium/quality ablation needs stored VWAP and option-quality snapshots."
+        },
+        "only_trend_quality_premium": {
+            "unsupported": "Quality and premium confirmation are not fully represented in this candle signal replay."
+        },
     }
     SUPPORTED_TIMEFRAMES = {"1minute", "5minute"}
 
@@ -631,7 +866,9 @@ class BacktestService:
         side = side.upper()
         direction = (direction or "BOTH").upper()
         horizon = horizon_candles or settings.backtest_horizon_candles
-        candles = self._load_candles(symbol=symbol.upper(), timeframe=timeframe, limit=limit)
+        candles = self._load_candles(
+            symbol=symbol.upper(), timeframe=timeframe, limit=limit
+        )
         if len(candles) < 60:
             return {
                 "status": "insufficient_data",
@@ -722,9 +959,16 @@ class BacktestService:
         horizon = horizon_candles or settings.backtest_horizon_candles
         underlying = self._load_candles(symbol=symbol, timeframe=timeframe, limit=limit)
         if len(underlying) < 60:
-            return {"status": "insufficient_data", "symbol": symbol, "candles": len(underlying), "minimum_required": 60}
+            return {
+                "status": "insufficient_data",
+                "symbol": symbol,
+                "candles": len(underlying),
+                "minimum_required": 60,
+            }
 
-        option_candles = self._load_option_candles(underlying=symbol, timeframe=timeframe)
+        option_candles = self._load_option_candles(
+            underlying=symbol, timeframe=timeframe
+        )
         if not option_candles:
             return {
                 "status": "insufficient_option_data",
@@ -742,7 +986,9 @@ class BacktestService:
                 option_candles=option_candles,
             )
 
-        signals = self._signals_from_underlying(underlying, direction=direction, horizon=horizon)
+        signals = self._signals_from_underlying(
+            underlying, direction=direction, horizon=horizon
+        )
         trades: list[OptionBacktestTrade] = []
         for idx, signal_direction, reason in signals:
             trade = self._simulate_option_trade(
@@ -797,7 +1043,12 @@ class BacktestService:
         requested_folds = max(1, int(settings.walk_forward_folds))
         minimum = min_train + embargo + min_validation
         if len(candles) < minimum:
-            return {"status": "insufficient_data", "symbol": symbol, "candles": len(candles), "minimum_required": minimum}
+            return {
+                "status": "insufficient_data",
+                "symbol": symbol,
+                "candles": len(candles),
+                "minimum_required": minimum,
+            }
 
         available = len(candles) - min_train - embargo
         fold_count = min(requested_folds, max(1, available // min_validation))
@@ -807,22 +1058,40 @@ class BacktestService:
         last_train_summary: dict[str, Any] = {}
         for fold_index in range(fold_count):
             validation_start = min_train + embargo + (fold_index * validation_size)
-            validation_end = len(candles) if fold_index == fold_count - 1 else min(len(candles), validation_start + validation_size)
+            validation_end = (
+                len(candles)
+                if fold_index == fold_count - 1
+                else min(len(candles), validation_start + validation_size)
+            )
             if validation_end - validation_start < min_validation:
                 continue
             train_end = validation_start - embargo
             train_slice = candles[:train_end]
             validation_slice = candles[validation_start:validation_end]
             train_result = self._run_option_premium_on_candles(
-                symbol=symbol, timeframe=timeframe, direction=direction, horizon=horizon, underlying=train_slice, decision_mode=decision_mode
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=direction,
+                horizon=horizon,
+                underlying=train_slice,
+                decision_mode=decision_mode,
             )
             validation_result = self._run_option_premium_on_candles(
-                symbol=symbol, timeframe=timeframe, direction=direction, horizon=horizon, underlying=validation_slice, decision_mode=decision_mode
+                symbol=symbol,
+                timeframe=timeframe,
+                direction=direction,
+                horizon=horizon,
+                underlying=validation_slice,
+                decision_mode=decision_mode,
             )
             last_train_summary = train_result.get("summary", {})
-            fold_passed, fold_reasons = self._validation_passed(validation_result.get("summary", {}))
+            fold_passed, fold_reasons = self._validation_passed(
+                validation_result.get("summary", {})
+            )
             validation_sessions.update(
-                candle.timestamp.date().isoformat() for candle in validation_slice if getattr(candle, "timestamp", None) is not None
+                candle.timestamp.date().isoformat()
+                for candle in validation_slice
+                if getattr(candle, "timestamp", None) is not None
             )
             folds.append(
                 {
@@ -830,30 +1099,46 @@ class BacktestService:
                     "train_candles": len(train_slice),
                     "embargo_candles": embargo,
                     "validation_candles": len(validation_slice),
-                    "train_end": train_slice[-1].timestamp.isoformat(sep=" ") if train_slice else None,
-                    "validation_start": validation_slice[0].timestamp.isoformat(sep=" ") if validation_slice else None,
-                    "validation_end": validation_slice[-1].timestamp.isoformat(sep=" ") if validation_slice else None,
+                    "train_end": train_slice[-1].timestamp.isoformat(sep=" ")
+                    if train_slice
+                    else None,
+                    "validation_start": validation_slice[0].timestamp.isoformat(sep=" ")
+                    if validation_slice
+                    else None,
+                    "validation_end": validation_slice[-1].timestamp.isoformat(sep=" ")
+                    if validation_slice
+                    else None,
                     "summary": validation_result.get("summary", {}),
                     "segments": validation_result.get("segments", {}),
                     "passed": fold_passed,
                     "reasons": fold_reasons,
                 }
             )
-        aggregate = self._aggregate_walk_forward_summaries([fold["summary"] for fold in folds])
-        aggregate_segments = self._aggregate_walk_forward_segments([fold.get("segments", {}) for fold in folds])
+        aggregate = self._aggregate_walk_forward_summaries(
+            [fold["summary"] for fold in folds]
+        )
+        aggregate_segments = self._aggregate_walk_forward_segments(
+            [fold.get("segments", {}) for fold in folds]
+        )
         aggregate["expectancy_confidence_interval_95"] = self._fold_confidence_interval(
             [float(fold["summary"].get("expectancy_pct") or 0.0) for fold in folds]
         )
         passed, reasons = self._validation_passed(aggregate)
         if len(folds) < settings.readiness_min_validation_folds:
             passed = False
-            reasons.append(f"requires at least {settings.readiness_min_validation_folds} completed validation folds")
+            reasons.append(
+                f"requires at least {settings.readiness_min_validation_folds} completed validation folds"
+            )
         if int(aggregate.get("trades") or 0) < settings.readiness_min_oos_trades:
             passed = False
-            reasons.append(f"requires at least {settings.readiness_min_oos_trades} independent out-of-sample trades")
+            reasons.append(
+                f"requires at least {settings.readiness_min_oos_trades} independent out-of-sample trades"
+            )
         if len(validation_sessions) < settings.readiness_min_oos_sessions:
             passed = False
-            reasons.append(f"requires at least {settings.readiness_min_oos_sessions} out-of-sample sessions")
+            reasons.append(
+                f"requires at least {settings.readiness_min_oos_sessions} out-of-sample sessions"
+            )
         regime_stability = self._walk_forward_regime_stability(aggregate_segments)
         if not regime_stability["passed"]:
             passed = False
@@ -888,8 +1173,12 @@ class BacktestService:
             },
         }
 
-    def _aggregate_walk_forward_segments(self, fold_segments: list[dict[str, Any]]) -> dict[str, Any]:
-        dimensions = {str(name) for segments in fold_segments for name in (segments or {})}
+    def _aggregate_walk_forward_segments(
+        self, fold_segments: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        dimensions = {
+            str(name) for segments in fold_segments for name in (segments or {})
+        }
         result: dict[str, Any] = {}
         for dimension in sorted(dimensions):
             groups = {
@@ -902,14 +1191,17 @@ class BacktestService:
                     [
                         segments[dimension][group]
                         for segments in fold_segments
-                        if isinstance((segments or {}).get(dimension), dict) and group in segments[dimension]
+                        if isinstance((segments or {}).get(dimension), dict)
+                        and group in segments[dimension]
                     ]
                 )
                 for group in sorted(groups)
             }
         return result
 
-    def _walk_forward_regime_stability(self, segments: dict[str, Any]) -> dict[str, Any]:
+    def _walk_forward_regime_stability(
+        self, segments: dict[str, Any]
+    ) -> dict[str, Any]:
         required: list[tuple[str, str]] = [
             ("market_regime", "trend"),
             ("market_regime", "range"),
@@ -921,7 +1213,11 @@ class BacktestService:
         checks: dict[str, Any] = {}
         reasons: list[str] = []
         for dimension, bucket in required:
-            summary = ((segments.get(dimension) or {}).get(bucket) or {}) if isinstance(segments.get(dimension), dict) else {}
+            summary = (
+                ((segments.get(dimension) or {}).get(bucket) or {})
+                if isinstance(segments.get(dimension), dict)
+                else {}
+            )
             trades = int(summary.get("trades") or 0)
             expectancy = float(summary.get("expectancy_pct") or 0.0)
             profit_factor = summary.get("profit_factor")
@@ -945,16 +1241,27 @@ class BacktestService:
             if not passed:
                 reasons.append(f"regime stability is unproven for {key}")
         if settings.block_expiry_day_option_buying:
-            checks["expiry_day:expiry_day"] = {"passed": True, "status": "excluded_by_entry_policy"}
+            checks["expiry_day:expiry_day"] = {
+                "passed": True,
+                "status": "excluded_by_entry_policy",
+            }
         return {"passed": not reasons, "checks": checks, "reasons": reasons}
 
-    def _aggregate_walk_forward_summaries(self, summaries: list[dict[str, Any]]) -> dict[str, Any]:
+    def _aggregate_walk_forward_summaries(
+        self, summaries: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         trades = sum(int(item.get("trades") or 0) for item in summaries)
         wins = sum(int(item.get("wins") or 0) for item in summaries)
         losses = sum(int(item.get("losses") or 0) for item in summaries)
         net = sum(float(item.get("net_pnl_pct") or 0.0) for item in summaries)
-        gross_win = sum(float(item.get("average_win_pct") or 0.0) * int(item.get("wins") or 0) for item in summaries)
-        gross_loss = sum(float(item.get("average_loss_pct") or 0.0) * int(item.get("losses") or 0) for item in summaries)
+        gross_win = sum(
+            float(item.get("average_win_pct") or 0.0) * int(item.get("wins") or 0)
+            for item in summaries
+        )
+        gross_loss = sum(
+            float(item.get("average_loss_pct") or 0.0) * int(item.get("losses") or 0)
+            for item in summaries
+        )
         return {
             "trades": trades,
             "wins": wins,
@@ -965,14 +1272,28 @@ class BacktestService:
             "expectancy_pct": round(net / trades, 3) if trades else 0.0,
             "net_pnl_pct": round(net, 3),
             "profit_factor": round(gross_win / gross_loss, 2) if gross_loss else None,
-            "max_drawdown_pct": max((float(item.get("max_drawdown_pct") or 0.0) for item in summaries), default=0.0),
+            "max_drawdown_pct": max(
+                (float(item.get("max_drawdown_pct") or 0.0) for item in summaries),
+                default=0.0,
+            ),
         }
 
-    def _fold_confidence_interval(self, values: list[float]) -> dict[str, float | int | str | None]:
+    def _fold_confidence_interval(
+        self, values: list[float]
+    ) -> dict[str, float | int | str | None]:
         if not values:
-            return {"lower": None, "upper": None, "folds": 0, "method": "normal_fold_mean"}
+            return {
+                "lower": None,
+                "upper": None,
+                "folds": 0,
+                "method": "normal_fold_mean",
+            }
         center = statistics.mean(values)
-        margin = 0.0 if len(values) < 2 else 1.96 * statistics.stdev(values) / math.sqrt(len(values))
+        margin = (
+            0.0
+            if len(values) < 2
+            else 1.96 * statistics.stdev(values) / math.sqrt(len(values))
+        )
         return {
             "lower": round(center - margin, 4),
             "upper": round(center + margin, 4),
@@ -995,16 +1316,30 @@ class BacktestService:
         horizon = horizon_candles or settings.backtest_horizon_candles
         underlying = self._load_candles(symbol=symbol, timeframe=timeframe, limit=limit)
         if len(underlying) < 60:
-            return {"status": "insufficient_data", "symbol": symbol, "candles": len(underlying), "minimum_required": 60}
-        option_candles = self._load_option_candles(underlying=symbol, timeframe=timeframe)
+            return {
+                "status": "insufficient_data",
+                "symbol": symbol,
+                "candles": len(underlying),
+                "minimum_required": 60,
+            }
+        option_candles = self._load_option_candles(
+            underlying=symbol, timeframe=timeframe
+        )
         if not option_candles:
-            return {"status": "insufficient_option_data", "symbol": symbol, "message": "No stored option premium candles found for ablation replay."}
+            return {
+                "status": "insufficient_option_data",
+                "symbol": symbol,
+                "message": "No stored option premium candles found for ablation replay.",
+            }
 
         variants: dict[str, Any] = {}
         baseline_summary: dict[str, Any] | None = None
         for name, config in self.ABLATION_VARIANTS.items():
             if config.get("unsupported"):
-                variants[name] = {"status": "unsupported", "reason": config["unsupported"]}
+                variants[name] = {
+                    "status": "unsupported",
+                    "reason": config["unsupported"],
+                }
                 continue
             signals = self._signals_from_underlying(
                 underlying,
@@ -1015,7 +1350,16 @@ class BacktestService:
             trades = [
                 trade
                 for idx, signal_direction, reason in signals
-                if (trade := self._simulate_option_trade(underlying=underlying, option_candles=option_candles, idx=idx, direction=signal_direction, horizon=horizon, reason=f"{name}: {reason}"))
+                if (
+                    trade := self._simulate_option_trade(
+                        underlying=underlying,
+                        option_candles=option_candles,
+                        idx=idx,
+                        direction=signal_direction,
+                        horizon=horizon,
+                        reason=f"{name}: {reason}",
+                    )
+                )
                 is not None
             ]
             variants[name] = {
@@ -1030,7 +1374,9 @@ class BacktestService:
             for name, result in variants.items():
                 if result.get("status") != "ok":
                     continue
-                result["impact_vs_baseline"] = self._ablation_impact(baseline_summary, result.get("summary", {}))
+                result["impact_vs_baseline"] = self._ablation_impact(
+                    baseline_summary, result.get("summary", {})
+                )
         return {
             "status": "ok",
             "mode": "ablation_option_replay",
@@ -1053,7 +1399,12 @@ class BacktestService:
         option_candles: dict[str, list[Candle]],
     ) -> dict[str, Any]:
         if len(underlying) < 60:
-            return {"status": "insufficient_data", "symbol": symbol, "candles": len(underlying), "minimum_required": 60}
+            return {
+                "status": "insufficient_data",
+                "symbol": symbol,
+                "candles": len(underlying),
+                "minimum_required": 60,
+            }
         feed = HistoricalScannerReplayFeed(
             symbol=symbol,
             timeframe=timeframe,
@@ -1063,10 +1414,16 @@ class BacktestService:
             underlying_timeframes={
                 "1minute": underlying
                 if timeframe == "1minute"
-                else self._load_candles(symbol=symbol, timeframe="1minute", limit=max(3000, len(underlying) * 5)),
+                else self._load_candles(
+                    symbol=symbol,
+                    timeframe="1minute",
+                    limit=max(3000, len(underlying) * 5),
+                ),
                 "5minute": underlying
                 if timeframe == "5minute"
-                else self._load_candles(symbol=symbol, timeframe="5minute", limit=max(1000, len(underlying))),
+                else self._load_candles(
+                    symbol=symbol, timeframe="5minute", limit=max(1000, len(underlying))
+                ),
             },
         )
         scanner = self._historical_scanner(feed)
@@ -1095,7 +1452,9 @@ class BacktestService:
             signal = row.get("signal")
             if signal is not None and not self._direction_allowed(signal, direction):
                 rejected += 1
-                rejection_reasons["direction_filtered"] = rejection_reasons.get("direction_filtered", 0) + 1
+                rejection_reasons["direction_filtered"] = (
+                    rejection_reasons.get("direction_filtered", 0) + 1
+                )
                 continue
             if signal is None:
                 rejected += 1
@@ -1143,7 +1502,11 @@ class BacktestService:
             "decisions_scanned": decisions_scanned,
             "accepted_signals": accepted,
             "rejected_decisions": rejected,
-            "rejection_reasons": dict(sorted(rejection_reasons.items(), key=lambda item: item[1], reverse=True)[:20]),
+            "rejection_reasons": dict(
+                sorted(
+                    rejection_reasons.items(), key=lambda item: item[1], reverse=True
+                )[:20]
+            ),
             "summary": summary,
             "segments": self._segment_option_trades(trades, timeframe=timeframe),
             "examples": [trade.to_dict() for trade in trades[-20:]],
@@ -1164,7 +1527,9 @@ class BacktestService:
             trade_setup_service=BacktestTradeSetupService(feed),
             market_regime_service=BacktestMarketRegimeService(feed),
             day_type_service=BacktestDayTypeService(feed),
-            option_premium_confirmation_service=BacktestPremiumConfirmationService(feed),
+            option_premium_confirmation_service=BacktestPremiumConfirmationService(
+                feed
+            ),
             option_quality_service=OptionQualityService(BacktestGreeksService(feed)),
             banknifty_intelligence_service=BacktestBankNiftyIntelligenceService(feed),
             multi_timeframe_context_service=BacktestMultiTimeframeContextService(feed),
@@ -1179,7 +1544,9 @@ class BacktestService:
 
     def _require_supported_timeframe(self, timeframe: str) -> None:
         if str(timeframe) not in self.SUPPORTED_TIMEFRAMES:
-            raise ValueError("strategy replay supports only 1minute and 5minute candles")
+            raise ValueError(
+                "strategy replay supports only 1minute and 5minute candles"
+            )
 
     def _simulate_option_trade_from_signal(
         self,
@@ -1203,7 +1570,9 @@ class BacktestService:
         if entry_raw <= 0 or stop <= 0 or target <= entry_raw:
             return None
         realism = ExecutionRealismService()
-        expiry = self._parse_expiry_from_symbol(tradingsymbol, idx_timestamp.isoformat())
+        expiry = self._parse_expiry_from_symbol(
+            tradingsymbol, idx_timestamp.isoformat()
+        )
         if settings.enable_execution_realism:
             entry_fill = realism.entry_fill(
                 intended_price=entry_raw,
@@ -1213,7 +1582,10 @@ class BacktestService:
             )
             entry = entry_fill.fill_price
         else:
-            entry_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
+            entry_friction_pct = (
+                settings.backtest_slippage_pct
+                + settings.paper_spread_impact_pct_per_side
+            )
             entry_fill = None
             entry = entry_raw * (1 + entry_friction_pct / 100)
         entry_timestamp = self._candle_timestamp(series[option_idx], idx_timestamp)
@@ -1229,12 +1601,17 @@ class BacktestService:
                 side="BUY",
                 outcome="time_exit",
                 candle=final_candle,
-                timestamp=final_candle.timestamp if isinstance(final_candle.timestamp, datetime) else idx_timestamp,
+                timestamp=final_candle.timestamp
+                if isinstance(final_candle.timestamp, datetime)
+                else idx_timestamp,
                 expiry=expiry.date() if expiry else None,
             )
             exit_price = exit_fill.fill_price
         else:
-            exit_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
+            exit_friction_pct = (
+                settings.backtest_slippage_pct
+                + settings.paper_spread_impact_pct_per_side
+            )
             exit_fill = None
             exit_price = intended_exit * (1 - exit_friction_pct / 100)
         outcome = "expired"
@@ -1243,14 +1620,16 @@ class BacktestService:
             candle = series[option_idx + offset]
             low = float(candle.low_price)
             high = float(candle.high_price)
-            high_water, low_water, mfe_timestamp, mae_timestamp = self._observe_option_excursion(
-                entry=entry,
-                high_water=high_water,
-                low_water=low_water,
-                mfe_timestamp=mfe_timestamp,
-                mae_timestamp=mae_timestamp,
-                candle=candle,
-                fallback_timestamp=idx_timestamp,
+            high_water, low_water, mfe_timestamp, mae_timestamp = (
+                self._observe_option_excursion(
+                    entry=entry,
+                    high_water=high_water,
+                    low_water=low_water,
+                    mfe_timestamp=mfe_timestamp,
+                    mae_timestamp=mae_timestamp,
+                    candle=candle,
+                    fallback_timestamp=idx_timestamp,
+                )
             )
             if low <= stop:
                 intended_exit = stop
@@ -1260,7 +1639,9 @@ class BacktestService:
                         side="BUY",
                         outcome="stop_loss",
                         candle=candle,
-                        timestamp=candle.timestamp if isinstance(candle.timestamp, datetime) else idx_timestamp,
+                        timestamp=candle.timestamp
+                        if isinstance(candle.timestamp, datetime)
+                        else idx_timestamp,
                         expiry=expiry.date() if expiry else None,
                     )
                     exit_price = exit_fill.fill_price
@@ -1277,7 +1658,9 @@ class BacktestService:
                         side="BUY",
                         outcome="target",
                         candle=candle,
-                        timestamp=candle.timestamp if isinstance(candle.timestamp, datetime) else idx_timestamp,
+                        timestamp=candle.timestamp
+                        if isinstance(candle.timestamp, datetime)
+                        else idx_timestamp,
                         expiry=expiry.date() if expiry else None,
                     )
                     if not exit_fill.filled:
@@ -1291,7 +1674,9 @@ class BacktestService:
         gross_pnl_pct = ((exit_price - entry) / entry) * 100
         charges_pct = settings.backtest_charges_pct
         pnl_pct = gross_pnl_pct - charges_pct
-        option_type = "CALL" if str(signal.action or "").upper().endswith("CE") else "PUT"
+        option_type = (
+            "CALL" if str(signal.action or "").upper().endswith("CE") else "PUT"
+        )
         market_regime = self._validation_regime_from_signal(signal)
         event_day = self._is_configured_event_timestamp(idx_timestamp)
         return OptionBacktestTrade(
@@ -1313,7 +1698,12 @@ class BacktestService:
             event_day=event_day,
             intended_entry_price=round(entry_raw, 2),
             intended_exit_price=round(intended_exit, 2),
-            execution_price_impact_pct=round(((entry - entry_raw) + (intended_exit - exit_price)) / max(entry_raw, 0.01) * 100, 3),
+            execution_price_impact_pct=round(
+                ((entry - entry_raw) + (intended_exit - exit_price))
+                / max(entry_raw, 0.01)
+                * 100,
+                3,
+            ),
             execution_realism={
                 "entry_fill": entry_fill.to_dict() if entry_fill else None,
                 "exit_fill": exit_fill.to_dict() if exit_fill else None,
@@ -1328,7 +1718,9 @@ class BacktestService:
             ),
         )
 
-    def _load_option_snapshots(self, option_candles: dict[str, list[Candle]]) -> dict[str, list[OptionQuoteSnapshot]]:
+    def _load_option_snapshots(
+        self, option_candles: dict[str, list[Candle]]
+    ) -> dict[str, list[OptionQuoteSnapshot]]:
         if not option_candles:
             return {}
         symbols = list(option_candles.keys())
@@ -1337,7 +1729,10 @@ class BacktestService:
             rows = (
                 session.query(OptionQuoteSnapshot)
                 .filter(OptionQuoteSnapshot.tradingsymbol.in_(symbols))
-                .order_by(OptionQuoteSnapshot.tradingsymbol.asc(), OptionQuoteSnapshot.timestamp.asc())
+                .order_by(
+                    OptionQuoteSnapshot.tradingsymbol.asc(),
+                    OptionQuoteSnapshot.timestamp.asc(),
+                )
                 .all()
             )
             grouped: dict[str, list[OptionQuoteSnapshot]] = {}
@@ -1360,7 +1755,11 @@ class BacktestService:
     def _decision_example(self, row: dict[str, Any]) -> dict[str, Any]:
         signal = row.get("signal")
         return {
-            "timestamp": row.get("factor_scores", {}).get("strategy_metadata", {}).get("generated_at") if isinstance(row.get("factor_scores"), dict) else None,
+            "timestamp": row.get("factor_scores", {})
+            .get("strategy_metadata", {})
+            .get("generated_at")
+            if isinstance(row.get("factor_scores"), dict)
+            else None,
             "passed": bool(row.get("passed")),
             "score": row.get("score"),
             "trend": row.get("trend"),
@@ -1382,9 +1781,14 @@ class BacktestService:
         underlying: list[Candle],
         decision_mode: str = "scanner_parity",
     ) -> dict[str, Any]:
-        option_candles = self._load_option_candles(underlying=symbol, timeframe=timeframe)
+        option_candles = self._load_option_candles(
+            underlying=symbol, timeframe=timeframe
+        )
         if not option_candles:
-            return {"summary": self._summarize_option_trades([], timeframe=timeframe), "examples": []}
+            return {
+                "summary": self._summarize_option_trades([], timeframe=timeframe),
+                "examples": [],
+            }
         if decision_mode != "legacy":
             return self._run_scanner_parity_option_premium(
                 symbol=symbol,
@@ -1394,11 +1798,22 @@ class BacktestService:
                 underlying=underlying,
                 option_candles=option_candles,
             )
-        signals = self._signals_from_underlying(underlying, direction=direction, horizon=horizon)
+        signals = self._signals_from_underlying(
+            underlying, direction=direction, horizon=horizon
+        )
         trades = [
             trade
             for idx, signal_direction, reason in signals
-            if (trade := self._simulate_option_trade(underlying=underlying, option_candles=option_candles, idx=idx, direction=signal_direction, horizon=horizon, reason=reason))
+            if (
+                trade := self._simulate_option_trade(
+                    underlying=underlying,
+                    option_candles=option_candles,
+                    idx=idx,
+                    direction=signal_direction,
+                    horizon=horizon,
+                    reason=reason,
+                )
+            )
             is not None
         ]
         return {
@@ -1421,12 +1836,17 @@ class BacktestService:
         finally:
             session.close()
 
-    def _load_option_candles(self, *, underlying: str, timeframe: str) -> dict[str, list[Candle]]:
+    def _load_option_candles(
+        self, *, underlying: str, timeframe: str
+    ) -> dict[str, list[Candle]]:
         session = get_session()
         try:
             rows = (
                 session.query(Candle)
-                .filter(Candle.symbol.like(f"{underlying.upper()}%"), Candle.timeframe == timeframe)
+                .filter(
+                    Candle.symbol.like(f"{underlying.upper()}%"),
+                    Candle.timeframe == timeframe,
+                )
                 .order_by(Candle.symbol.asc(), Candle.timestamp.asc())
                 .all()
             )
@@ -1438,7 +1858,14 @@ class BacktestService:
         finally:
             session.close()
 
-    def _signals_from_underlying(self, candles: list[Candle], *, direction: str, horizon: int, disabled_factors: set[str] | None = None) -> list[tuple[int, str, str]]:
+    def _signals_from_underlying(
+        self,
+        candles: list[Candle],
+        *,
+        direction: str,
+        horizon: int,
+        disabled_factors: set[str] | None = None,
+    ) -> list[tuple[int, str, str]]:
         closes = [float(item.close_price) for item in candles]
         highs = [float(item.high_price) for item in candles]
         lows = [float(item.low_price) for item in candles]
@@ -1510,27 +1937,29 @@ class BacktestService:
         volume_call = "volume" in disabled_factors or volume_ok
         volume_put = "volume" in disabled_factors or volume_ok
 
-        bullish = (
-            breakout_call
-            and ema_call
-            and macd_call
-            and rsi_call
-            and volume_call
-        )
-        bearish = (
-            breakout_put
-            and ema_put
-            and macd_put
-            and rsi_put
-            and volume_put
-        )
+        bullish = breakout_call and ema_call and macd_call and rsi_call and volume_call
+        bearish = breakout_put and ema_put and macd_put and rsi_put and volume_put
         if bullish:
-            return "CALL", "breakout with EMA alignment, MACD confirmation, RSI room, and volume expansion"
+            return (
+                "CALL",
+                "breakout with EMA alignment, MACD confirmation, RSI room, and volume expansion",
+            )
         if bearish:
-            return "PUT", "breakdown with EMA alignment, MACD confirmation, RSI room, and volume expansion"
+            return (
+                "PUT",
+                "breakdown with EMA alignment, MACD confirmation, RSI room, and volume expansion",
+            )
         return None, ""
 
-    def _simulate_trade(self, *, candles: list[Candle], idx: int, direction: str, horizon: int, reason: str) -> BacktestTrade:
+    def _simulate_trade(
+        self,
+        *,
+        candles: list[Candle],
+        idx: int,
+        direction: str,
+        horizon: int,
+        reason: str,
+    ) -> BacktestTrade:
         entry = float(candles[idx].close_price)
         target_pct = 0.0065
         stop_pct = 0.0045
@@ -1603,7 +2032,9 @@ class BacktestService:
         option_type = "CE" if direction == "CALL" else "PE"
         timestamp = underlying[idx].timestamp
         spot = float(underlying[idx].close_price)
-        selected_symbol = self._select_option_symbol(option_candles, option_type=option_type, spot=spot, timestamp=timestamp)
+        selected_symbol = self._select_option_symbol(
+            option_candles, option_type=option_type, spot=spot, timestamp=timestamp
+        )
         if selected_symbol is None:
             return None
         series = option_candles[selected_symbol]
@@ -1615,7 +2046,12 @@ class BacktestService:
         if entry_raw <= 0:
             return None
         realism = ExecutionRealismService()
-        expiry = self._parse_expiry_from_symbol(selected_symbol, timestamp.isoformat(sep=" ") if isinstance(timestamp, datetime) else str(timestamp))
+        expiry = self._parse_expiry_from_symbol(
+            selected_symbol,
+            timestamp.isoformat(sep=" ")
+            if isinstance(timestamp, datetime)
+            else str(timestamp),
+        )
         if settings.enable_execution_realism:
             entry_fill = realism.entry_fill(
                 intended_price=entry_raw,
@@ -1625,10 +2061,15 @@ class BacktestService:
             )
             entry = entry_fill.fill_price
         else:
-            entry_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
+            entry_friction_pct = (
+                settings.backtest_slippage_pct
+                + settings.paper_spread_impact_pct_per_side
+            )
             entry_fill = None
             entry = entry_raw * (1 + entry_friction_pct / 100)
-        entry_timestamp = self._candle_timestamp(series[option_idx], timestamp if isinstance(timestamp, datetime) else None)
+        entry_timestamp = self._candle_timestamp(
+            series[option_idx], timestamp if isinstance(timestamp, datetime) else None
+        )
         high_water = entry
         low_water = entry
         mfe_timestamp = entry_timestamp
@@ -1643,12 +2084,17 @@ class BacktestService:
                 side="BUY",
                 outcome="time_exit",
                 candle=final_candle,
-                timestamp=final_candle.timestamp if isinstance(final_candle.timestamp, datetime) else None,
+                timestamp=final_candle.timestamp
+                if isinstance(final_candle.timestamp, datetime)
+                else None,
                 expiry=expiry.date() if expiry else None,
             )
             exit_price = exit_fill.fill_price
         else:
-            exit_friction_pct = settings.backtest_slippage_pct + settings.paper_spread_impact_pct_per_side
+            exit_friction_pct = (
+                settings.backtest_slippage_pct
+                + settings.paper_spread_impact_pct_per_side
+            )
             exit_fill = None
             exit_price = intended_exit * (1 - exit_friction_pct / 100)
         outcome = "expired"
@@ -1658,14 +2104,18 @@ class BacktestService:
             candle = series[option_idx + offset]
             low = float(candle.low_price)
             high = float(candle.high_price)
-            high_water, low_water, mfe_timestamp, mae_timestamp = self._observe_option_excursion(
-                entry=entry,
-                high_water=high_water,
-                low_water=low_water,
-                mfe_timestamp=mfe_timestamp,
-                mae_timestamp=mae_timestamp,
-                candle=candle,
-                fallback_timestamp=timestamp if isinstance(timestamp, datetime) else None,
+            high_water, low_water, mfe_timestamp, mae_timestamp = (
+                self._observe_option_excursion(
+                    entry=entry,
+                    high_water=high_water,
+                    low_water=low_water,
+                    mfe_timestamp=mfe_timestamp,
+                    mae_timestamp=mae_timestamp,
+                    candle=candle,
+                    fallback_timestamp=timestamp
+                    if isinstance(timestamp, datetime)
+                    else None,
+                )
             )
             if low <= stop:
                 intended_exit = stop
@@ -1675,7 +2125,9 @@ class BacktestService:
                         side="BUY",
                         outcome="stop_loss",
                         candle=candle,
-                        timestamp=candle.timestamp if isinstance(candle.timestamp, datetime) else None,
+                        timestamp=candle.timestamp
+                        if isinstance(candle.timestamp, datetime)
+                        else None,
                         expiry=expiry.date() if expiry else None,
                     )
                     exit_price = exit_fill.fill_price
@@ -1692,7 +2144,9 @@ class BacktestService:
                         side="BUY",
                         outcome="target",
                         candle=candle,
-                        timestamp=candle.timestamp if isinstance(candle.timestamp, datetime) else None,
+                        timestamp=candle.timestamp
+                        if isinstance(candle.timestamp, datetime)
+                        else None,
                         expiry=expiry.date() if expiry else None,
                     )
                     if not exit_fill.filled:
@@ -1708,7 +2162,9 @@ class BacktestService:
         charges_pct = settings.backtest_charges_pct
         pnl_pct = gross_pnl_pct - charges_pct
         return OptionBacktestTrade(
-            timestamp=timestamp.isoformat(sep=" ") if isinstance(timestamp, datetime) else str(timestamp),
+            timestamp=timestamp.isoformat(sep=" ")
+            if isinstance(timestamp, datetime)
+            else str(timestamp),
             direction=direction,
             underlying_entry=round(spot, 2),
             tradingsymbol=selected_symbol,
@@ -1726,7 +2182,12 @@ class BacktestService:
             event_day=self._is_configured_event_timestamp(timestamp),
             intended_entry_price=round(entry_raw, 2),
             intended_exit_price=round(intended_exit, 2),
-            execution_price_impact_pct=round(((entry - entry_raw) + (intended_exit - exit_price)) / max(entry_raw, 0.01) * 100, 3),
+            execution_price_impact_pct=round(
+                ((entry - entry_raw) + (intended_exit - exit_price))
+                / max(entry_raw, 0.01)
+                * 100,
+                3,
+            ),
             execution_realism={
                 "entry_fill": entry_fill.to_dict() if entry_fill else None,
                 "exit_fill": exit_fill.to_dict() if exit_fill else None,
@@ -1787,8 +2248,12 @@ class BacktestService:
             "mfe_percent": round((mfe_points / entry) * 100, 4),
             "mae_points": round(mae_points, 4),
             "mae_percent": round((mae_points / entry) * 100, 4),
-            "time_to_mfe": round(max(0.0, (mfe_timestamp - entry_timestamp).total_seconds()), 3),
-            "time_to_mae": round(max(0.0, (mae_timestamp - entry_timestamp).total_seconds()), 3),
+            "time_to_mfe": round(
+                max(0.0, (mfe_timestamp - entry_timestamp).total_seconds()), 3
+            ),
+            "time_to_mae": round(
+                max(0.0, (mae_timestamp - entry_timestamp).total_seconds()), 3
+            ),
             "mfe_recorded_at": mfe_timestamp.isoformat(sep=" "),
             "mae_recorded_at": mae_timestamp.isoformat(sep=" "),
         }
@@ -1837,10 +2302,14 @@ class BacktestService:
             "expectancy_pct": round((gross_win - gross_loss) / len(trades), 3),
             "profit_factor": round(gross_win / gross_loss, 2) if gross_loss else None,
             "max_drawdown_pct": round(max_drawdown, 3),
-            "avg_bars_held": round(sum(trade.bars_held for trade in trades) / len(trades), 2),
+            "avg_bars_held": round(
+                sum(trade.bars_held for trade in trades) / len(trades), 2
+            ),
         }
 
-    def _summarize_option_trades(self, trades: list[OptionBacktestTrade], timeframe: str = "5minute") -> dict[str, Any]:
+    def _summarize_option_trades(
+        self, trades: list[OptionBacktestTrade], timeframe: str = "5minute"
+    ) -> dict[str, Any]:
         if not trades:
             return {
                 "trades": 0,
@@ -1870,14 +2339,26 @@ class BacktestService:
         losses = [trade for trade in trades if trade.pnl_pct < 0]
         gross_win = sum(trade.pnl_pct for trade in wins)
         gross_loss = abs(sum(trade.pnl_pct for trade in losses))
-        raw_gross_win = sum(trade.gross_pnl_pct for trade in trades if trade.gross_pnl_pct > 0)
-        raw_gross_loss = abs(sum(trade.gross_pnl_pct for trade in trades if trade.gross_pnl_pct < 0))
+        raw_gross_win = sum(
+            trade.gross_pnl_pct for trade in trades if trade.gross_pnl_pct > 0
+        )
+        raw_gross_loss = abs(
+            sum(trade.gross_pnl_pct for trade in trades if trade.gross_pnl_pct < 0)
+        )
         avg_bars = sum(trade.bars_held for trade in trades) / len(trades)
         avg_minutes = avg_bars * self._timeframe_minutes(timeframe)
         captured = [
-            (max(0.0, float(trade.option_exit or 0.0) - float(trade.option_entry or 0.0)) / float(trade.mfe_points or 0.0)) * 100
+            (
+                max(
+                    0.0,
+                    float(trade.option_exit or 0.0) - float(trade.option_entry or 0.0),
+                )
+                / float(trade.mfe_points or 0.0)
+            )
+            * 100
             for trade in trades
-            if float(trade.mfe_points or 0.0) > 0 and float(trade.option_entry or 0.0) > 0
+            if float(trade.mfe_points or 0.0) > 0
+            and float(trade.option_entry or 0.0) > 0
         ]
         return {
             "trades": len(trades),
@@ -1887,12 +2368,20 @@ class BacktestService:
             "win_rate": round((len(wins) / len(trades)) * 100, 2),
             "average_win_pct": round(gross_win / len(wins), 3) if wins else 0.0,
             "average_loss_pct": round(gross_loss / len(losses), 3) if losses else 0.0,
-            "avg_pnl_pct": round(sum(trade.pnl_pct for trade in trades) / len(trades), 3),
+            "avg_pnl_pct": round(
+                sum(trade.pnl_pct for trade in trades) / len(trades), 3
+            ),
             "expectancy_pct": round((gross_win - gross_loss) / len(trades), 3),
-            "gross_expectancy_pct": round((raw_gross_win - raw_gross_loss) / len(trades), 3),
+            "gross_expectancy_pct": round(
+                (raw_gross_win - raw_gross_loss) / len(trades), 3
+            ),
             "profit_factor": round(gross_win / gross_loss, 2) if gross_loss else None,
-            "gross_profit_factor": round(raw_gross_win / raw_gross_loss, 2) if raw_gross_loss else None,
-            "max_drawdown_pct": round(self._max_drawdown([trade.pnl_pct for trade in trades]), 3),
+            "gross_profit_factor": round(raw_gross_win / raw_gross_loss, 2)
+            if raw_gross_loss
+            else None,
+            "max_drawdown_pct": round(
+                self._max_drawdown([trade.pnl_pct for trade in trades]), 3
+            ),
             "charges_pct_per_trade": settings.backtest_charges_pct,
             "slippage_pct_per_side": settings.backtest_slippage_pct,
             "spread_impact_pct_per_side": settings.paper_spread_impact_pct_per_side,
@@ -1901,23 +2390,54 @@ class BacktestService:
             "gross_pnl_pct": round(sum(trade.gross_pnl_pct for trade in trades), 3),
             "net_pnl_pct": round(sum(trade.pnl_pct for trade in trades), 3),
             "execution_realism_enabled": settings.enable_execution_realism,
-            "avg_execution_price_impact_pct": round(sum(float(trade.execution_price_impact_pct or 0.0) for trade in trades) / len(trades), 3),
-            "total_execution_price_impact_pct": round(sum(float(trade.execution_price_impact_pct or 0.0) for trade in trades), 3),
-            "avg_mfe_percent": round(sum(float(trade.mfe_percent or 0.0) for trade in trades) / len(trades), 3),
-            "avg_mae_percent": round(sum(float(trade.mae_percent or 0.0) for trade in trades) / len(trades), 3),
-            "avg_captured_mfe_percent": round(sum(captured) / len(captured), 3) if captured else 0.0,
+            "avg_execution_price_impact_pct": round(
+                sum(float(trade.execution_price_impact_pct or 0.0) for trade in trades)
+                / len(trades),
+                3,
+            ),
+            "total_execution_price_impact_pct": round(
+                sum(float(trade.execution_price_impact_pct or 0.0) for trade in trades),
+                3,
+            ),
+            "avg_mfe_percent": round(
+                sum(float(trade.mfe_percent or 0.0) for trade in trades) / len(trades),
+                3,
+            ),
+            "avg_mae_percent": round(
+                sum(float(trade.mae_percent or 0.0) for trade in trades) / len(trades),
+                3,
+            ),
+            "avg_captured_mfe_percent": round(sum(captured) / len(captured), 3)
+            if captured
+            else 0.0,
         }
 
-    def _ablation_impact(self, baseline: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    def _ablation_impact(
+        self, baseline: dict[str, Any], current: dict[str, Any]
+    ) -> dict[str, Any]:
         baseline_trades = int(baseline.get("trades") or 0)
         current_trades = int(current.get("trades") or 0)
         baseline_wins = int(baseline.get("wins") or 0)
         current_wins = int(current.get("wins") or 0)
         return {
-            "net_expectancy_delta": round(float(current.get("expectancy_pct") or 0.0) - float(baseline.get("expectancy_pct") or 0.0), 3),
-            "win_rate_delta": round(float(current.get("win_rate") or 0.0) - float(baseline.get("win_rate") or 0.0), 2),
-            "profit_factor_delta": self._optional_delta(current.get("profit_factor"), baseline.get("profit_factor")),
-            "max_drawdown_delta": round(float(current.get("max_drawdown_pct") or 0.0) - float(baseline.get("max_drawdown_pct") or 0.0), 3),
+            "net_expectancy_delta": round(
+                float(current.get("expectancy_pct") or 0.0)
+                - float(baseline.get("expectancy_pct") or 0.0),
+                3,
+            ),
+            "win_rate_delta": round(
+                float(current.get("win_rate") or 0.0)
+                - float(baseline.get("win_rate") or 0.0),
+                2,
+            ),
+            "profit_factor_delta": self._optional_delta(
+                current.get("profit_factor"), baseline.get("profit_factor")
+            ),
+            "max_drawdown_delta": round(
+                float(current.get("max_drawdown_pct") or 0.0)
+                - float(baseline.get("max_drawdown_pct") or 0.0),
+                3,
+            ),
             "trade_count_delta": current_trades - baseline_trades,
             "missed_winning_trades": max(0, baseline_wins - current_wins),
         }
@@ -1927,21 +2447,57 @@ class BacktestService:
             return None
         return round(float(current) - float(baseline), 3)
 
-    def _segment_option_trades(self, trades: list[OptionBacktestTrade], timeframe: str = "5minute") -> dict[str, Any]:
+    def _segment_option_trades(
+        self, trades: list[OptionBacktestTrade], timeframe: str = "5minute"
+    ) -> dict[str, Any]:
         return {
-            "ce_vs_pe": self._summarize_groups(trades, lambda trade: "CE" if trade.direction == "CALL" else "PE", timeframe),
-            "expiry_day": self._summarize_groups(trades, lambda trade: "expiry_day" if self._is_expiry_day_trade(trade) else "non_expiry_or_unknown", timeframe),
-            "event_day": self._summarize_groups(trades, lambda trade: "event_day" if trade.event_day else "non_event_day", timeframe),
-            "market_regime": self._summarize_groups(trades, lambda trade: trade.market_regime or "unknown", timeframe),
-            "time_bucket": self._summarize_groups(trades, lambda trade: self._time_bucket(trade.timestamp), timeframe),
-            "moneyness": self._summarize_groups(trades, self._moneyness_bucket, timeframe),
-            "setup": self._summarize_groups(trades, lambda trade: trade.reason.split(":", 1)[0] if ":" in trade.reason else trade.reason[:60], timeframe),
+            "ce_vs_pe": self._summarize_groups(
+                trades,
+                lambda trade: "CE" if trade.direction == "CALL" else "PE",
+                timeframe,
+            ),
+            "expiry_day": self._summarize_groups(
+                trades,
+                lambda trade: (
+                    "expiry_day"
+                    if self._is_expiry_day_trade(trade)
+                    else "non_expiry_or_unknown"
+                ),
+                timeframe,
+            ),
+            "event_day": self._summarize_groups(
+                trades,
+                lambda trade: "event_day" if trade.event_day else "non_event_day",
+                timeframe,
+            ),
+            "market_regime": self._summarize_groups(
+                trades, lambda trade: trade.market_regime or "unknown", timeframe
+            ),
+            "time_bucket": self._summarize_groups(
+                trades, lambda trade: self._time_bucket(trade.timestamp), timeframe
+            ),
+            "moneyness": self._summarize_groups(
+                trades, self._moneyness_bucket, timeframe
+            ),
+            "setup": self._summarize_groups(
+                trades,
+                lambda trade: (
+                    trade.reason.split(":", 1)[0]
+                    if ":" in trade.reason
+                    else trade.reason[:60]
+                ),
+                timeframe,
+            ),
         }
 
     def _validation_regime_from_signal(self, signal: Signal) -> str:
         factors = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
-        day_type = factors.get("day_type") if isinstance(factors.get("day_type"), dict) else {}
-        details = day_type.get("details") if isinstance(day_type.get("details"), dict) else {}
+        day_type = (
+            factors.get("day_type") if isinstance(factors.get("day_type"), dict) else {}
+        )
+        details = (
+            day_type.get("details") if isinstance(day_type.get("details"), dict) else {}
+        )
         try:
             day_range_pct = float(details.get("day_range_pct") or 0.0)
         except (TypeError, ValueError):
@@ -1961,7 +2517,12 @@ class BacktestService:
         timestamp = getattr(candles[idx], "timestamp", None)
         if not isinstance(timestamp, datetime):
             return "unknown"
-        same_day = [item for item in candles[: idx + 1] if isinstance(getattr(item, "timestamp", None), datetime) and item.timestamp.date() == timestamp.date()]
+        same_day = [
+            item
+            for item in candles[: idx + 1]
+            if isinstance(getattr(item, "timestamp", None), datetime)
+            and item.timestamp.date() == timestamp.date()
+        ]
         if len(same_day) < 3:
             return "unknown"
         day_open = float(same_day[0].open_price or 0.0)
@@ -1990,11 +2551,16 @@ class BacktestService:
         }
         return timestamp.date().isoformat() in event_dates
 
-    def _summarize_groups(self, trades: list[OptionBacktestTrade], key_fn: Any, timeframe: str) -> dict[str, Any]:
+    def _summarize_groups(
+        self, trades: list[OptionBacktestTrade], key_fn: Any, timeframe: str
+    ) -> dict[str, Any]:
         groups: dict[str, list[OptionBacktestTrade]] = {}
         for trade in trades:
             groups.setdefault(str(key_fn(trade)), []).append(trade)
-        return {key: self._summarize_option_trades(items, timeframe=timeframe) for key, items in groups.items()}
+        return {
+            key: self._summarize_option_trades(items, timeframe=timeframe)
+            for key, items in groups.items()
+        }
 
     def _time_bucket(self, timestamp: str) -> str:
         try:
@@ -2016,7 +2582,10 @@ class BacktestService:
         parsed = self._parse_option_symbol(trade.tradingsymbol)
         if parsed is None:
             return "unknown"
-        distance_pct = ((float(parsed["strike"]) - trade.underlying_entry) / max(trade.underlying_entry, 0.01)) * 100
+        distance_pct = (
+            (float(parsed["strike"]) - trade.underlying_entry)
+            / max(trade.underlying_entry, 0.01)
+        ) * 100
         if abs(distance_pct) <= 0.15:
             return "ATM"
         if trade.direction == "CALL":
@@ -2034,12 +2603,16 @@ class BacktestService:
         return trade_date == expiry.date()
 
     def _parse_expiry_from_symbol(self, symbol: str, timestamp: str) -> datetime | None:
-        match = re.search(r"(?P<day>\d{2})(?P<month>[A-Z]{3})\d+(?:\.\d+)?(?:CE|PE)$", symbol.upper())
+        match = re.search(
+            r"(?P<day>\d{2})(?P<month>[A-Z]{3})\d+(?:\.\d+)?(?:CE|PE)$", symbol.upper()
+        )
         if not match:
             return None
         try:
             year = datetime.fromisoformat(timestamp).year
-            return datetime.strptime(f"{year}-{match.group('month')}-{match.group('day')}", "%Y-%b-%d")
+            return datetime.strptime(
+                f"{year}-{match.group('month')}-{match.group('day')}", "%Y-%b-%d"
+            )
         except ValueError:
             return None
 
@@ -2061,18 +2634,34 @@ class BacktestService:
         reasons: list[str] = []
         if int(summary.get("trades") or 0) < settings.min_strategy_trades:
             reasons.append("not enough out-of-sample trades")
-        if float(summary.get("expectancy_pct") or 0.0) < settings.min_strategy_expectancy_pct:
+        if (
+            float(summary.get("expectancy_pct") or 0.0)
+            < settings.min_strategy_expectancy_pct
+        ):
             reasons.append("out-of-sample expectancy is below threshold")
         profit_factor = summary.get("profit_factor")
-        if profit_factor is None or float(profit_factor) < settings.min_strategy_profit_factor:
+        if (
+            profit_factor is None
+            or float(profit_factor) < settings.min_strategy_profit_factor
+        ):
             reasons.append("out-of-sample profit factor is below threshold")
-        if float(summary.get("max_drawdown_pct") or 0.0) > settings.readiness_max_drawdown_pct:
+        if (
+            float(summary.get("max_drawdown_pct") or 0.0)
+            > settings.readiness_max_drawdown_pct
+        ):
             reasons.append("out-of-sample drawdown is above readiness threshold")
         if float(summary.get("win_rate") or 0.0) < settings.min_strategy_win_rate_pct:
             reasons.append("out-of-sample win rate is below threshold")
         return not reasons, reasons
 
-    def _select_option_symbol(self, option_candles: dict[str, list[Candle]], *, option_type: str, spot: float, timestamp: datetime) -> str | None:
+    def _select_option_symbol(
+        self,
+        option_candles: dict[str, list[Candle]],
+        *,
+        option_type: str,
+        spot: float,
+        timestamp: datetime,
+    ) -> str | None:
         candidates: list[tuple[float, str]] = []
         for symbol, candles in option_candles.items():
             parsed = self._parse_option_symbol(symbol)
@@ -2085,16 +2674,31 @@ class BacktestService:
             return None
         return sorted(candidates)[0][1]
 
-    def _find_candle_index_at_or_after(self, candles: list[Candle], timestamp: datetime) -> int | None:
-        target = timestamp.replace(tzinfo=None) if isinstance(timestamp, datetime) else timestamp
+    def _find_candle_index_at_or_after(
+        self, candles: list[Candle], timestamp: datetime
+    ) -> int | None:
+        target = (
+            timestamp.replace(tzinfo=None)
+            if isinstance(timestamp, datetime)
+            else timestamp
+        )
         for idx, candle in enumerate(candles):
-            candle_ts = candle.timestamp.replace(tzinfo=None) if isinstance(candle.timestamp, datetime) else candle.timestamp
+            candle_ts = (
+                candle.timestamp.replace(tzinfo=None)
+                if isinstance(candle.timestamp, datetime)
+                else candle.timestamp
+            )
             if candle_ts >= target:
                 return idx
         return None
 
     def _parse_option_symbol(self, symbol: str) -> dict[str, Any] | None:
-        match = re.search(r"(?P<strike>\d+(?:\.\d+)?)(?P<option_type>CE|PE)$", symbol.upper())
+        match = re.search(
+            r"(?P<strike>\d+(?:\.\d+)?)(?P<option_type>CE|PE)$", symbol.upper()
+        )
         if not match:
             return None
-        return {"strike": float(match.group("strike")), "option_type": match.group("option_type")}
+        return {
+            "strike": float(match.group("strike")),
+            "option_type": match.group("option_type"),
+        }

@@ -36,7 +36,9 @@ class KiteAuthStateTests(unittest.TestCase):
         provider.access_token = "token"
         return provider
 
-    def test_token_exception_marks_relogin_required_and_blocks_followup_calls(self) -> None:
+    def test_token_exception_marks_relogin_required_and_blocks_followup_calls(
+        self,
+    ) -> None:
         provider = self._provider()
 
         with self.assertRaises(TokenException):
