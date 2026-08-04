@@ -16,7 +16,7 @@ from app.services.time_utils import ist_now
 API_BASE_URL = os.getenv("DASHBOARD_API_BASE_URL", "http://localhost:8000").rstrip("/")
 
 
-st.set_page_config(page_title="AI Option Trader", layout="wide")
+st.set_page_config(page_title="Bank Nifty Legacy Analytics", layout="wide")
 
 
 def api_get(
@@ -126,7 +126,11 @@ st.markdown(
 )
 
 
-st.title("AI Option Trader Command Center")
+st.title("Bank Nifty Legacy Analytics")
+st.warning(
+    "This Streamlit screen is retained for historical analytics only. "
+    f"Use the canonical operator dashboard at {API_BASE_URL}/dashboard for live runtime truth."
+)
 st.caption(
     f"Connected API: {API_BASE_URL} | Refreshed: {ist_now().strftime('%H:%M:%S IST')}"
 )
@@ -309,7 +313,7 @@ tab_latest, tab_journal, tab_failures, tab_orders, tab_account, tab_operations =
             "Failure Analysis",
             "Orders & Paper",
             "Account",
-            "V5 Operations",
+            "Runtime Diagnostics",
         ]
     )
 )
@@ -463,5 +467,5 @@ with tab_operations:
             st.error(error) if error else st.json(payload)
 
 st.caption(
-    "Tip: keep this dashboard open while auto-trader runs. Use the status cards and Last scan value to confirm activity."
+    "Historical analytics only. Use the canonical operator dashboard for live monitoring and incident status."
 )

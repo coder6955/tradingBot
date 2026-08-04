@@ -18,7 +18,14 @@ class NotificationServiceTests(unittest.TestCase):
         object.__setattr__(settings, "telegram_bot_token", None)
         object.__setattr__(settings, "telegram_chat_id", None)
 
-        self.assertEqual(NotificationService().send("done")["status"], "skipped")
+        service = NotificationService()
+        self.assertEqual(
+            service.send("done", kind="runtime_failure")["status"], "skipped"
+        )
+        status = service.status()
+        self.assertFalse(status["configured"])
+        self.assertEqual(status["last_attempt"]["kind"], "runtime_failure")
+        self.assertEqual(status["last_attempt"]["status"], "skipped")
 
     @patch("app.services.notification_service.requests")
     def test_error_response_never_contains_bot_token(self, requests: Mock) -> None:

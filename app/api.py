@@ -6,6 +6,7 @@ import threading
 import time as time_module
 from dataclasses import asdict
 from datetime import datetime, time
+from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException, Request
@@ -13,6 +14,7 @@ from sqlalchemy import text
 
 from app.application_context import ApplicationContext
 from app.config import settings
+from app.dashboard_page import render_command_center_dashboard
 from app.loginAutoCode import ensure_access_token_for_today
 from app.services.market_data_service import MarketDataService
 from app.services.scanner_service import ScannerService
@@ -79,6 +81,7 @@ from app.services.research_reporting_service import (
 )
 from app.services.runtime_trading_config_service import RuntimeTradingConfigService
 from app.services.runtime_job_repository import RuntimeJobRepository
+from app.services.runtime_instance_lock import RuntimeInstanceLock
 from app.services.strategy_edge_service import StrategyEdgeService
 from app.services.strategy_validation_repository import StrategyValidationRepository
 from app.services.strategy_version_registry import StrategyVersionRegistry
@@ -286,6 +289,9 @@ shadow_policy_research_report_service = ShadowPolicyResearchReportService()
 risk_management_service = RiskManagementService(trade_repository)
 runtime_trading_config_service = RuntimeTradingConfigService()
 notification_service = NotificationService()
+runtime_instance_lock = RuntimeInstanceLock(
+    Path(__file__).resolve().parents[1] / "logs" / "banknifty-app.lock"
+)
 greeks_service = GreeksService()
 option_quality_service = OptionQualityService(greeks_service)
 backtest_service = BacktestService()
@@ -575,24 +581,51 @@ automation_supervisor_service = AutomationSupervisorService(
     after_market_research_service=after_market_research_service,
     market_session_service=market_session_service,
 )
+application_shutdown_status: dict[str, object] = {
+    "started": False,
+    "completed": False,
+    "error_type": None,
+}
+startup_maintenance_status: dict[str, object] = {
+    "running": False,
+    "completed": False,
+    "errors": [],
+}
+startup_broker_sync_status: dict[str, object] = {
+    "running": False,
+    "completed": False,
+    "errors": [],
+}
 
 
 @app.on_event("startup")
 async def startup_automation() -> None:
-    await _bootstrap_kite_access_token()
-    evidence_persistence_queue.start()
-    evidence_persistence_queue.recover_pending_order_evidence()
-    episode_outcome_collector.start()
-    raw_tick_capture_service.start()
-    underlying_candle_service.start()
-    threading.Thread(
-        target=_run_startup_maintenance, name="startup-maintenance", daemon=True
-    ).start()
-    threading.Thread(
-        target=_run_startup_broker_sync, name="startup-broker-sync", daemon=True
-    ).start()
-    if settings.automation_enabled:
-        automation_supervisor_service.start(trigger="application_startup")
+    await asyncio.to_thread(runtime_instance_lock.assert_canonical_port_free)
+    runtime_instance_lock.acquire()
+    try:
+        await _bootstrap_kite_access_token()
+        evidence_persistence_queue.start()
+        evidence_persistence_queue.recover_pending_order_evidence()
+        episode_outcome_collector.start()
+        raw_tick_capture_service.start()
+        underlying_candle_service.start()
+        startup_maintenance_status.update(
+            {"running": True, "completed": False, "errors": []}
+        )
+        startup_broker_sync_status.update(
+            {"running": True, "completed": False, "errors": []}
+        )
+        threading.Thread(
+            target=_run_startup_maintenance, name="startup-maintenance", daemon=True
+        ).start()
+        threading.Thread(
+            target=_run_startup_broker_sync, name="startup-broker-sync", daemon=True
+        ).start()
+        if settings.automation_enabled:
+            automation_supervisor_service.start(trigger="application_startup")
+    except BaseException:
+        runtime_instance_lock.release()
+        raise
 
 
 async def _bootstrap_kite_access_token() -> None:
@@ -628,22 +661,27 @@ async def _bootstrap_kite_access_token() -> None:
 
 
 def _run_startup_maintenance() -> None:
+    errors: list[str] = []
     try:
         strategy_version_registry.ensure_current_version()
-    except Exception:
+    except Exception as exc:
+        errors.append(f"strategy_version:{type(exc).__name__}")
         logger.exception("startup strategy version registration failed")
     try:
         recovery = armed_entry_tracker_service.recover_active()
         logger.info("startup armed entry recovery %s", recovery)
-    except Exception:
+    except Exception as exc:
+        errors.append(f"armed_entry_recovery:{type(exc).__name__}")
         logger.exception("startup armed entry recovery failed")
     try:
         kite_websocket_price_feed.cleanup_old_persisted_candles()
-    except Exception:
+    except Exception as exc:
+        errors.append(f"websocket_candle_cleanup:{type(exc).__name__}")
         logger.exception("startup websocket candle cleanup failed")
     try:
         raw_tick_capture_service.cleanup_retention()
-    except Exception:
+    except Exception as exc:
+        errors.append(f"raw_tick_cleanup:{type(exc).__name__}")
         logger.exception("startup raw tick retention cleanup failed")
     if settings.enable_kite_websocket:
         try:
@@ -672,7 +710,8 @@ def _run_startup_maintenance() -> None:
                 kite_websocket_price_feed.subscribe(
                     {underlying_token}, owner="core_market", mode="quote"
                 )
-        except Exception:
+        except Exception as exc:
+            errors.append(f"websocket_start:{type(exc).__name__}")
             logger.exception("startup websocket start failed")
     try:
         if _scanner_market_is_open():
@@ -688,34 +727,67 @@ def _run_startup_maintenance() -> None:
                 limit=settings.automation_scan_limit,
                 order_mode=settings.default_order_mode,
             )
-    except Exception:
+    except Exception as exc:
+        errors.append(f"scanner_warmup:{type(exc).__name__}")
         logger.exception("startup scanner warmup failed")
+    startup_maintenance_status.update(
+        {"running": False, "completed": not errors, "errors": errors}
+    )
 
 
 def _run_startup_broker_sync() -> None:
     if kite_auth_state.relogin_required:
+        startup_broker_sync_status.update(
+            {
+                "running": False,
+                "completed": False,
+                "errors": ["kite_relogin_required"],
+            }
+        )
         logger.warning("startup broker sync skipped: Kite relogin required")
         return
     try:
         broker_sync_service.sync_open_trades(limit=100)
         broker_sync_service.reconcile_startup_positions()
-    except Exception:
+    except Exception as exc:
+        startup_broker_sync_status.update(
+            {
+                "running": False,
+                "completed": False,
+                "errors": [f"broker_sync:{type(exc).__name__}"],
+            }
+        )
         logger.exception("startup broker sync failed")
+    else:
+        startup_broker_sync_status.update(
+            {"running": False, "completed": True, "errors": []}
+        )
 
 
 @app.on_event("shutdown")
 async def shutdown_background_services() -> None:
-    application_context.market_data_runtime_service.stop()
-    underlying_candle_service.stop()
-    raw_tick_capture_service.stop()
-    await automation_supervisor_service.stop(reason="application_shutdown")
-    await option_snapshot_collector_service.stop()
-    await auto_trader_service.stop()
-    await opportunity_outcome_service.stop()
-    evidence_persistence_queue.flush(timeout=5.0)
-    evidence_persistence_queue.stop(timeout=2.0)
-    episode_outcome_collector.flush(timeout=5.0)
-    episode_outcome_collector.stop(timeout=3.0)
+    application_shutdown_status.update(
+        {"started": True, "completed": False, "error_type": None}
+    )
+    try:
+        application_context.market_data_runtime_service.stop()
+        underlying_candle_service.stop()
+        raw_tick_capture_service.stop()
+        await automation_supervisor_service.stop(reason="application_shutdown")
+        await option_snapshot_collector_service.stop()
+        await auto_trader_service.stop()
+        await opportunity_outcome_service.stop()
+        evidence_persistence_queue.flush(timeout=5.0)
+        evidence_persistence_queue.stop(timeout=2.0)
+        episode_outcome_collector.flush(timeout=5.0)
+        episode_outcome_collector.stop(timeout=3.0)
+    except BaseException as exc:
+        application_shutdown_status["error_type"] = type(exc).__name__
+        raise
+    else:
+        application_shutdown_status["completed"] = True
+    finally:
+        runtime_instance_lock.release()
 
 
 @app.get("/health", tags=["01 System"], summary="Check API health")
@@ -896,6 +968,11 @@ async def runtime_status() -> dict[str, object]:
             "after_market_review_last_run_date": after_market_research_service.last_run_date,
             "after_market_review_last_error": after_market_research_service.last_error,
         },
+        "instance_lock": runtime_instance_lock.status(),
+        "startup_tasks": {
+            "maintenance": dict(startup_maintenance_status),
+            "broker_sync": dict(startup_broker_sync_status),
+        },
         "market_data_cache": market_data_coordinator.status(),
     }
 
@@ -1075,798 +1152,10 @@ def root() -> dict[str, object]:
     "/dashboard",
     response_class=HTMLResponse,
     tags=["01 System"],
-    summary="Open command center dashboard",
+    summary="Open Bank Nifty operator dashboard",
 )
 async def command_center_dashboard() -> HTMLResponse:
-    return HTMLResponse(
-        """
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>AI Option Trader Command Center</title>
-  <style>
-    :root { color-scheme: light; font-family: Inter, Segoe UI, Arial, sans-serif; --line:#d0d5dd; --muted:#667085; --ink:#101828; --good:#047857; --bad:#b42318; --warn:#b54708; --blue:#175cd3; }
-    * { box-sizing: border-box; }
-    body { margin: 0; background: #f4f6f8; color: var(--ink); }
-    header { padding: 16px 24px; background: #ffffff; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 16px; align-items: center; position: sticky; top: 0; z-index: 5; }
-    h1 { font-size: 22px; margin: 0; letter-spacing: 0; }
-    h2 { font-size: 15px; margin: 0 0 12px; letter-spacing: 0; }
-    main { padding: 16px 24px 32px; display: grid; gap: 14px; }
-    .topbar { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(280px, .55fr); gap: 14px; align-items: stretch; }
-    .control-grid { display: grid; grid-template-columns: minmax(340px, 420px) minmax(0, 1fr); gap: 14px; align-items: start; }
-    .data-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
-    .ops-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
-    .panel { background: #ffffff; border: 1px solid var(--line); border-radius: 8px; padding: 14px; min-width: 0; overflow: hidden; }
-    .full { grid-column: 1 / -1; }
-    .ready { min-height: 156px; border-left: 6px solid var(--warn); display: grid; gap: 12px; }
-    .ready.ok { border-left-color: var(--good); }
-    .ready.bad { border-left-color: var(--bad); }
-    .ready-title { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
-    .ready-title strong { font-size: 24px; line-height: 1.1; }
-    .chips { display: flex; flex-wrap: wrap; gap: 8px; }
-    .chip { border: 1px solid #e4e7ec; border-radius: 999px; padding: 5px 9px; font-size: 12px; color: #344054; background: #f9fafb; max-width: 100%; overflow-wrap: anywhere; }
-    .chip.ok { border-color: #a7f3d0; background: #ecfdf3; color: var(--good); }
-    .chip.bad { border-color: #fecaca; background: #fff1f3; color: var(--bad); }
-    .chip.warn { border-color: #fedf89; background: #fffaeb; color: var(--warn); }
-    .summary-line { color: #344054; font-size: 14px; overflow-wrap: anywhere; }
-    .watch { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-    .watch-item { border: 1px solid #eaecf0; border-radius: 8px; padding: 10px; min-height: 72px; background: #fcfcfd; }
-    .watch-item span { color: var(--muted); font-size: 12px; display: block; }
-    .watch-item strong { display: block; margin-top: 5px; font-size: 16px; overflow-wrap: anywhere; }
-    .status { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 8px; }
-    .pill { border: 1px solid #e4e7ec; border-radius: 8px; padding: 9px; background: #fcfcfd; min-height: 58px; }
-    .pill.ok { border-color: #a7f3d0; background: #ecfdf3; color: var(--good); }
-    .pill.bad { border-color: #fecaca; background: #fff1f3; color: var(--bad); }
-    .pill.warn { border-color: #fedf89; background: #fffaeb; color: var(--warn); }
-    .pill strong { display: block; font-size: 12px; } .pill span { display: block; font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; color: #475467; }
-    label { display: block; font-size: 12px; color: #475467; margin: 10px 0 4px; }
-    input, select { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: inherit; background: #fff; min-height: 38px; }
-    .row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
-    button, .linkbtn { border: 1px solid var(--blue); background: var(--blue); color: white; padding: 9px 10px; border-radius: 6px; cursor: pointer; font-weight: 600; text-decoration: none; text-align: center; display: inline-block; min-height: 38px; }
-    button.secondary, .linkbtn.secondary { background: #fff; color: #344054; border-color: var(--line); }
-    button.danger { background: var(--bad); border-color: var(--bad); }
-    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-    .actions button { flex: 1 1 130px; }
-    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
-    .metric { border: 1px solid #eaecf0; border-radius: 8px; padding: 10px; background: #fcfcfd; min-height: 70px; }
-    .metric span { display: block; color: #667085; font-size: 12px; } .metric strong { font-size: 18px; display: block; margin-top: 4px; overflow-wrap: anywhere; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
-    th, td { border-bottom: 1px solid #eaecf0; padding: 8px; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
-    th { color: #475467; background: #f9fafb; font-weight: 600; position: sticky; top: 0; }
-    .tablewrap { min-height: 160px; max-height: 360px; overflow: auto; border: 1px solid #eaecf0; border-radius: 8px; }
-    pre { max-height: 300px; overflow: auto; background: #101828; color: #f9fafb; border-radius: 8px; padding: 10px; font-size: 12px; }
-    .links { display: grid; grid-template-columns: repeat(auto-fit, minmax(135px, 1fr)); gap: 8px; }
-    .muted { color: var(--muted); font-size: 12px; }
-    .raw-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
-    .empty { color: var(--muted); padding: 14px; }
-    .feed { display: grid; gap: 8px; max-height: 430px; overflow: auto; padding-right: 4px; }
-    .feed-item { border: 1px solid #eaecf0; border-radius: 8px; padding: 10px; background: #fcfcfd; display: grid; gap: 5px; }
-    .feed-item.ok { border-left: 4px solid var(--good); }
-    .feed-item.bad { border-left: 4px solid var(--bad); }
-    .feed-item.warn { border-left: 4px solid var(--warn); }
-    .feed-item.watch { border-left: 4px solid var(--blue); }
-    .feed-head { display: flex; justify-content: space-between; gap: 10px; align-items: start; }
-    .feed-title { font-weight: 700; font-size: 13px; overflow-wrap: anywhere; }
-    .feed-time { color: var(--muted); font-size: 11px; white-space: nowrap; }
-    .feed-message { color: #344054; font-size: 13px; overflow-wrap: anywhere; }
-    .feed-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-    details { margin-top: 12px; border-top: 1px solid #eaecf0; padding-top: 10px; }
-    summary { cursor: pointer; font-weight: 600; color: #344054; }
-    .modal { display: none; position: fixed; inset: 0; background: rgba(16, 24, 40, .48); z-index: 30; align-items: center; justify-content: center; padding: 18px; }
-    .modal.open { display: flex; }
-    .modal-card { width: min(780px, 100%); max-height: 92vh; overflow: auto; background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 16px; box-shadow: 0 24px 70px rgba(16, 24, 40, .28); }
-    .modal-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
-    .modal-head h2 { font-size: 18px; margin-top: 8px; }
-    .confirm-copy { color: #475467; font-size: 13px; margin: 4px 0 10px; }
-    .warning { border: 1px solid #fedf89; background: #fffaeb; color: #93370d; border-radius: 8px; padding: 10px; margin: 8px 0 12px; font-size: 13px; }
-    .check-row { display: flex; gap: 10px; align-items: flex-start; border: 1px solid #eaecf0; border-radius: 8px; padding: 10px; margin: 8px 0; background: #fff; }
-    .check-row input { width: auto; min-height: auto; margin-top: 3px; }
-    .check-row span { display: block; color: #667085; font-size: 12px; line-height: 1.35; margin-top: 3px; }
-    .check-row.locked { background: #f9fafb; }
-    .check-row.disabled { opacity: .55; }
-    .check-row.final { border-color: #99f6e4; background: #f0fdfa; }
-    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
-    .error { color: var(--bad); font-weight: 700; font-size: 13px; min-height: 18px; margin-top: 8px; }
-    @media (max-width: 1180px) { .topbar,.control-grid,.data-grid,.ops-grid,.raw-grid { grid-template-columns: 1fr; } .full { grid-column: auto; } .watch,.metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-    @media (max-width: 680px) { main, header { padding-left: 12px; padding-right: 12px; } header { align-items: flex-start; flex-direction: column; } .status,.metrics,.links,.row,.watch { grid-template-columns: 1fr; } .actions { width: 100%; } }
-  </style>
-</head>
-<body>
-  <header>
-    <div><h1>Bank Nifty Option Command Center</h1><div class="muted" id="refreshText">Loading...</div></div>
-    <div class="actions">
-      <a class="linkbtn secondary" href="/docs" target="_blank">Docs</a>
-      <a class="linkbtn secondary" href="/kite/auth" target="_blank">Kite Login</a>
-      <button class="secondary" onclick="refreshAll()">Refresh</button>
-    </div>
-  </header>
-  <main>
-    <section class="topbar">
-      <div class="panel ready" id="readyPanel">
-        <div class="ready-title">
-          <div><strong id="readyTitle">Checking system</strong><div class="summary-line" id="readySummary">Loading live state...</div></div>
-          <span class="chip" id="modeChip">Mode</span>
-        </div>
-        <div class="chips" id="readyChips"></div>
-        <div class="watch" id="watchPanel"></div>
-      </div>
-      <div class="panel">
-        <h2>System Health</h2>
-        <div class="status" id="statusCards"></div>
-      </div>
-    </section>
-    <section class="control-grid">
-      <div class="panel">
-        <h2>Automation</h2>
-        <label>Order mode</label><select id="orderMode" onchange="openModeConfirm(this.value)"><option value="paper">Paper orders</option><option value="live">Live orders</option></select>
-        <div class="actions">
-          <button onclick="startAutomation()">Start</button><button class="danger" onclick="stopAutomation()">Stop</button>
-          <button class="secondary" onclick="scanOnce()">Scan Once</button><button class="secondary" onclick="evaluateOpen()">Evaluate Open</button>
-          <button class="secondary" onclick="runAfterMarketResearch()">After-Market Research</button>
-        </div>
-        <details>
-          <summary>Advanced</summary>
-          <div class="row"><div><label>Side</label><select id="side"><option>BUY</option><option>SELL</option></select></div><div><label>Limit</label><input id="limit" type="number" value="5" min="1" max="25"></div></div>
-          <label>Symbols</label><input id="symbols" value="BANKNIFTY">
-          <div class="row"><div><label>Scan seconds</label><input id="interval" type="number" value="30" min="3"></div><div><label>Outcome seconds</label><input id="outcomeInterval" type="number" value="30" min="10"></div></div>
-        </details>
-        <pre id="actionResult">{}</pre>
-      </div>
-      <div class="panel">
-        <h2>Today</h2>
-        <div class="metrics" id="metrics"></div>
-        <details>
-          <summary>Activity JSON</summary>
-          <pre id="activityJson">{}</pre>
-        </details>
-      </div>
-    </section>
-    <section class="panel">
-      <h2>Quick Modules</h2>
-      <div class="links">
-        <a class="linkbtn secondary" href="/scanner/opportunities?side=BUY&symbols=BANKNIFTY&limit=3" target="_blank">Scanner</a>
-        <a class="linkbtn secondary" href="/scanner/diagnostics?side=BUY&symbols=BANKNIFTY&limit=10" target="_blank">Diagnostics</a>
-        <a class="linkbtn secondary" href="/opportunities?limit=20" target="_blank">Journal</a>
-        <a class="linkbtn secondary" href="/opportunities/failure-analysis" target="_blank">Failures</a>
-        <a class="linkbtn secondary" href="/paper/positions" target="_blank">Paper</a>
-        <a class="linkbtn secondary" href="/trades?limit=20" target="_blank">Trades</a>
-        <a class="linkbtn secondary" href="/risk/status" target="_blank">Risk</a>
-        <a class="linkbtn secondary" href="/research/settings" target="_blank">Research</a>
-        <a class="linkbtn secondary" href="/research/outcome-learning" target="_blank">Learning</a>
-        <a class="linkbtn secondary" href="/research/professional-insights" target="_blank">Insights</a>
-        <a class="linkbtn secondary" href="/research/research-engine" target="_blank">Research Engine</a>
-        <a class="linkbtn secondary" href="/research/gate-effectiveness" target="_blank">Gate Effectiveness</a>
-        <a class="linkbtn secondary" href="/research/rejected-opportunity-quality" target="_blank">Rejected Quality</a>
-        <a class="linkbtn secondary" href="/data/option-candle-coverage?symbols=BANKNIFTY" target="_blank">Candle Coverage</a>
-        <a class="linkbtn secondary" href="/research/threshold-validation" target="_blank">Thresholds</a>
-        <a class="linkbtn secondary" href="/research/execution-realism" target="_blank">Execution Realism</a>
-        <a class="linkbtn secondary" href="/research/daily-review" target="_blank">Daily Review</a>
-        <a class="linkbtn secondary" href="/research/after-market/status" target="_blank">After-Market</a>
-        <a class="linkbtn secondary" href="/research/evidence-matrix" target="_blank">Evidence Matrix</a>
-        <a class="linkbtn secondary" href="/research/strategy-promotion" target="_blank">Promotion Gate</a>
-        <a class="linkbtn secondary" href="/strategy/versions/current" target="_blank">Strategy Version</a>
-        <a class="linkbtn secondary" href="/runtime/status" target="_blank">Runtime</a>
-        <a class="linkbtn secondary" href="/market-data/pipeline-status" target="_blank">Pipeline</a>
-        <a class="linkbtn secondary" href="/runtime/latency" target="_blank">Latency</a>
-        <a class="linkbtn secondary" href="/scanner/armed-entries" target="_blank">Armed Entries</a>
-        <a class="linkbtn secondary" href="/market-data/banknifty-constituents/status" target="_blank">Constituents</a>
-        <a class="linkbtn secondary" href="/broker/reconciliation/status" target="_blank">Reconciliation</a>
-        <a class="linkbtn secondary" href="/broker/emergency-protection/status" target="_blank">Protection</a>
-        <a class="linkbtn secondary" href="/research/professional-readiness" target="_blank">Readiness</a>
-        <a class="linkbtn secondary" href="/kite/websocket/status" target="_blank">WebSocket</a>
-        <a class="linkbtn secondary" href="/market-data/cache/status" target="_blank">Data Cache</a>
-        <a class="linkbtn secondary" href="/data/ingest/status" target="_blank">Ingestion</a>
-        <a class="linkbtn secondary" href="/data/collector/status" target="_blank">Collector</a>
-        <a class="linkbtn secondary" href="/automation/status" target="_blank">Automation</a>
-        <a class="linkbtn secondary" href="/kite/margins" target="_blank">Margins</a>
-        <a class="linkbtn secondary" href="/kite/positions" target="_blank">Positions</a>
-        <a class="linkbtn secondary" href="/db/health" target="_blank">DB</a>
-      </div>
-    </section>
-    <section class="panel">
-      <h2>V5 Strategy &amp; Market Session</h2>
-      <div class="status" id="strategyCards"></div>
-      <div class="summary-line" id="strategySummary"></div>
-    </section>
-    <section class="ops-grid">
-      <div class="panel">
-        <h2>Market Data Pipeline</h2>
-        <div class="metrics" id="pipelineMetrics"></div>
-        <div class="summary-line" id="pipelineSummary"></div>
-      </div>
-      <div class="panel">
-        <h2>WebSocket &amp; Subscription Ownership</h2>
-        <div class="metrics" id="websocketMetrics"></div>
-        <div class="summary-line" id="websocketSummary"></div>
-      </div>
-      <div class="panel full">
-        <h2>Armed Entry Lifecycle</h2>
-        <div class="metrics" id="armedMetrics"></div>
-        <div class="tablewrap"><table id="armedEntriesTable"></table></div>
-      </div>
-      <div class="panel full">
-        <h2>Trading-Path Latency</h2>
-        <div class="metrics" id="latencyMetrics"></div>
-        <div class="tablewrap"><table id="latencyTable"></table></div>
-      </div>
-      <div class="panel">
-        <h2>Bank Nifty Constituent Intelligence</h2>
-        <div class="metrics" id="constituentMetrics"></div>
-        <div class="summary-line" id="constituentSummary"></div>
-      </div>
-      <div class="panel">
-        <h2>Broker Protection &amp; Reconciliation</h2>
-        <div class="metrics" id="brokerSafetyMetrics"></div>
-        <div class="summary-line" id="brokerSafetySummary"></div>
-      </div>
-      <div class="panel full">
-        <h2>Professional Readiness</h2>
-        <div class="metrics" id="readinessMetrics"></div>
-        <div class="summary-line" id="readinessSummary"></div>
-      </div>
-    </section>
-    <section class="data-grid">
-      <div class="panel"><h2>Active Trade / Exit Watch</h2><div id="activeTrade"></div></div>
-      <div class="panel"><h2>Latest Watch</h2><div id="latestWatch"></div></div>
-      <div class="panel full"><h2>Option Candle Coverage</h2><div class="metrics" id="optionCandleCoverageMetrics"></div><div class="tablewrap"><table id="optionCandleCoverageTable"></table></div></div>
-      <div class="panel full"><h2>Rejected Learning</h2><div class="metrics" id="rejectedLearningMetrics"></div><div class="tablewrap"><table id="gateEffectivenessTable"></table></div></div>
-      <div class="panel full"><h2>System Thought Feed</h2><div class="feed" id="decisionFeed"><div class="empty">Loading recent decisions...</div></div></div>
-      <div class="panel"><h2>Latest Opportunities</h2><div class="tablewrap"><table id="latestTable"></table></div></div>
-      <div class="panel"><h2>Opportunity Journal</h2><div class="tablewrap"><table id="journalTable"></table></div></div>
-      <div class="panel full">
-        <h2>Raw Details</h2>
-        <div class="raw-grid">
-          <details open><summary>Decision / Exit</summary><pre id="decisionJson">{}</pre></details>
-          <details><summary>Orders / Paper</summary><pre id="ordersJson">{}</pre></details>
-          <details><summary>Learning / Failures</summary><pre id="learningJson">{}</pre><pre id="failureJson">{}</pre></details>
-          <details><summary>Kite Account</summary><pre id="accountJson">{}</pre></details>
-        </div>
-      </div>
-    </section>
-  </main>
-  <div class="modal" id="modeConfirm">
-    <div class="modal-card">
-      <div class="modal-head">
-        <div>
-          <h2 id="modeConfirmTitle">Confirm Automation Mode</h2>
-          <div class="confirm-copy" id="modeConfirmCopy">Review what this will change for the running app session.</div>
-        </div>
-        <button class="secondary" onclick="closeModeConfirm()">Close</button>
-      </div>
-      <div class="warning" id="modeConfirmWarning"></div>
-      <h2>Required Settings</h2>
-      <div id="modeRequired"></div>
-      <h2>Optional Choices</h2>
-      <div id="modeOptional"></div>
-      <label class="check-row final">
-        <input type="checkbox" id="modeFinalAck">
-        <div><strong>I understand and confirm</strong><span>For live mode, this can place real Zerodha orders and square-off orders after existing risk checks pass.</span></div>
-      </label>
-      <div class="error" id="modeConfirmError"></div>
-      <div class="modal-actions">
-        <button onclick="applyModeConfirm()">Apply Mode</button>
-        <button class="secondary" onclick="closeModeConfirm()">Cancel</button>
-      </div>
-    </div>
-  </div>
-<script>
-async function getJson(path, timeoutMs=4500) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(path, {signal: controller.signal, cache: "no-store"});
-    if (!res.ok) throw new Error(`${path}: ${res.status}`);
-    return await res.json();
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-async function postJson(path, body={}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
-  try {
-    const res = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body), signal: controller.signal, cache: "no-store"});
-    if (!res.ok) throw new Error(`${path}: ${res.status}`);
-    return await res.json();
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-let pendingRuntimeMode = "paper";
-window.lastAppliedMode = "paper";
-function esc(value) {
-  return String(value ?? "").replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
-}
-function pill(label, state, detail) {
-  return `<div class="pill ${state}"><strong>${esc(label)}</strong><span>${esc(detail || "")}</span></div>`;
-}
-function chip(label, state="") {
-  return `<span class="chip ${state}">${esc(label)}</span>`;
-}
-function metric(label, value) {
-  return `<div class="metric"><span>${esc(label)}</span><strong>${esc(value ?? "-")}</strong></div>`;
-}
-function table(el, rows, keys) {
-  if (!rows || !rows.length) { el.innerHTML = "<tr><td>No rows yet.</td></tr>"; return; }
-  el.innerHTML = `<thead><tr>${keys.map(k => `<th>${esc(k)}</th>`).join("")}</tr></thead><tbody>` +
-    rows.map(r => `<tr>${keys.map(k => `<td>${esc(r[k])}</td>`).join("")}</tr>`).join("") + "</tbody>";
-}
-function latestSignal(latest) {
-  return (latest.opportunities || [])[0] || null;
-}
-function firstOpenTrade(trades) {
-  return (trades || []).find(x => x.status !== "closed") || null;
-}
-function timing(signal) {
-  return signal?.factor_scores?.entry_timing || {};
-}
-function watchItem(label, value) {
-  return `<div class="watch-item"><span>${esc(label)}</span><strong>${esc(value ?? "-")}</strong></div>`;
-}
-function compactHash(value) {
-  const text = String(value || "");
-  return text ? `${text.slice(0, 10)}...` : "-";
-}
-function formatMs(value) {
-  return value === null || value === undefined ? "-" : `${Number(value).toFixed(2)} ms`;
-}
-function renderStrategy(strategy, runtimeStatus, runtimeConfig) {
-  const version = strategy.version || {};
-  const session = runtimeStatus.session || {};
-  const drift = Boolean(strategy.config_drift_detected || version.config_drift_detected);
-  document.getElementById("strategyCards").innerHTML =
-    pill("Strategy", drift ? "bad" : "ok", version.version || "unregistered") +
-    pill("Config lineage", drift ? "bad" : "ok", drift ? "DRIFT DETECTED" : compactHash(version.config_hash)) +
-    pill("Market session", session.should_run_live_modules ? "ok" : "warn", session.runtime_mode || "unknown") +
-    pill("Order mode", runtimeConfig.mode === "live" ? "bad" : "ok", (runtimeConfig.mode || "paper").toUpperCase());
-  document.getElementById("strategySummary").textContent =
-    `${version.human_note || "No strategy note"} | ${version.reason_for_change || "No change reason"}`;
-}
-function renderPipeline(pipeline) {
-  const candles = pipeline.canonical_underlying_candles || {};
-  const raw = pipeline.raw_tick_capture || {};
-  const fast = pipeline.fast_scan_context || {};
-  const rawDrops = Number(raw.dropped_warm_count || 0) + Number(raw.dropped_risk_count || 0);
-  document.getElementById("pipelineMetrics").innerHTML =
-    metric("Canonical candles", candles.running ? "RUNNING" : (candles.enabled ? "IDLE" : "DISABLED")) +
-    metric("Accepted ticks", candles.accepted_ticks || 0) +
-    metric("Persisted candles", candles.persisted_candles || 0) +
-    metric("Continuity fills", candles.generated_continuity_candles || 0) +
-    metric("Raw captured", raw.captured_count || 0) +
-    metric("Raw persisted", raw.persisted_count || 0) +
-    metric("Raw queue", `${raw.queue_size || 0}/${raw.queue_capacity || 0}`) +
-    metric("Critical gaps", raw.capture_gap_critical ? "YES" : "NO");
-  document.getElementById("pipelineSummary").textContent =
-    `Dropped candles ${candles.dropped_candles || 0}; raw drops ${rawDrops}; persist failures ${raw.persist_failure_count || 0}; ` +
-    `fast context ${fast.passed ? "ready" : (fast.reason || "not ready")}; coverage ${JSON.stringify(candles.coverage || {})}`;
-}
-function renderWebSocket(pipeline, runtimeStatus) {
-  const ws = pipeline.websocket || {};
-  const gap = ws.data_gap || {};
-  const owners = [...new Set(Object.values(ws.subscription_owners || {}).flat())];
-  const expected = Boolean((runtimeStatus.session || {}).should_run_live_modules);
-  document.getElementById("websocketMetrics").innerHTML =
-    metric("Connection", ws.websocket_connected ? "CONNECTED" : (expected ? "DISCONNECTED" : "IDLE")) +
-    metric("Subscribed", (ws.subscribed_tokens || []).length) +
-    metric("Desired", (ws.desired_tokens || []).length) +
-    metric("Verified live", (ws.verified_live_tokens || []).length) +
-    metric("Owners", owners.length ? owners.join(", ") : "-") +
-    metric("Reconnects", ws.reconnect_count || 0) +
-    metric("Data gaps", gap.gap_count || 0) +
-    metric("Event queue", `${ws.event_queue_size || 0}/${ws.event_queue_capacity || 0}`);
-  document.getElementById("websocketSummary").textContent =
-    `Status ${ws.websocket_status || "unknown"}; market ${ws.market_session || "unknown"}; active gap ${gap.active_gap ? "YES" : "no"}; ` +
-    `critical drops ${ws.event_queue_critical_drop_count || 0}; candle queue ${ws.candle_persist_queue_size || 0}/${ws.candle_persist_queue_capacity || 0}; ` +
-    `subscription failures ${ws.subscription_failure_count || 0}; ${ws.last_error || ws.critical_status || (expected ? "waiting for connection" : "idle outside live session")}`;
-}
-function renderArmedEntries(armed) {
-  const groups = ["active", "entered_paper", "too_late", "expired", "cancelled"];
-  const rows = groups.flatMap(group => (armed[group] || []).map(item => {
-    const quality = item.tick_quality || {};
-    const expires = item.valid_until ? Math.max(0, Math.round((new Date(item.valid_until.replace(" ", "T")) - Date.now()) / 1000)) : null;
-    return {
-      state: item.latest_state,
-      contract: item.tradingsymbol,
-      trigger: item.entry_trigger_price,
-      premium: item.latest_premium,
-      bid: item.latest_bid,
-      ask: item.latest_ask,
-      distance_pct: item.distance_to_trigger_pct,
-      ticks: quality.tick_count ?? item.tick_quality_count,
-      confirmed: quality.confirmed ?? item.tick_quality_confirmed,
-      ttl_seconds: expires,
-      blocker: item.tick_quality_reason || item.latest_reason || (item.reasons || []).join("; ")
-    };
-  })).slice(0, 20);
-  document.getElementById("armedMetrics").innerHTML =
-    metric("Active", (armed.active || []).length) + metric("Total tracked", armed.count || 0) +
-    metric("Entered paper", (armed.entered_paper || []).length) + metric("Too late", (armed.too_late || []).length) +
-    metric("Expired", (armed.expired || []).length) + metric("Cancelled", (armed.cancelled || []).length) +
-    metric("Paper event entry", armed.event_entry_enabled ? "ENABLED" : "DISABLED") +
-    metric("Live event entry", armed.live_event_entry_enabled ? "ENABLED" : "DISABLED");
-  table(document.getElementById("armedEntriesTable"), rows, ["state","contract","trigger","premium","bid","ask","distance_pct","ticks","confirmed","ttl_seconds","blocker"]);
-}
-function renderLatency(latency) {
-  const rows = Object.entries(latency.metrics || {}).map(([name, value]) => ({
-    stage: name.replaceAll("_", " "),
-    samples: value.sample_count || 0,
-    missing: value.missing_sample_count || 0,
-    p50_ms: value.p50_ms,
-    p95_ms: value.p95_ms,
-    p99_ms: value.p99_ms,
-    max_ms: value.max_ms
-  }));
-  const sampled = rows.filter(row => row.samples > 0);
-  const worst = sampled.reduce((current, row) => Number(row.p95_ms || 0) > Number(current?.p95_ms || 0) ? row : current, null);
-  document.getElementById("latencyMetrics").innerHTML =
-    metric("Status", latency.status || "unknown") + metric("Measured stages", sampled.length) +
-    metric("Worst p95", worst ? formatMs(worst.p95_ms) : "-") + metric("Worst stage", worst?.stage || "-") +
-    metric("Dropped events", latency.dropped_event_count || 0) + metric("Critical drops", latency.critical_dropped_event_count || 0) +
-    metric("Strategy", latency.strategy_version || "-") + metric("Config", compactHash(latency.config_hash));
-  table(document.getElementById("latencyTable"), rows, ["stage","samples","missing","p50_ms","p95_ms","p99_ms","max_ms"]);
-}
-function latestBankIntelligence(latest) {
-  const signal = latestSignal(latest || {});
-  return signal?.factor_scores?.banknifty_intelligence?.details?.topBankAlignment || null;
-}
-function renderConstituents(snapshot, latest) {
-  const live = latestBankIntelligence(latest);
-  document.getElementById("constituentMetrics").innerHTML =
-    metric("Snapshot", snapshot.source_date || "-") + metric("Age", snapshot.age_days == null ? "-" : `${snapshot.age_days} days`) +
-    metric("Members", snapshot.constituent_count || 0) + metric("Weight total", snapshot.total_weight == null ? "-" : `${(Number(snapshot.total_weight) * 100).toFixed(2)}%`) +
-    metric("Snapshot valid", snapshot.valid && !snapshot.stale ? "YES" : "NO") +
-    metric("Live coverage", live ? `${(Number(live.coverage_by_weight || 0) * 100).toFixed(1)}%` : "-") +
-    metric("Alignment", live ? `${(Number(live.alignment || 0) * 100).toFixed(1)}%` : "-") +
-    metric("Opposing weight", live ? `${(Number(live.against_weight || 0) * 100).toFixed(1)}%` : "-");
-  document.getElementById("constituentSummary").textContent = live
-    ? `Hard-gate eligible ${live.hard_gate_eligible ? "yes" : "no"}; supporting weight ${(Number(live.support_weight || 0) * 100).toFixed(1)}%; ${live.hard_gate_ineligible_reason || "live weighted participation available"}`
-    : `Official snapshot ${snapshot.status || "unknown"}; no current setup is available for direction-specific live alignment. ${(snapshot.validation_errors || []).join("; ")}`;
-}
-function renderBrokerSafety(reconciliation, protection, strategy, trades, runtimeConfig) {
-  const rec = reconciliation.last_reconciliation || {};
-  const version = strategy.version || {};
-  const exitRules = (version.latest_config_snapshot || version.config_snapshot || {}).exit_rules || {};
-  const required = Boolean(exitRules.require_broker_protective_stop_for_live_entry);
-  const open = firstOpenTrade(trades.trades || []);
-  const paper = (runtimeConfig.mode || "paper") !== "live";
-  document.getElementById("brokerSafetyMetrics").innerHTML =
-    metric("Reconciliation", reconciliation.blocked ? "BLOCKED" : "CLEAR") +
-    metric("Mismatches", rec.mismatch_count || 0) + metric("Local live", rec.local_open_live_trades || 0) +
-    metric("Broker positions", rec.broker_open_positions || 0) + metric("Protection required", required ? "YES" : "NO") +
-    metric("Protection enabled", protection.enabled ? "YES" : (paper ? "OFF (PAPER)" : "NO")) +
-    metric("Protective order", open?.protective_order_status || "-") + metric("Protective trigger", open?.protective_trigger_price || "-");
-  document.getElementById("brokerSafetySummary").textContent = reconciliation.reason || open?.protective_last_error ||
-    `${protection.mechanism || "Broker protection status unavailable"}; ${paper ? "broker-side stop is not needed for paper trades" : "live entry fails closed without required protection"}.`;
-}
-function readinessFromResearch(afterMarket) {
-  const current = afterMarket.last_result?.reports?.professional_readiness?.result;
-  const stored = afterMarket.job_run?.metadata?.result?.reports?.professional_readiness?.result;
-  return current || stored || null;
-}
-function renderReadiness(afterMarket) {
-  const readiness = readinessFromResearch(afterMarket);
-  const verdict = readiness?.verdict || {};
-  const checks = readiness?.checks || {};
-  const passed = Object.values(checks).filter(item => item?.passed).length;
-  const failed = Object.entries(checks).filter(([, item]) => !item?.passed).map(([name]) => name);
-  const walk = checks.walk_forward_passed || {};
-  const drawdown = checks.walk_forward_drawdown || {};
-  const regime = checks.walk_forward_regime_stability || {};
-  document.getElementById("readinessMetrics").innerHTML =
-    metric("Verdict", verdict.label || "NOT CACHED") + metric("Checks passed", Object.keys(checks).length ? `${passed}/${Object.keys(checks).length}` : "-") +
-    metric("OOS trades", walk.out_of_sample_trades ?? "-") + metric("OOS sessions", walk.out_of_sample_sessions ?? "-") +
-    metric("Validation folds", walk.fold_count ?? "-") + metric("Drawdown", drawdown.value == null ? "-" : `${drawdown.value}%`) +
-    metric("Regime stability", regime.passed == null ? "-" : (regime.passed ? "PASS" : "FAIL")) +
-    metric("Research run", afterMarket.last_run_date || afterMarket.job_run?.trading_date || "-");
-  document.getElementById("readinessSummary").textContent = readiness
-    ? (failed.length ? `Failed checks: ${failed.join(", ")}. ${verdict.message || "Keep paper trading."}` : (verdict.message || "All cached checks passed."))
-    : "No lightweight readiness result is cached yet. Run the staged After-Market Research job; the dashboard will display its verdict without blocking live refreshes.";
-}
-function renderActiveTrade(trade) {
-  const el = document.getElementById("activeTrade");
-  if (!trade) { el.innerHTML = `<div class="empty">No open trade.</div>`; return; }
-  el.innerHTML = `<div class="watch">
-    ${watchItem("Contract", trade.tradingsymbol)}
-    ${watchItem("Status", trade.status)}
-    ${watchItem("Entry", trade.entry_price)}
-    ${watchItem("SL", trade.stop_loss)}
-    ${watchItem("Target 1", trade.target_1)}
-    ${watchItem("Price source", trade.price_source || "-")}
-    ${watchItem("Executable exit", trade.exit_executable_price ?? "-")}
-    ${watchItem("Exit bid / ask", trade.exit_best_bid != null || trade.exit_best_ask != null ? `${trade.exit_best_bid ?? "-"} / ${trade.exit_best_ask ?? "-"}` : "-")}
-    ${watchItem("Exit depth", trade.exit_depth_coverage ?? "-")}
-    ${watchItem("Exit spread", trade.exit_spread_pct == null ? "-" : `${trade.exit_spread_pct}%`)}
-    ${watchItem("Exit quote", trade.exit_quote_timestamp || "-")}
-    ${watchItem("Protective stop", trade.protective_order_status || "-")}
-    ${watchItem("Exit order", trade.exit_order_status || "-")}
-    ${watchItem("Net P&L", trade.net_pnl ?? trade.pnl ?? "-")}
-  </div>`;
-}
-function renderLatestWatch(signal) {
-  const el = document.getElementById("latestWatch");
-  if (!signal) { el.innerHTML = `<div class="empty">No current opportunity.</div>`; return; }
-  const t = timing(signal);
-  const f = signal.factor_scores || {};
-  const market = f.market_regime || {};
-  const momentum = f.momentum_phase || {};
-  const family = f.setup_family || {};
-  const candidate = f.candidate_ranking || {};
-  el.innerHTML = `<div class="watch">
-    ${watchItem("State", t.entry_timing_state || signal.setup_state || "SIGNAL")}
-    ${watchItem("Action", signal.action)}
-    ${watchItem("Contract", signal.tradingsymbol)}
-    ${watchItem("Entry", signal.entry_price)}
-    ${watchItem("SL", signal.stop_loss)}
-    ${watchItem("Target 1", signal.target_1)}
-    ${watchItem("Chase", t.chase_risk || "-")}
-    ${watchItem("Regime", market.regime || "-")}
-    ${watchItem("Momentum", momentum.phase || "-")}
-    ${watchItem("Setup family", family.name || "-")}
-    ${watchItem("Utility", candidate.utility_score ?? "-")}
-    ${watchItem("Reason", t.entry_timing_reason || "Qualified signal")}
-  </div>`;
-}
-function renderReady(h, d, k, au, a, m, c, ws, risk, latest, trades, runtime, runtimeStatus) {
-  const blockers = [];
-  const session = runtimeStatus?.session || {};
-  const liveModulesExpected = Boolean(session.should_run_live_modules);
-  if (h.status !== "ok") blockers.push("API");
-  if (d.status !== "ok") blockers.push("Database");
-  if (k.status !== "ok") blockers.push("Kite");
-  if (liveModulesExpected && risk.passed === false) blockers.push("Risk");
-  if (liveModulesExpected && !au.running && !a.running) blockers.push("Automation stopped");
-  if (liveModulesExpected && !m.running) blockers.push("Exit monitor stopped");
-  if (liveModulesExpected && (ws.websocket_enabled || ws.enabled) && ws.websocket_connected === false) blockers.push("WebSocket");
-  const panel = document.getElementById("readyPanel");
-  const mode = runtime?.mode || au.config?.order_mode || a.mode || "paper";
-  const sig = latestSignal(latest);
-  const active = firstOpenTrade(trades.trades || []);
-  const state = timing(sig).entry_timing_state || sig?.setup_state || (sig ? "SIGNAL" : "NO_ACTIVE_SETUP");
-  const panelState = blockers.length ? (blockers.length > 2 ? "bad" : "warn") : "ok";
-  panel.className = `panel ready ${panelState}`;
-  document.getElementById("readyTitle").textContent = blockers.length ? "Needs Attention" : (liveModulesExpected ? "System Ready" : "System Safe — Live Modules Idle");
-  document.getElementById("readySummary").textContent = blockers.length ? `Blocked by: ${blockers.join(", ")}` :
-    (liveModulesExpected ? `${state}${active ? " with active trade" : ""}` : `${session.runtime_mode || "OUTSIDE_MARKET"}: automation, exit monitor and WebSocket may remain stopped by design`);
-  document.getElementById("modeChip").className = `chip ${mode === "live" ? "bad" : "ok"}`;
-  document.getElementById("modeChip").textContent = mode.toUpperCase();
-  document.getElementById("readyChips").innerHTML = [
-    chip(au.running ? "Automation running" : "Automation stopped", au.running ? "ok" : "bad"),
-    chip(m.running ? "Exit monitor running" : "Exit monitor stopped", m.running ? "ok" : "bad"),
-    chip(k.status === "ok" ? "Kite OK" : "Kite issue", k.status === "ok" ? "ok" : "bad"),
-    chip(ws.websocket_connected ? "WebSocket connected" : "WebSocket not connected", ws.websocket_connected ? "ok" : "warn"),
-    chip(!liveModulesExpected ? "Risk deferred" : (risk.passed === false ? "Risk blocked" : "Risk allowed"), liveModulesExpected && risk.passed === false ? "bad" : "ok"),
-    chip(session.runtime_mode || "session unknown", liveModulesExpected ? "ok" : "warn")
-  ].join("");
-  const t = timing(sig);
-  document.getElementById("watchPanel").innerHTML =
-    watchItem("Setup", state) +
-    watchItem("Contract", sig?.tradingsymbol || active?.tradingsymbol || "-") +
-    watchItem("Trigger", t.entry_trigger_price || "-") +
-    watchItem("Reason", t.entry_timing_reason || (sig ? "Qualified signal" : "-"));
-}
-function renderDecisionFeed(feed) {
-  const el = document.getElementById("decisionFeed");
-  const events = feed.events || [];
-  if (!events.length) { el.innerHTML = `<div class="empty">No scanner thoughts recorded yet.</div>`; return; }
-  el.innerHTML = events.map(item => {
-    const meta = [item.tradingsymbol, item.score !== undefined && item.score !== null ? `score ${item.score}` : null, item.source, item.error_type, item.status, item.outcome]
-      .filter(Boolean).join(" | ");
-    return `<div class="feed-item ${esc(item.severity || "warn")}">
-      <div class="feed-head"><div class="feed-title">${esc(item.title)}</div><div class="feed-time">${esc(item.time || "")}</div></div>
-      <div class="feed-message">${esc(item.message || "")}</div>
-      <div class="feed-meta">${esc(meta)}</div>
-    </div>`;
-  }).join("");
-}
-function settingExplanation(key, value) {
-  const map = {
-    LIVE_TRADING_MODE: "Allows the app to submit real Zerodha orders when all live confirmations and risk checks pass.",
-    PAPER_TRADING_MODE: "Keeps orders simulated inside the app while still using real market data.",
-    ENABLE_AUTO_SQUAREOFF: "Allows the exit monitor to square off trades using SL, targets, trailing SL, time-stop, and invalidation logic.",
-    LIVE_AUTO_SQUAREOFF: "Allows live open trades to be exited by placing a real SELL order through Zerodha.",
-    ENABLE_KITE_WEBSOCKET: "Uses Kite WebSocket ticks for active trade monitoring and premium candle building.",
-    MAX_OPEN_TRADES: "Limits how many trades can remain open at the same time."
-  };
-  return map[key] || `Sets ${key} to ${value}.`;
-}
-async function openModeConfirm(mode) {
-  pendingRuntimeMode = mode || "paper";
-  const modal = document.getElementById("modeConfirm");
-  const error = document.getElementById("modeConfirmError");
-  error.textContent = "";
-  document.getElementById("modeFinalAck").checked = pendingRuntimeMode === "paper";
-  try {
-    const data = await getJson(`/runtime/trading-config/preview?mode=${encodeURIComponent(pendingRuntimeMode)}`);
-    document.getElementById("modeConfirmTitle").textContent = `${data.mode.toUpperCase()} Automation Mode`;
-    document.getElementById("modeConfirmCopy").textContent = data.required?.summary || "Review runtime settings before applying.";
-    document.getElementById("modeConfirmWarning").textContent = data.warning || "";
-    const required = data.required?.settings_overrides || {};
-    document.getElementById("modeRequired").innerHTML = Object.entries(required).map(([key, value]) =>
-      `<label class="check-row locked"><input type="checkbox" checked disabled><div><strong>${esc(key)} = ${esc(value)}</strong><span>${esc(settingExplanation(key, value))}</span></div></label>`
-    ).join("");
-    document.getElementById("modeOptional").innerHTML = (data.optional_choices || []).map(choice =>
-      `<label class="check-row ${choice.enabled ? "" : "disabled"}"><input type="checkbox" data-runtime-option="${esc(choice.key)}" ${choice.default ? "checked" : ""} ${choice.enabled ? "" : "disabled"}><div><strong>${esc(choice.label)}</strong><span>${esc(choice.description)}</span></div></label>`
-    ).join("");
-    modal.classList.add("open");
-  } catch (e) {
-    error.textContent = e.message;
-    modal.classList.add("open");
-  }
-}
-function closeModeConfirm() {
-  document.getElementById("modeConfirm").classList.remove("open");
-  document.getElementById("orderMode").value = window.lastAppliedMode || "paper";
-}
-async function applyModeConfirm() {
-  const error = document.getElementById("modeConfirmError");
-  const ack = document.getElementById("modeFinalAck").checked;
-  if (!ack) { error.textContent = "Please confirm that you understand this mode change."; return; }
-  const options = {};
-  document.querySelectorAll("[data-runtime-option]").forEach(input => { options[input.dataset.runtimeOption] = input.checked; });
-  try {
-    const applied = await postJson("/runtime/trading-config/apply", {
-      mode: pendingRuntimeMode,
-      options,
-      warning_acknowledged: ack,
-      confirmed_by: "dashboard"
-    });
-    window.lastAppliedMode = applied.mode || pendingRuntimeMode;
-    document.getElementById("orderMode").value = window.lastAppliedMode;
-    document.getElementById("modeConfirm").classList.remove("open");
-    document.getElementById("actionResult").textContent = JSON.stringify(applied, null, 2);
-    await refreshAll();
-  } catch (e) {
-    error.textContent = e.message;
-  }
-}
-function payload() {
-  const orderMode = document.getElementById("orderMode").value;
-  return {
-    order_mode: orderMode,
-    side: document.getElementById("side").value,
-    symbols: document.getElementById("symbols").value,
-    interval_seconds: Number(document.getElementById("interval").value),
-    limit: Number(document.getElementById("limit").value),
-    place_orders: true,
-    confirm_live: orderMode === "live",
-    monitor_outcomes: true,
-    outcome_interval_seconds: Number(document.getElementById("outcomeInterval").value)
-  };
-}
-async function showAction(fn) {
-  const out = document.getElementById("actionResult");
-  try { const data = await fn(); out.textContent = JSON.stringify(data, null, 2); await refreshAll(); }
-  catch (e) { out.textContent = e.message; }
-}
-function scanOnce(){ showAction(() => postJson("/auto-trader/scan-once", {...payload(), place_orders:false})); }
-function evaluateOpen(){ showAction(() => postJson("/opportunities/evaluate-open", {limit:100})); }
-function runAfterMarketResearch(){ showAction(() => postJson("/research/after-market/run", {force:false})); }
-const dashboardEndpointCache = {};
-async function getJsonCached(cacheKey, url, ttlMs) {
-  const now = Date.now();
-  const cached = dashboardEndpointCache[cacheKey];
-  if (cached && now - cached.at <= ttlMs) return cached.data;
-  try {
-    const data = await getJson(url);
-    dashboardEndpointCache[cacheKey] = {at: now, data};
-    return data;
-  } catch (err) {
-    if (cached) return {...cached.data, cached: true, refresh_error: err.message || String(err)};
-    throw err;
-  }
-}
-async function getReviewJsonCached(cacheKey, url, ttlMs) {
-  if (window.dashboardMarketOpen === true) {
-    return {status:"deferred", reason:"market_open", market_session:"REGULAR_MARKET", source:"dashboard_skip"};
-  }
-  return getJsonCached(cacheKey, url, ttlMs);
-}
-function automationPayload(){ return {
-  order_mode: document.getElementById("orderMode").value,
-  symbols: document.getElementById("symbols").value,
-  side: document.getElementById("side").value,
-  scan_interval_seconds: Number(document.getElementById("interval").value),
-  snapshot_interval_seconds: 180,
-  outcome_interval_seconds: Number(document.getElementById("outcomeInterval").value),
-  checkpoint_overlap_minutes: 30,
-  intraday_candle_sync: false,
-  intraday_candle_sync_minutes: 5,
-  scan_limit: Number(document.getElementById("limit").value),
-  place_orders: true,
-  confirm_live: document.getElementById("orderMode").value === "live"
-}; }
-function startAutomation(){ showAction(async () => {
-  const cfg = await getJson("/runtime/trading-config");
-  const runtimeAutomation = cfg.effective?.automation || {};
-  return postJson("/automation/start", {...automationPayload(), ...runtimeAutomation});
-}); }
-function stopAutomation(){ showAction(() => postJson("/automation/stop")); }
-function loadControls(config, runtime) {
-  if (window.controlsLoaded || !config) return;
-  document.getElementById("symbols").value = config.symbols || "";
-  const mode = runtime?.mode || config.order_mode || "paper";
-  document.getElementById("orderMode").value = mode;
-  window.lastAppliedMode = mode;
-  document.getElementById("side").value = config.side || "BUY";
-  document.getElementById("interval").value = config.scan_interval_seconds || 30;
-  document.getElementById("outcomeInterval").value = config.outcome_interval_seconds || 30;
-  document.getElementById("limit").value = config.scan_limit || 5;
-  window.controlsLoaded = true;
-}
-async function refreshAll() {
-  const [health, db, kite, auto, monitor, perf, latest, journal, failures, learning, execs, paper, margins, positions, risk, trades, automation, runtimeConfig, collector, ingest, websocket, cache, decisionFeed, afterMarketResearch, gateEffectiveness, optionCandleCoverage, pipelineStatus, runtimeStatusResult, strategyStatus, armedEntries, constituentStatus, reconciliationStatus, protectionStatus] = await Promise.allSettled([
-    getJson("/health"), getJson("/db/health"), getJsonCached("kiteHealth", "/kite/health", DASHBOARD_BROKER_REFRESH_MS), getJson("/auto-trader/status"), getJson("/opportunity-monitor/status"),
-    getJson("/opportunities/performance"), getJson("/auto-trader/latest"), getJsonCached("journal", "/opportunities?limit=50", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("failures", "/opportunities/failure-analysis", DASHBOARD_SLOW_REFRESH_MS),
-    getReviewJsonCached("learning", "/research/outcome-learning", DASHBOARD_SLOW_REFRESH_MS), getJson("/auto-trader/executions"), getJson("/paper/trades"), getJsonCached("margins", "/kite/margins", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("positions", "/kite/positions", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("risk", "/risk/status", DASHBOARD_BROKER_REFRESH_MS), getJson("/trades?limit=50"),
-    getJson("/automation/status"), getJsonCached("runtimeConfig", "/runtime/trading-config", DASHBOARD_SLOW_REFRESH_MS), getJson("/data/collector/status"), getJson("/data/ingest/status"), getJson("/kite/websocket/status"), getJson("/market-data/cache/status"), getJson("/dashboard/decision-feed?limit=30"), getJsonCached("afterMarketResearch", "/research/after-market/status", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("gateEffectiveness", "/research/gate-effectiveness?summary_only=true&limit=500&top_n=12&cache_seconds=300", DASHBOARD_SLOW_REFRESH_MS), getReviewJsonCached("optionCandleCoverage", "/data/option-candle-coverage?symbols=BANKNIFTY", DASHBOARD_SLOW_REFRESH_MS),
-    getJson("/market-data/pipeline-status"), getJson("/runtime/status"), getJsonCached("strategyStatus", "/strategy/versions/current", DASHBOARD_SLOW_REFRESH_MS), getJson("/scanner/armed-entries"), getJsonCached("constituentStatus", "/market-data/banknifty-constituents/status", DASHBOARD_SLOW_REFRESH_MS), getJsonCached("reconciliationStatus", "/broker/reconciliation/status", DASHBOARD_BROKER_REFRESH_MS), getJsonCached("protectionStatus", "/broker/emergency-protection/status", DASHBOARD_BROKER_REFRESH_MS)
-  ]);
-  const val = r => r.status === "fulfilled" ? r.value : {error: r.reason.message};
-  const h=val(health), d=val(db), k=val(kite), a=val(auto), m=val(monitor), p=val(perf), l=val(latest), j=val(journal), f=val(failures), learn=val(learning), r=val(risk), t=val(trades), au=val(automation), runtime=val(runtimeConfig), c=val(collector), ing=val(ingest), ws=val(websocket), cacheStatus=val(cache), feed=val(decisionFeed), researchJob=val(afterMarketResearch), gates=val(gateEffectiveness), candleCoverage=val(optionCandleCoverage), pipeline=val(pipelineStatus), rtStatus=val(runtimeStatusResult), strategy=val(strategyStatus), armed=val(armedEntries), constituents=val(constituentStatus), reconciliation=val(reconciliationStatus), protection=val(protectionStatus);
-  window.dashboardMarketOpen = Boolean(au.market_open) || researchJob.market_session === "REGULAR_MARKET";
-  loadControls(au.config, runtime);
-  document.getElementById("statusCards").innerHTML =
-    pill("API", h.status === "ok" ? "ok" : "bad", h.status || h.error) + pill("Database", d.status === "ok" ? "ok" : "bad", d.status || d.error) +
-    pill("Runtime Mode", runtime.mode === "live" ? "bad" : "ok", (runtime.mode || "paper").toUpperCase()) +
-    pill("Kite", k.status === "ok" ? "ok" : "bad", k.status || k.error || "check") + pill("WebSocket", ws.websocket_connected ? "ok" : "warn", ws.websocket_connected ? "connected" : (ws.websocket_enabled ? "not connected" : "disabled")) +
-    pill("Automation", au.running ? "ok" : "bad", au.running ? (au.market_open ? "running, market open" : "running") : "stopped") +
-    pill("Auto Trader", a.running ? "ok" : "bad", a.running ? "running" : "stopped") +
-    pill("Collector", c.running ? "ok" : "warn", c.running ? "running" : "stopped") + pill("Exit Monitor", m.running ? "ok" : "bad", m.running ? "running" : "stopped") +
-    pill("Research Job", researchJob.running ? "warn" : (researchJob.enabled ? "ok" : "warn"), researchJob.running ? "running" : (researchJob.last_run_date ? `last ${researchJob.last_run_date}` : researchJob.next_action || "idle")) +
-    pill("Data Cache", cacheStatus.status === "ok" ? "ok" : "warn", cacheStatus.status || cacheStatus.error || "check");
-  renderReady(h, d, k, au, a, m, c, ws, r, l, t, runtime, rtStatus);
-  renderStrategy(strategy, rtStatus, runtime);
-  renderPipeline(pipeline);
-  renderWebSocket(pipeline, rtStatus);
-  renderArmedEntries(armed);
-  renderLatency(pipeline.latency || {});
-  renderConstituents(constituents, l);
-  renderBrokerSafety(reconciliation, protection, strategy, t, runtime);
-  renderReadiness(researchJob);
-  renderActiveTrade(firstOpenTrade(t.trades || []));
-  renderLatestWatch(latestSignal(l));
-  renderDecisionFeed(feed);
-  document.getElementById("metrics").innerHTML =
-    metric("Last scan", a.last_scan_at || "-") + metric("Latest found", a.latest_count || 0) + metric("Executions", a.execution_count || 0) +
-    metric("Open", p.open || 0) + metric("Closed", p.closed || 0) + metric("Win rate", p.closed ? `${Math.round((p.wins || 0) / p.closed * 100)}%` : "0%") +
-    metric("P&L", p.pnl || 0) + metric("Risk", (rtStatus.session || {}).should_run_live_modules ? (r.passed === false ? "Blocked" : "Allowed") : "Deferred") + metric("Research", researchJob.last_run_date || researchJob.next_action || "-");
-  document.getElementById("activityJson").textContent = JSON.stringify({automation:au, runtime_config:runtime, runtime_status:rtStatus, strategy, auto_trader:a, collector:c, ingestion:ing, monitor:m, performance:p, risk:r, pipeline, armed_entries:armed, constituents, broker_reconciliation:reconciliation, broker_protection:protection, cache:cacheStatus, after_market_research:researchJob, decision_feed:feed}, null, 2);
-  const rq = gates.rejected_summary || {};
-  const cs = candleCoverage.summary || {};
-  document.getElementById("optionCandleCoverageMetrics").innerHTML =
-    metric("Quality", cs.data_quality || candleCoverage.reason || "-") + metric("Contracts", candleCoverage.contracts || 0) +
-    metric("Avg coverage", cs.avg_coverage_pct != null ? `${cs.avg_coverage_pct}%` : "-") + metric("Missing", cs.missing_candles || 0) +
-    metric("High confidence", cs.high_confidence || 0) + metric("Partial", cs.partial_data || 0);
-  table(document.getElementById("optionCandleCoverageTable"), (candleCoverage.rows || []).slice(0, 12), ["tradingsymbol","timeframe","coverage_pct","data_quality","actual_candles","expected_candles","missing_candles","latest_candle","sources"]);
-  document.getElementById("rejectedLearningMetrics").innerHTML =
-    metric("Reviewed", rq.reviewed || 0) + metric("Missed winners", rq.missed_winners || 0) + metric("Saved losers", rq.saved_losers || 0) +
-    metric("Unresolved", rq.unresolved || 0) + metric("Ambiguous", rq.ambiguous || 0) + metric("Avg min", rq.avg_minutes_to_outcome || "-");
-  table(document.getElementById("gateEffectivenessTable"), (gates.gates || []).slice(0, 12), ["gate_or_reason","count","reviewed","missed_winners","saved_losers","unresolved","ambiguous","avg_minutes_to_outcome","interpretation"]);
-  table(document.getElementById("latestTable"), l.opportunities || [], ["symbol","action","tradingsymbol","entry_price","stop_loss","target_1","quantity","score"]);
-  table(document.getElementById("journalTable"), j.opportunities || [], ["id","created_at","action","tradingsymbol","entry_price","stop_loss","target_1","score","status","outcome","pnl"]);
-  document.getElementById("failureJson").textContent = JSON.stringify(f, null, 2);
-  document.getElementById("learningJson").textContent = JSON.stringify(learn, null, 2);
-  document.getElementById("decisionJson").textContent = JSON.stringify({
-    latest_opportunity: (l.opportunities || [])[0] || null,
-    open_lifecycle_trades: (t.trades || []).filter(x => x.status !== "closed"),
-    last_monitor_results: m
-  }, null, 2);
-  document.getElementById("ordersJson").textContent = JSON.stringify({executions: val(execs), lifecycle_trades: t, paper: val(paper)}, null, 2);
-  document.getElementById("accountJson").textContent = JSON.stringify({margins: val(margins), positions: val(positions)}, null, 2);
-  document.getElementById("refreshText").textContent = `Last refreshed ${new Date().toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata" })} IST`;
-}
-const DASHBOARD_REFRESH_MS = 15000;
-const DASHBOARD_BROKER_REFRESH_MS = 60000;
-const DASHBOARD_SLOW_REFRESH_MS = 60000;
-refreshAll();
-setInterval(refreshAll, DASHBOARD_REFRESH_MS);
-</script>
-</body>
-</html>
-        """
-    )
+    return HTMLResponse(render_command_center_dashboard())
 
 
 def _decision_event_from_opportunity(record) -> dict[str, object]:
@@ -4453,6 +3742,7 @@ def evaluate_trade_exits(
     "/alerts/test",
     tags=["01 System"],
     summary="Send a test Telegram alert if configured",
+    dependencies=PROTECTED_ROUTE,
 )
 def send_test_alert(
     payload: dict[str, object] | None = Body(
@@ -4461,8 +3751,18 @@ def send_test_alert(
 ) -> dict[str, object]:
     payload = payload or {}
     return notification_service.send(
-        str(payload.get("message") or "AI Option Trader test alert")
+        str(payload.get("message") or "AI Option Trader test alert"),
+        kind="test",
     )
+
+
+@app.get(
+    "/alerts/status",
+    tags=["01 System"],
+    summary="Inspect Telegram notification configuration and last delivery attempt",
+)
+def alert_delivery_status() -> dict[str, object]:
+    return notification_service.status()
 
 
 @app.post(

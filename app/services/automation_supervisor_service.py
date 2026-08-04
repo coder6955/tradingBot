@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from datetime import date, datetime, time
+from datetime import datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -96,7 +96,8 @@ class AutomationSupervisorService:
         self.last_start_trigger = str(trigger or "api")
         self._start_lifecycle_run(trigger=self.last_start_trigger)
         self.task = asyncio.create_task(self._run())
-        self.notification_service.send("Automation supervisor started")
+        if not settings.scheduled_run_exit_after_complete:
+            self.notification_service.send("Automation supervisor started")
         return self.status()
 
     async def stop(self, *, reason: str = "requested") -> dict[str, Any]:
@@ -112,21 +113,56 @@ class AutomationSupervisorService:
         self.stopped_at = self._now()
         self.last_stop_reason = str(reason or "requested")
         self._finish_lifecycle_run(status="stopped", reason=self.last_stop_reason)
-        self.notification_service.send("Automation supervisor stopped")
+        if not settings.scheduled_run_exit_after_complete:
+            self.notification_service.send("Automation supervisor stopped")
         return self.status()
 
     def status(self) -> dict[str, Any]:
         now = self._now()
         market_open = self._market_is_open(now)
+        task_healthy = self._task_is_healthy()
+        try:
+            research_status = (
+                self.after_market_research_service.status()
+                if self.after_market_research_service
+                else {"enabled": False}
+            )
+        except Exception as exc:
+            research_status = {
+                "status": "error",
+                "enabled": True,
+                "running": False,
+                "last_error": str(exc),
+            }
+        operator_state = self._operator_state(
+            now=now,
+            market_open=market_open,
+            task_healthy=task_healthy,
+            research_status=research_status,
+        )
         return {
             "running": self.running,
             "market_open": market_open,
             "runtime_mode": self.market_session_service.current_runtime_mode(now),
+            "execution_profile": (
+                "scheduled_run"
+                if settings.scheduled_run_exit_after_complete
+                else "continuous"
+            ),
+            "completion_policy": {
+                "stop_after_after_market_complete": bool(
+                    settings.automation_stop_after_after_market_complete
+                ),
+                "exit_server_after_complete": bool(
+                    settings.scheduled_run_exit_after_complete
+                ),
+            },
+            "operator_state": operator_state,
             "duplicate_start_prevented_count": self.duplicate_start_prevented_count,
             "lifecycle": {
                 "boot_id": self.boot_id,
                 "process_id": self.process_id,
-                "task_healthy": self._task_is_healthy(),
+                "task_healthy": task_healthy,
                 "started_at": self._format_dt(self.started_at)
                 if self.started_at
                 else None,
@@ -167,9 +203,7 @@ class AutomationSupervisorService:
                     "status": "deferred",
                     "reason": "use /risk/status for explicit risk evaluation",
                 },
-                "after_market_research": self.after_market_research_service.status()
-                if self.after_market_research_service
-                else {"enabled": False},
+                "after_market_research": research_status,
             },
         }
 
@@ -213,6 +247,7 @@ class AutomationSupervisorService:
                             "reason": "after_market_pipeline_completed",
                         }
                     )
+            self._capture_action_errors(now, actions)
             self.last_actions.extend(actions)
             return {
                 "status": "ok",
@@ -221,8 +256,12 @@ class AutomationSupervisorService:
                 "automation": self.status(),
             }
         except Exception as exc:
-            error = {"time": self._format_dt(now), "error": str(exc)}
-            self.errors.append(error)
+            error = self._append_operational_error(
+                now=now,
+                source="automation_supervisor_cycle",
+                message=str(exc),
+                error_type=type(exc).__name__,
+            )
             return {"status": "error", "error": error, "automation": self.status()}
 
     async def _run(self) -> None:
@@ -234,13 +273,11 @@ class AutomationSupervisorService:
                     else:
                         await asyncio.to_thread(self.run_once)
                 except Exception as exc:
-                    self.errors.append(
-                        {
-                            "time": self._format_dt(self._now()),
-                            "error": str(exc),
-                            "error_type": type(exc).__name__,
-                            "source": "automation_supervisor_loop",
-                        }
+                    self._append_operational_error(
+                        now=self._now(),
+                        source="automation_supervisor_loop",
+                        message=str(exc),
+                        error_type=type(exc).__name__,
                     )
                 if self.running:
                     await asyncio.sleep(30)
@@ -481,6 +518,159 @@ class AutomationSupervisorService:
         except Exception:
             return False
         return status.get("next_action") == "research_completed_for_today"
+
+    def _operator_state(
+        self,
+        *,
+        now: datetime,
+        market_open: bool,
+        task_healthy: bool,
+        research_status: dict[str, Any],
+    ) -> dict[str, Any]:
+        runtime_mode = self.market_session_service.current_runtime_mode(now)
+        job_run = (
+            research_status.get("job_run")
+            if isinstance(research_status.get("job_run"), dict)
+            else {}
+        )
+        completed_today = bool(
+            research_status.get("next_action") == "research_completed_for_today"
+            or (
+                job_run.get("status") == "success"
+                and str(job_run.get("trading_date") or "") == now.date().isoformat()
+            )
+            or self.last_stop_reason == "after_market_pipeline_completed"
+        )
+        base = {
+            "runtime_mode": runtime_mode,
+            "day_complete": completed_today,
+            "trading_active": False,
+            "supervisor_alive": bool(self.running and task_healthy),
+            "action_required": False,
+        }
+        if self.running and not task_healthy:
+            return {
+                **base,
+                "code": "RUNTIME_FAILURE",
+                "label": "Runtime failure",
+                "severity": "error",
+                "summary": "The supervisor flag is set but its task is not healthy.",
+                "action_required": True,
+            }
+        if not self.running:
+            if completed_today:
+                return {
+                    **base,
+                    "code": "DAY_COMPLETE",
+                    "label": "Day complete",
+                    "severity": "ok",
+                    "summary": "Trading and after-market research are complete for today.",
+                }
+            unexpected = self.last_stop_reason not in {None, "requested", "application_shutdown"}
+            return {
+                **base,
+                "code": "STOPPED",
+                "label": "Automation stopped",
+                "severity": "error" if unexpected else "warning",
+                "summary": (
+                    f"Supervisor stopped: {self.last_stop_reason}."
+                    if self.last_stop_reason
+                    else "The automation supervisor is not running."
+                ),
+                "action_required": unexpected,
+            }
+        if completed_today:
+            return {
+                **base,
+                "code": "DAY_COMPLETE",
+                "label": "Day complete",
+                "severity": "ok",
+                "summary": (
+                    "Research is complete; the continuous supervisor is only waiting "
+                    "for the next session."
+                    if not settings.scheduled_run_exit_after_complete
+                    else "Research is complete; scheduled shutdown is in progress."
+                ),
+            }
+        if market_open:
+            return {
+                **base,
+                "code": "TRADING_ACTIVE",
+                "label": "Trading automation active",
+                "severity": "ok",
+                "summary": "Market-hours scanning, monitoring and risk controls are expected to run.",
+                "trading_active": True,
+            }
+        if research_status.get("running") or research_status.get("queued"):
+            return {
+                **base,
+                "code": "RESEARCH_RUNNING",
+                "label": "After-market research running",
+                "severity": "working",
+                "summary": "Trading is stopped while the research pipeline finishes.",
+            }
+        if runtime_mode == "PRE_MARKET":
+            return {
+                **base,
+                "code": "PRE_MARKET_READY",
+                "label": "Pre-market preparation",
+                "severity": "working",
+                "summary": "The supervisor is preparing for the market session.",
+            }
+        return {
+            **base,
+            "code": "MARKET_CLOSED_IDLE",
+            "label": "Live modules idle",
+            "severity": "ok",
+            "summary": "The market is closed, so trading workers are stopped by design.",
+        }
+
+    def _capture_action_errors(
+        self, now: datetime, actions: list[dict[str, Any]]
+    ) -> None:
+        for action in actions:
+            if str(action.get("status") or "").lower() != "error":
+                continue
+            source = str(action.get("action") or "automation_action")
+            message = str(
+                action.get("message")
+                or action.get("error")
+                or action.get("reason")
+                or "runtime action failed"
+            )
+            self._append_operational_error(
+                now=now,
+                source=source,
+                message=message,
+                error_type=str(action.get("error_type") or "RuntimeActionError"),
+            )
+
+    def _append_operational_error(
+        self,
+        *,
+        now: datetime,
+        source: str,
+        message: str,
+        error_type: str,
+    ) -> dict[str, Any]:
+        fingerprint = f"{source}:{error_type}:{message}"
+        if self.errors and self.errors[-1].get("fingerprint") == fingerprint:
+            self.errors[-1]["last_seen_at"] = self._format_dt(now)
+            self.errors[-1]["occurrences"] = int(
+                self.errors[-1].get("occurrences") or 1
+            ) + 1
+            return self.errors[-1]
+        error = {
+            "time": self._format_dt(now),
+            "last_seen_at": self._format_dt(now),
+            "error": message,
+            "error_type": error_type,
+            "source": source,
+            "fingerprint": fingerprint,
+            "occurrences": 1,
+        }
+        self.errors.append(error)
+        return error
 
     async def _stop_intraday_services(self) -> None:
         if self.auto_trader_service.running:

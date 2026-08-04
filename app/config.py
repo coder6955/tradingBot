@@ -69,6 +69,12 @@ class Settings:
     )
     telegram_bot_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
     telegram_chat_id: Optional[str] = os.getenv("TELEGRAM_CHAT_ID")
+    scheduled_startup_health_timeout_seconds: float = float(
+        os.getenv("SCHEDULED_STARTUP_HEALTH_TIMEOUT_SECONDS", "180")
+    )
+    scheduled_startup_health_poll_seconds: float = float(
+        os.getenv("SCHEDULED_STARTUP_HEALTH_POLL_SECONDS", "5")
+    )
     scanner_interval_seconds: int = int(os.getenv("SCANNER_INTERVAL_SECONDS", "60"))
     default_order_mode: str = os.getenv(
         "ORDER_MODE", os.getenv("TRADING_MODE", "paper")

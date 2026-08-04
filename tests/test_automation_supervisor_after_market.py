@@ -68,8 +68,16 @@ class FakeRiskManagementService:
 
 
 class FakeNotificationService:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
     def send(self, message):
-        return None
+        self.messages.append(str(message))
+
+
+class FakeHealthyTask:
+    def done(self) -> bool:
+        return False
 
 
 class FakeLifecycleRepository:
@@ -104,15 +112,22 @@ class FakeLifecycleRepository:
 
 
 class FakeAfterMarketResearchService:
-    def __init__(self) -> None:
+    def __init__(self, *, completed: bool = False) -> None:
         self.calls: list[datetime] = []
+        self.completed = completed
 
     def maybe_run_after_market(self, now):
         self.calls.append(now)
         return {"action": "after_market_research", "status": "ok"}
 
     def status(self):
-        return {"status": "ok", "running": False}
+        return {
+            "status": "ok",
+            "running": False,
+            "next_action": (
+                "research_completed_for_today" if self.completed else "waiting"
+            ),
+        }
 
 
 class FixedClockAutomationSupervisor(AutomationSupervisorService):
@@ -128,6 +143,7 @@ class FixedClockAutomationSupervisor(AutomationSupervisorService):
     ) -> None:
         self.fixed_now = now
         self.fake_outcome_service = outcome_service or FakeOutcomeService()
+        self.fake_notification_service = FakeNotificationService()
         super().__init__(
             data_ingestion_service=FakeDataIngestionService(),
             snapshot_collector_service=snapshot_collector_service
@@ -135,7 +151,7 @@ class FixedClockAutomationSupervisor(AutomationSupervisorService):
             auto_trader_service=auto_trader_service or FakeAutoTraderService(),
             outcome_service=self.fake_outcome_service,
             risk_management_service=FakeRiskManagementService(),
-            notification_service=FakeNotificationService(),
+            notification_service=self.fake_notification_service,
             after_market_research_service=after_market_research_service,
             lifecycle_repository=lifecycle_repository,
         )
@@ -395,6 +411,28 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
             )
         )
 
+    def test_continuous_supervisor_reports_day_complete_not_trading_active(
+        self,
+    ) -> None:
+        object.__setattr__(settings, "automation_enabled", True)
+        research = FakeAfterMarketResearchService(completed=True)
+        supervisor = FixedClockAutomationSupervisor(
+            now=datetime(2026, 7, 3, 16, 0),
+            after_market_research_service=research,
+        )
+        supervisor.running = True
+        supervisor.task = FakeHealthyTask()
+
+        result = supervisor.run_once({"symbols": "BANKNIFTY"})
+        operator = result["automation"]["operator_state"]
+
+        self.assertTrue(supervisor.running)
+        self.assertEqual(result["automation"]["execution_profile"], "continuous")
+        self.assertEqual(operator["code"], "DAY_COMPLETE")
+        self.assertTrue(operator["supervisor_alive"])
+        self.assertTrue(operator["day_complete"])
+        self.assertFalse(operator["trading_active"])
+
     def test_scheduled_boot_run_stops_after_after_market_pipeline(self) -> None:
         object.__setattr__(settings, "automation_enabled", True)
         object.__setattr__(settings, "scheduled_run_exit_after_complete", True)
@@ -442,6 +480,24 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         self.assertEqual(
             repository.finished[-1]["metadata"]["stop_reason"], "test_shutdown"
         )
+
+    def test_scheduled_start_suppresses_premature_success_notification(self) -> None:
+        object.__setattr__(settings, "scheduled_run_exit_after_complete", True)
+        supervisor = FixedClockAutomationSupervisor(
+            now=datetime(2026, 7, 3, 9, 0),
+            after_market_research_service=FakeAfterMarketResearchService(),
+        )
+
+        async def exercise() -> None:
+            supervisor.start({"symbols": "BANKNIFTY"}, trigger="application_startup")
+            self.assertNotIn(
+                "Automation supervisor started",
+                supervisor.fake_notification_service.messages,
+            )
+            await supervisor.stop(reason="test_shutdown")
+
+        asyncio.run(exercise())
+        self.assertEqual(supervisor.fake_notification_service.messages, [])
 
 
 if __name__ == "__main__":

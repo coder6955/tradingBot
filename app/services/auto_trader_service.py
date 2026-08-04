@@ -116,9 +116,10 @@ class AutoTraderService:
         }
         self.running = True
         self.task = asyncio.create_task(self._run())
-        self.notification_service.send(
-            f"Auto trader started: side={side.upper()}, symbols={symbols or 'default'}, interval={max(1, int(interval))}s"
-        )
+        if not settings.scheduled_run_exit_after_complete:
+            self.notification_service.send(
+                f"Auto trader started: side={side.upper()}, symbols={symbols or 'default'}, interval={max(1, int(interval))}s"
+            )
         return self.status()
 
     async def stop(self) -> dict[str, Any]:
