@@ -30,7 +30,9 @@ class RiskManagementService:
             )
         )
 
-    def evaluate_entry(self) -> dict[str, Any]:
+    def evaluate_entry(self, order_mode: str | None = None) -> dict[str, Any]:
+        mode = str(order_mode or settings.default_order_mode or "paper").lower()
+        paper_mode = mode == "paper"
         summary = self.trade_repository.daily_summary()
         reasons: list[str] = []
         # Risk decisions use the same authoritative calculation, but avoid a
@@ -40,9 +42,23 @@ class RiskManagementService:
         if int(summary["trades"]) >= settings.max_trades_per_day:
             reasons.append("max trades per day reached")
 
-        available_cash = self._available_cash()
-        risk_equity = max(float(equity_snapshot.current_audited_equity), 0.01)
-        max_daily_loss = float(equity_snapshot.start_of_day_equity) * (
+        broker_available_cash = None if paper_mode else self._available_cash()
+        available_cash = (
+            max(0.0, float(settings.account_equity))
+            if paper_mode
+            else max(0.0, float(broker_available_cash or 0.0))
+        )
+        risk_equity = (
+            max(float(settings.account_equity), 0.01)
+            if paper_mode
+            else max(float(equity_snapshot.current_audited_equity), 0.01)
+        )
+        start_of_day_risk_equity = (
+            max(float(settings.account_equity), 0.01)
+            if paper_mode
+            else max(float(equity_snapshot.start_of_day_equity), 0.01)
+        )
+        max_daily_loss = start_of_day_risk_equity * (
             settings.max_realized_daily_loss_percent / 100
         )
         if float(summary["pnl"]) <= -abs(max_daily_loss):
@@ -90,9 +106,15 @@ class RiskManagementService:
             "limits": {
                 "max_daily_loss": round(max_daily_loss, 2),
                 "available_cash": round(available_cash, 2),
-                "current_audited_equity": equity_snapshot.current_audited_equity,
-                "start_of_day_equity": equity_snapshot.start_of_day_equity,
-                "available_cash_source": "kite_margins",
+                "current_audited_equity": round(risk_equity, 2),
+                "start_of_day_equity": round(start_of_day_risk_equity, 2),
+                "account_equity_source": (
+                    "configured_paper_equity" if paper_mode else "kite_margins"
+                ),
+                "available_cash_source": (
+                    "configured_paper_equity" if paper_mode else "kite_margins"
+                ),
+                "broker_audited_equity": equity_snapshot.current_audited_equity,
                 "max_daily_loss_pct": settings.max_daily_loss_pct,
                 "max_realized_daily_loss_percent": settings.max_realized_daily_loss_percent,
                 "max_daily_planned_risk_percent": settings.max_daily_planned_risk_percent,
@@ -110,11 +132,40 @@ class RiskManagementService:
             "risk_state": {
                 "realized_daily_pnl": equity_snapshot.realized_pnl,
                 "unrealized_daily_pnl": equity_snapshot.unrealized_pnl_executable_bid,
-                "current_drawdown_pct": equity_snapshot.peak_to_current_drawdown_percent,
-                "current_audited_equity": equity_snapshot.current_audited_equity,
-                "start_of_day_equity": equity_snapshot.start_of_day_equity,
-                "peak_equity": equity_snapshot.peak_equity,
-                "daily_total_equity_change": equity_snapshot.daily_total_equity_change,
+                "current_drawdown_pct": (
+                    round(
+                        max(
+                            0.0,
+                            -(
+                                equity_snapshot.realized_pnl
+                                + equity_snapshot.unrealized_pnl_executable_bid
+                            )
+                            / risk_equity
+                            * 100.0,
+                        ),
+                        4,
+                    )
+                    if paper_mode
+                    else equity_snapshot.peak_to_current_drawdown_percent
+                ),
+                "current_audited_equity": round(risk_equity, 2),
+                "start_of_day_equity": round(start_of_day_risk_equity, 2),
+                "peak_equity": (
+                    round(risk_equity, 2) if paper_mode else equity_snapshot.peak_equity
+                ),
+                "daily_total_equity_change": (
+                    round(
+                        equity_snapshot.realized_pnl
+                        + equity_snapshot.unrealized_pnl_executable_bid,
+                        2,
+                    )
+                    if paper_mode
+                    else equity_snapshot.daily_total_equity_change
+                ),
+                "account_equity_source": (
+                    "configured_paper_equity" if paper_mode else "kite_margins"
+                ),
+                "broker_audited_equity": equity_snapshot.current_audited_equity,
                 "premium_exposure": equity_snapshot.premium_exposure,
                 "executable_bid_coverage_percent": equity_snapshot.executable_bid_coverage_percent,
                 "consecutive_losses": equity_snapshot.consecutive_losses,
@@ -128,8 +179,10 @@ class RiskManagementService:
         except Exception:
             return 0.0
 
-    def evaluate_signal(self, symbol: str) -> dict[str, Any]:
-        result = self.evaluate_entry()
+    def evaluate_signal(
+        self, symbol: str, order_mode: str | None = None
+    ) -> dict[str, Any]:
+        result = self.evaluate_entry(order_mode=order_mode)
         exposure = result["open_exposure"]
         symbol_count = int(exposure.get("by_symbol", {}).get(symbol, 0))
         if symbol_count >= settings.max_symbol_open_trades:

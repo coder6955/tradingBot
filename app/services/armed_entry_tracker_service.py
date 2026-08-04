@@ -158,7 +158,9 @@ class ArmedEntryTrackerService:
             return {"registered": False, "reason": "armed_entry_inputs_missing"}
 
         now = self.clock().replace(tzinfo=None)
-        risk_preflight = self.risk_management_service.evaluate_signal(symbol)
+        risk_preflight = self.risk_management_service.evaluate_signal(
+            symbol, order_mode=order_mode
+        )
         if not risk_preflight.get("passed", False):
             return {
                 "registered": False,
@@ -471,7 +473,9 @@ class ArmedEntryTrackerService:
                 ["event_entry_hard_gate_failed", "event_driven_paper_entry_disabled"],
             )
 
-        risk = self.risk_management_service.evaluate_signal(setup.symbol)
+        risk = self.risk_management_service.evaluate_signal(
+            setup.symbol, order_mode="paper"
+        )
         if not risk.get("passed", False):
             return self._mark_rejected(
                 setup.setup_id,

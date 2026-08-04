@@ -55,7 +55,7 @@ class KiteFeed:
             self.client = None
         else:
             self.client = self._kite_client()
-            access_token = load_access_token() or settings.kite_access_token
+            access_token = load_access_token()
             if access_token:
                 try:
                     # Some kite client versions provide set_access_token, others expect direct header.
@@ -63,6 +63,12 @@ class KiteFeed:
                 except Exception:
                     # ignore if unavailable
                     pass
+
+    def refresh_credentials(self, access_token: str | None = None) -> None:
+        """Apply the current dated token after startup bootstrap."""
+        token = access_token or load_access_token()
+        if token and self.client is not None:
+            self.client.set_access_token(token)
 
     def _safe_int(self, value: Any, default: int = 0) -> int:
         try:

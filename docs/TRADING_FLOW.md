@@ -11,6 +11,8 @@ The system has two entry paths:
 
 Neither path bypasses risk management.
 
+Before either path starts, the application must establish a broker-validated access token for the current India trading date. It first validates today's git-ignored `access_token.txt`; if unavailable, it may migrate a valid legacy `.env` token or perform configured headless user/password/TOTP login. Failure is explicit and keeps Kite-dependent trading and data paths unavailable. Manual `/kite/auth`, callback, and `/kite/session` remain recovery paths and save into the same dated token file.
+
 ## End-to-end flow
 
 ```mermaid
@@ -100,19 +102,19 @@ Hard gates and confidence evidence are separate.
 
 Hard gates are reserved for conditions that make an entry unsafe, unavailable, or untradable, such as:
 
-- Market session, data freshness, WebSocket health and data-gap safety.
-- Completed 1-minute and 5-minute directional agreement.
-- Reliable Bank Nifty constituent participation.
-- Selected-option premium participation.
-- Executable bid/ask spread, depth, liquidity and quote freshness.
-- Chase protection and sufficient remaining risk/reward.
+- Universal market-session enforcement, data freshness, WebSocket health and data-gap safety.
+- Sufficient completed 1-minute/5-minute data and a non-neutral five-minute directional authority.
+- A current valid contract, positive bid/ask, bounded spread, and one-lot entry/stop-exit depth.
+- Valid stop/target geometry, expiry/minimum-premium policy, chase protection, numerical target room, and sufficient remaining risk/reward.
 - Account risk limits and live broker/reconciliation protection.
 
 ### Candidate ranking and shadow evidence
 
-Weighted scoring ranks candidates only after primary gates pass. It does not approve an unsafe candidate or veto a safe candidate by itself. A scanner signal carries current-version `primary_gates_passed` provenance, allowing signal creation and order validation below the legacy `MIN_SIGNAL_SCORE`; signals without that exact provenance still face the legacy score guard. Hierarchical state, momentum phase, setup-family score adjustment, candidate utility, volatility/learned edge and duplicate regime scores are recorded as shadow diagnostics and have zero active adjustment or gate authority.
+Exact 1m/5m agreement, option-premium momentum/positive-candle score, ordinary constituent alignment, option-quality score, composite liquidity, volume, OI, expected-move coverage, and nearby-level context are not hard rejection gates. They remain timing, ranking, warning, or shadow evidence. A premium below trigger stays armed/watching. An opposing one-minute direction or extreme opposing-heavyweight participation changes an otherwise ready setup to `WATCHING_SETUP`; it does not permanently reject the episode. Missing/stale premium evidence still fails as unavailable data.
 
-Every accepted and rejected candidate should be logged with its reasons and score components.
+Weighted scoring ranks candidates only after safety gates pass. It does not approve an unsafe candidate or veto a safe candidate by itself. A scanner signal carries current-version `primary_gates_passed` provenance, allowing signal creation and order validation below the legacy `MIN_SIGNAL_SCORE`; signals without that exact provenance still face the legacy score guard. Hierarchical state, momentum phase, setup-family score adjustment, candidate utility, volatility/learned edge and duplicate regime scores are recorded as shadow diagnostics and have zero active adjustment or gate authority.
+
+Every accepted, watching/armed, and rejected candidate is logged with its state, reasons and score components. Watching states are not inserted into the rejected-opportunity table.
 
 ### Risk is a separate authority
 
@@ -126,7 +128,11 @@ Eligibility and scanner ranking do not select position risk. The scanner attache
 6. Downgrade or rejection reasons.
 7. Active and isolated shadow-policy results.
 
-The active policy defaults to `TIER_1_BASE` for both paper and live. Higher tiers require independent chronological after-cost evidence plus explicit policy enablement. `ABSOLUTE_MAX_RISK_PER_TRADE_PERCENT` cannot safely exceed 5%; invalid configuration rejects. When one lot does not fit, quantity is zero and the entry is rejected—risk percentage is never silently increased.
+The active policy remains capped at `TIER_1_BASE` for both paper and live, while the explicit operator-selected active budget is currently 4% in each mode. This operator budget is recorded separately from the unchanged 1/2/3/5% evidence-research tier spectrum and is not represented as validated expectancy. The configured per-trade ceiling is 4%; the process hard ceiling remains 5%. Higher research tiers still require independent chronological after-cost evidence plus explicit policy enablement. Quantity is floored to complete exchange lots so estimated stop loss, slippage and allocated costs stay within budget. When one complete lot does not fit, quantity is zero and the entry is rejected—the app cannot split a Bank Nifty lot or silently increase risk.
+
+Paper and live use different equity sources by design. Every paper scanner plan, armed preflight and final pre-order decision uses the fixed configured `ACCOUNT_EQUITY` (₹1,00,000 by default), irrespective of the connected Zerodha balance. Live final risk and affordability use current Zerodha funds/audited broker equity and preserve an explicit zero when broker funds are unavailable. Paper P&L, open premium, stop risk, loss streak, trade counts and executable-bid coverage still remain active gates against the fixed simulated capital.
+
+The current daily policy permits up to 8% cumulative planned risk so a winning or smaller-risk trade does not automatically prevent a later qualified opportunity, but realized loss is capped at 4%. Total simultaneous and Bank Nifty open risk are capped at 4%, and only one position may be open. Thus one full-budget stop ends new entries for that day; multiple trades are possible only while realized loss and cumulative planned risk remain within their separate caps. Paper starts each trading date again from the fixed ₹1,00,000 risk basis; prior-day paper profit or loss does not compound that base.
 
 Daily planned risk, realized loss, total open risk, Bank Nifty open risk, drawdown, loss streak, trade/stop counts, cooldown, premium exposure and open positions can downgrade or reject a tier. A per-trade tier larger than the remaining daily/open policy is rejected and reported as a configuration/policy conflict; neither limit is silently overridden.
 
@@ -141,11 +147,11 @@ The setup family supplies allowed regimes, momentum phases and an exit profile. 
 An early setup may be armed when:
 
 - Early arming is enabled for the requested mode.
-- Required data-quality, freshness, option-quality, market-regime, and price-action factors pass.
+- Required data-quality, freshness, contract, spread/depth, and numerical opportunity checks pass.
 - The contract, trigger, premium, SL, targets, and quantity are valid.
 - The account-level risk preflight passes.
 - At least one base-risk lot is feasible after the cost-aware stop-risk model.
-- Current session, bid/ask, emergency spread, quantity-safe entry/exit depth, expiry/token, and non-pathological option quality pass.
+- Current session, bid/ask, emergency spread, quantity-safe entry/exit depth, expiry/token, and price-plan validity pass.
 - `ArmedEntryTrackerService.register_from_scan()` actually returns `registered=true`.
 
 The scanner reports `ARMED_FOR_ENTRY` only after successful registration. `subscription_state` distinguishes fresh-tick verification, broker subscription awaiting its first fresh tick, and a disconnected queued subscription. A subscription failure cancels registration. Valid setups are persisted and recovered with their owner subscription after restart.
@@ -158,6 +164,7 @@ The default armed lifetime is 90 seconds. Repeated scans for the same mode, acti
 
 | State | Meaning | Possible next states |
 |---|---|---|
+| `WATCHING_SETUP` | Safe directional setup exists but its trigger or soft timing confirmation is incomplete. It is not a rejected opportunity. | `ARMED_FOR_ENTRY`, `ENTER_NOW`, `TOO_LATE`, `EXPIRED` |
 | `ARMED_FOR_ENTRY` | Registered and waiting for a valid option breakout. | `ORDER_PENDING`, `ENTER_NOW`, `TOO_LATE`, `EXPIRED`, `CANCELLED` |
 | `ENTER_NOW` | Confirmation passed and the paper entry function is executing. | `ENTERED_PAPER`, `CANCELLED` |
 | `ORDER_PENDING` | Execution has been queued off the WebSocket callback thread. | `ENTER_NOW`, `ENTERED_PAPER`, `CANCELLED` |
@@ -187,7 +194,7 @@ As soon as the executable price reaches the trigger, the tracker checks whether 
 - Remaining room to target 1.
 - Remaining reward-to-risk after using the current executable price.
 - Current bid/ask spread.
-- Breakout-aware expected-move and nearby-level context without bypassing numerical remaining-opportunity checks.
+- Expected-move and nearby-level warnings without bypassing numerical remaining-opportunity checks.
 - Armed setup expiry.
 
 After tick confirmation it also checks:
@@ -274,9 +281,13 @@ Backtest rejection handling uses a no-op repository with the public session labe
 
 Rejected-opportunity evaluation uses raw-tick first touch, then chronological candles. It never infers a hit from a later current quote. Same-candle stop/target paths stay ambiguous; incomplete paths are censored and excluded from learning. Repeated observations share a setup episode, so research counts independent episodes rather than scanner frequency.
 
-Research/backtests do not run from scheduled scans, fast callbacks, or order paths. Time-bucket evidence is precomputed after market hours, versioned by strategy/config, and rejected when missing, stale, or mismatched. Walk-forward validation uses multiple anchored folds with a purge/embargo at least as large as the trade horizon. Readiness requires at least the configured fold, independent out-of-sample trade, and session counts; zero-trade evidence cannot pass.
+Research/backtests do not run from scheduled scans, fast callbacks, or order paths. Time-bucket evidence is precomputed after market hours, versioned by strategy/config, and rejected when missing, stale, or mismatched. Walk-forward validation uses multiple anchored folds with a purge/embargo at least as large as the trade horizon. Readiness requires at least the configured fold, independent out-of-sample trade, and complete-session counts; zero-trade evidence cannot pass.
+
+A date counts as a complete research session only from regular-market Bank Nifty underlying ticks. The first and last ticks must fall within the configured market-boundary tolerance, estimated coverage must meet the minimum, and no internal gap may exceed the configured maximum. Late starts, early stops, sparse capture, and long feed interruptions remain `PARTIAL` with explicit reasons and do not advance the session-readiness threshold. Option ticks cannot substitute for missing underlying coverage. A partial date can still supply an individual episode only when that episode's own executable quote horizon is complete; it cannot support a full-session strategy conclusion.
 
 Heavy readiness is queued on the dedicated after-market lane. The readiness GET endpoint serves only a completed cached job. The evidence matrix keeps rejected observations out of expectancy and segments closed outcomes by setup, regime, time, DTE, direction, volatility, execution and participation. Promotion is advisory and manual; research cannot alter live thresholds or activate a version.
+
+For a Windows scheduled run, market-close outcome evaluation and the configured after-market research lane must report completion before the process exits. The scheduled runner then requests graceful API shutdown, waits for shutdown hooks and persistence queues to finish, and sends the configured Telegram safe-to-power-off notification. Continuous/manual server runs retain the existing overnight supervisor behavior. A scheduler execution limit is only a hung-process fail-safe and is not the normal completion signal.
 
 Readiness additionally requires positive after-cost expectancy, minimum profit factor, bounded drawdown, and sufficient evidence across traded trend, range, volatile, event-day and expiry-day regimes. Expiry-day evidence is explicitly excluded when the entry policy blocks expiry-day buying; missing event/regime samples fail rather than being assumed stable. Until a chronological out-of-sample calibration model has sufficient independent samples, API `probability` is `null`. The numeric score-derived value is exposed only as `heuristic_score_confidence` with an explicit source.
 
@@ -289,7 +300,7 @@ The collector completes configured 30-second, 1-, 3-, 5-, and 15-minute horizons
 
 Three policies consume the same immutable context and ordered events:
 
-1. `current_active_baseline_v1` reproduces completed directional 5-minute structure, exact 1m/5m agreement, premium/preparation/fast promotion, armed second confirmation, chase, target room, remaining RR, session, and account gates.
+1. `current_active_baseline_v2` reproduces v7 five-minute direction, non-opposing one-minute timing, extreme-heavyweight waiting, premium trigger, preparation/fast promotion, armed second confirmation, chase, target room, remaining RR, session, and account gates. Composite premium and ordinary constituent confirmation remain recorded as soft evidence.
 2. `transition_preparation_shadow_v1` may only reach `PREPARED` when 5-minute structure is directional or non-opposed transition evidence and every data/contract/plan/base-risk prerequisite passes. It never becomes enterable.
 3. `continuous_option_transmission_shadow_v1` carries the same tick evidence across `PREPARED -> ARMED -> TRIGGERED`, records transmission features separately, and never resets a second confirmation timer after promotion.
 

@@ -43,7 +43,9 @@ from app.services.time_utils import ist_now_naive
 
 
 class PassingAccountRisk:
-    def evaluate_signal(self, symbol):  # type: ignore[no-untyped-def]
+    def evaluate_signal(  # type: ignore[no-untyped-def]
+        self, symbol, order_mode=None
+    ):
         return {
             "passed": True,
             "reasons": [],
@@ -96,7 +98,10 @@ class RiskTierFoundationTests(unittest.TestCase):
             "max_banknifty_open_risk_percent": 10.0,
             "max_risk_per_trade_percent": 5.0,
             "absolute_max_risk_per_trade_percent": 5.0,
+            "active_paper_risk_budget_pct": 1.0,
+            "active_live_risk_budget_pct": 1.0,
             "enable_validated_higher_risk_active": True,
+            "enforce_market_hours": False,
         }.items():
             object.__setattr__(settings, key, value)
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -273,6 +278,44 @@ class RiskTierFoundationTests(unittest.TestCase):
         self.assertEqual(paper.approved_risk_amount, live.approved_risk_amount)
         self.assertEqual(paper.maximum_quantity, live.maximum_quantity)
 
+    def test_operator_four_percent_budget_downsizes_to_whole_lots(self) -> None:
+        object.__setattr__(settings, "active_paper_risk_budget_pct", 4.0)
+        object.__setattr__(settings, "active_live_risk_budget_pct", 4.0)
+        object.__setattr__(settings, "max_risk_per_trade_percent", 4.0)
+        object.__setattr__(settings, "max_daily_planned_risk_percent", 8.0)
+        object.__setattr__(settings, "max_realized_daily_loss_percent", 4.0)
+        object.__setattr__(settings, "max_total_open_risk_percent", 4.0)
+        object.__setattr__(settings, "max_banknifty_open_risk_percent", 4.0)
+        service = RiskPolicyService()
+
+        paper = service.evaluate(
+            self._context(
+                TIER_1_BASE,
+                order_mode="paper",
+                stop_price=80.0,
+                setup_quality_evidence={},
+            )
+        )
+        live = service.evaluate(
+            self._context(
+                TIER_1_BASE,
+                order_mode="live",
+                stop_price=80.0,
+                setup_quality_evidence={},
+            )
+        )
+
+        for decision in (paper, live):
+            self.assertTrue(decision.passed)
+            self.assertEqual(decision.approved_risk_percent, 4.0)
+            self.assertEqual(decision.approved_risk_amount, 4000.0)
+            self.assertEqual(decision.maximum_quantity, 195)
+            self.assertEqual(decision.maximum_quantity % 15, 0)
+            self.assertLessEqual(
+                decision.estimated_total_loss_at_stop,
+                decision.approved_risk_amount,
+            )
+
     def test_episode_reservation_prevents_duplicate_and_validates_transitions(
         self,
     ) -> None:
@@ -389,6 +432,32 @@ class RiskTierFoundationTests(unittest.TestCase):
         self.assertIsNotNone(
             DecisionEvidenceRepository().get_decision(result["evidence"]["decision_id"])
         )
+
+    def test_pre_order_market_session_gate_blocks_every_order_mode(self) -> None:
+        object.__setattr__(settings, "enforce_market_hours", True)
+        service = PreOrderRiskService(risk_management_service=PassingAccountRisk())
+        service._session_eligible = lambda: False  # type: ignore[method-assign]
+
+        result = service.evaluate_and_reserve(
+            self._signal(),
+            order_mode="paper",
+            live_requested=False,
+            execution_quality={
+                "passed": True,
+                "reasons": [],
+                "details": {
+                    "ask": 100,
+                    "bid": 99.5,
+                    "spread_pct": 0.5,
+                    "bid_depth_quantity": 1000,
+                    "ask_depth_quantity": 1000,
+                },
+            },
+            metadata={"trigger_identifier": "outside-session"},
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertIn("SESSION_NOT_ELIGIBLE", result["rejection_reasons"])
 
     def test_decision_evidence_is_append_only(self) -> None:
         repo = DecisionEvidenceRepository()

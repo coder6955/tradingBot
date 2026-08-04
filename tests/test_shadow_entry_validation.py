@@ -46,7 +46,9 @@ from app.services.stop_exit_liquidity_service import (
 
 
 class PassingRisk:
-    def evaluate_signal(self, symbol):  # type: ignore[no-untyped-def]
+    def evaluate_signal(  # type: ignore[no-untyped-def]
+        self, symbol, order_mode=None
+    ):
         return {
             "passed": True,
             "reasons": [],
@@ -82,6 +84,8 @@ class ShadowEntryValidationTests(unittest.TestCase):
         object.__setattr__(settings, "max_realized_daily_loss_percent", 10.0)
         object.__setattr__(settings, "max_total_open_risk_percent", 10.0)
         object.__setattr__(settings, "max_banknifty_open_risk_percent", 10.0)
+        object.__setattr__(settings, "active_paper_risk_budget_pct", 1.0)
+        object.__setattr__(settings, "active_live_risk_budget_pct", 1.0)
 
     def tearDown(self) -> None:
         for key, value in self.settings_snapshot.items():
@@ -137,6 +141,7 @@ class ShadowEntryValidationTests(unittest.TestCase):
             "provenance_valid": True,
             "data_fresh": True,
             "premium_confirmation_passed": True,
+            "premium_trigger_passed": True,
             "preparation_passed": True,
             "fast_candidate_requirements_passed": True,
             "promotion_registered": True,
@@ -363,6 +368,15 @@ class ShadowEntryValidationTests(unittest.TestCase):
         )
         self.assertFalse(active_confirmation_missing.enterable)
         self.assertIn("armed_second_confirmation", active_confirmation_missing.reasons)
+        neutral_one_minute = CurrentBaselineEntryPolicy().evaluate(
+            self._context(one_minute_structure="neutral"), []
+        )
+        self.assertTrue(neutral_one_minute.enterable)
+        opposed_one_minute = CurrentBaselineEntryPolicy().evaluate(
+            self._context(one_minute_structure="bearish"), []
+        )
+        self.assertFalse(opposed_one_minute.enterable)
+        self.assertIn("one_minute_not_opposed", opposed_one_minute.reasons)
         transition = TransitionPreparationShadowPolicy().evaluate(
             self._context(five_minute_structure="transitioning"), []
         )

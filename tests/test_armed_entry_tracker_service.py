@@ -62,7 +62,7 @@ class FakeOrderService:
 
 
 class PassingRiskService:
-    def evaluate_signal(self, symbol):
+    def evaluate_signal(self, symbol, order_mode=None):
         return {"passed": True, "reasons": []}
 
 

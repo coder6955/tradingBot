@@ -145,6 +145,30 @@ class TradeSetupServiceTests(unittest.TestCase):
         self.assertIn("option premium is below minimum configured for buying", failures)
         self.assertIn("expiry-day option buying is blocked", failures)
 
+    def test_volume_oi_and_composite_liquidity_are_ranking_only(self) -> None:
+        service = TradeSetupService()
+        contract = OptionContract(
+            tradingsymbol="BANKNIFTY99DEC58000CE",
+            exchange="NFO",
+            instrument_token=1,
+            name="BANKNIFTY",
+            expiry="2099-12-31",
+            strike=58000,
+            option_type="CE",
+            lot_size=15,
+            last_price=100.0,
+            open_interest=1,
+            volume=1,
+            bid=99.5,
+            ask=100.0,
+        )
+
+        failures = service.risk_checks(20, contract, 100.0, "BUY")
+
+        self.assertNotIn("option liquidity is below threshold", failures)
+        self.assertNotIn("option volume is below threshold", failures)
+        self.assertNotIn("option open interest is below threshold", failures)
+
     def test_banknifty_buy_prices_use_option_structure_not_static_percent(self) -> None:
         MarketDataService().save_candles(
             "BANKNIFTY26JUL58000CE",

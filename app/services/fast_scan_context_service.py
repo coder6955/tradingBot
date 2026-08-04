@@ -141,9 +141,25 @@ class FastScanContextService:
                 }
             )
 
+        wait_reasons: list[str] = []
+        if candidate.get("one_minute_opposed") is True:
+            wait_reasons.append("one_minute_opposes_five_minute_wait")
+        if candidate.get("constituent_strongly_opposed") is True:
+            wait_reasons.append("opposing_heavyweight_participation_wait")
+        if wait_reasons:
+            return self._remember(
+                {
+                    **base,
+                    "passed": False,
+                    "state": "WATCHING_SETUP",
+                    "hard_rejection": False,
+                    "reason": wait_reasons[0],
+                    "reasons": wait_reasons,
+                    "direction": direction,
+                }
+            )
+
         for key, reason in (
-            ("directional_agreement", "one_minute_and_five_minute_direction_disagree"),
-            ("constituent_participation", "banknifty_constituent_participation_failed"),
             ("data_fresh", "fast_candidate_context_data_stale"),
             ("gap_safe", "fast_candidate_data_gap_active"),
             ("risk_preflight", "fast_candidate_risk_preflight_failed"),

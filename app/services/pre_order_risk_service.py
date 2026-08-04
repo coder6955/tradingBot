@@ -62,7 +62,9 @@ class PreOrderRiskService:
             "pre_order_episode_identity_duration", identity_started, {"mode": mode}
         )
         account_started = time.perf_counter()
-        risk_guard = self.risk_management_service.evaluate_signal(signal.symbol)
+        risk_guard = self.risk_management_service.evaluate_signal(
+            signal.symbol, order_mode=mode
+        )
         self._record_latency(
             "pre_order_account_state_loading_duration", account_started, {"mode": mode}
         )
@@ -70,13 +72,21 @@ class PreOrderRiskService:
         risk_state = (
             risk_guard.get("risk_state", {}) if isinstance(risk_guard, dict) else {}
         )
-        equity = float(
-            account_equity_override
-            or risk_state.get("current_audited_equity")
-            or limits.get("current_audited_equity")
-            or limits.get("available_cash")
-            or (settings.account_equity if mode == "paper" else 0.0)
-        )
+        if mode == "paper":
+            # Paper research must use one stable simulated capital base and
+            # must not change with the connected Zerodha account balance.
+            equity = float(settings.account_equity)
+        elif account_equity_override is not None:
+            # Preserve an explicit live zero so unavailable broker funds fail
+            # closed instead of falling through to a stale account snapshot.
+            equity = float(account_equity_override)
+        else:
+            equity = float(
+                risk_state.get("current_audited_equity")
+                or limits.get("current_audited_equity")
+                or limits.get("available_cash")
+                or 0.0
+            )
         factors = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
         risk_request = (
             factors.get("risk_request")

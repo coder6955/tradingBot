@@ -20,10 +20,10 @@ class KiteProvider:
     def __init__(self) -> None:
         if KiteConnect is None:
             self.client = None
-            self.access_token = load_access_token() or settings.kite_access_token
+            self.access_token = load_access_token()
             return
         self.client = self._kite_client()
-        self.access_token = load_access_token() or settings.kite_access_token
+        self.access_token = load_access_token()
         if self.access_token:
             self.client.set_access_token(self.access_token)
 

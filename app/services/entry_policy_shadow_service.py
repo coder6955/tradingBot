@@ -5,7 +5,6 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
 
-from app.config import settings
 from app.services.database import ShadowPolicyDecisionRecord, get_session
 from app.services.episode_outcome_collector import MarketPathEvent
 from app.services.strategy_lineage_service import current_strategy_lineage
@@ -35,6 +34,7 @@ class EntryPolicyContext:
     provenance_valid: bool = False
     data_fresh: bool = False
     premium_confirmation_passed: bool = False
+    premium_trigger_passed: bool = False
     preparation_passed: bool = False
     fast_candidate_requirements_passed: bool = False
     promotion_registered: bool = False
@@ -73,9 +73,9 @@ class EntryPolicy(Protocol):
 
 
 class CurrentBaselineEntryPolicy:
-    """Shadow representation of the unchanged active v6 confirmation sequence."""
+    """Shadow representation of the active v7 confirmation sequence."""
 
-    version = "current_active_baseline_v1"
+    version = "current_active_baseline_v2"
     kind = "CURRENT_ACTIVE_BASELINE"
 
     def evaluate(
@@ -91,9 +91,10 @@ class CurrentBaselineEntryPolicy:
         gates = {
             "completed_five_minute_directional": context.five_minute_structure.lower()
             == required_structure,
-            "exact_one_five_agreement": context.one_minute_structure.lower()
-            == required_structure,
-            "premium_confirmation": context.premium_confirmation_passed,
+            "one_minute_not_opposed": context.one_minute_structure.lower()
+            in {required_structure, "neutral"},
+            "constituents_not_strongly_contradictory": not context.constituent_strongly_contradictory,
+            "premium_trigger": context.premium_trigger_passed,
             "preparation": context.preparation_passed,
             "fast_candidate_requirements": context.fast_candidate_requirements_passed
             if requires_fast_promotion
@@ -130,9 +131,13 @@ class CurrentBaselineEntryPolicy:
             features={
                 "gates": gates,
                 "event_count": len(events),
-                "active_behavior_unchanged": True,
+                "active_behavior_reproduced": True,
                 "entry_route": route,
                 "route_conditional_gates_reproduced": True,
+                "soft_evidence": {
+                    "premium_confirmation_passed": context.premium_confirmation_passed,
+                    "constituent_evidence_available": context.constituent_evidence_available,
+                },
             },
             timing_waterfall=_timing_waterfall(context, events),
         )

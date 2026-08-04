@@ -76,9 +76,8 @@ class KiteWebSocketPriceFeed:
         market_session_service: MarketSessionService | None = None,
     ) -> None:
         self.api_key = api_key or settings.kite_api_key
-        self.access_token = (
-            access_token or load_access_token() or settings.kite_access_token
-        )
+        self._allow_injected_token_fallback = access_token is not None
+        self.access_token = access_token or load_access_token()
         self.ticker_factory = ticker_factory
         self.order_update_handler = order_update_handler
         self.tick_handler = tick_handler
@@ -273,7 +272,9 @@ class KiteWebSocketPriceFeed:
     def refresh_credentials(self, *, access_token: str | None = None) -> None:
         """Refresh credentials from the token store before creating a ticker."""
         self.api_key = settings.kite_api_key
-        latest_token = access_token or load_access_token() or settings.kite_access_token
+        latest_token = access_token or load_access_token()
+        if latest_token is None and self._allow_injected_token_fallback:
+            latest_token = self.access_token
         token_changed = bool(latest_token and latest_token != self.access_token)
         api_key_changed = bool(
             self.api_key and self.api_key != self._last_auth_failed_api_key

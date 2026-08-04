@@ -30,5 +30,5 @@ class NotificationService:
             )
             response.raise_for_status()
             return {"status": "sent"}
-        except Exception as exc:
-            return {"status": "error", "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - requests/provider boundary
+            return {"status": "error", "error_type": type(exc).__name__}

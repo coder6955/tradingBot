@@ -83,6 +83,11 @@ class LowCashLiveKiteProvider(LiveKiteProvider):
         return {"equity": {"available": {"cash": 10000}}}
 
 
+class LowCashPaperKiteProvider(FailingKiteProvider):
+    def margins(self):  # type: ignore[no-untyped-def]
+        return {"equity": {"available": {"cash": 500}}}
+
+
 class PartialFillProvider(LiveKiteProvider):
     def __init__(self) -> None:
         super().__init__()
@@ -114,12 +119,16 @@ class CountingQuoteProvider(FailingKiteProvider):
 
 
 class PassingRiskService:
-    def evaluate_signal(self, symbol):  # type: ignore[no-untyped-def]
+    def evaluate_signal(  # type: ignore[no-untyped-def]
+        self, symbol, order_mode=None
+    ):
         return {"passed": True, "reasons": []}
 
 
 class BlockingRiskService:
-    def evaluate_signal(self, symbol):  # type: ignore[no-untyped-def]
+    def evaluate_signal(  # type: ignore[no-untyped-def]
+        self, symbol, order_mode=None
+    ):
         return {
             "passed": False,
             "reasons": ["max daily loss reached"],
@@ -173,11 +182,16 @@ class FailingCreateTradeRepository(CapturingTradeRepository):
 class OrderServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         AccountFundsService.invalidate_cache()
+        self.original_enforce_market_hours = settings.enforce_market_hours
+        object.__setattr__(settings, "enforce_market_hours", False)
         self.temp_db = tempfile.NamedTemporaryFile(delete=False)
         self.temp_db.close()
         init_db(f"sqlite:///{self.temp_db.name}")
 
     def tearDown(self) -> None:
+        object.__setattr__(
+            settings, "enforce_market_hours", self.original_enforce_market_hours
+        )
         try:
             if os.path.exists(self.temp_db.name):
                 os.remove(self.temp_db.name)
@@ -221,6 +235,39 @@ class OrderServiceTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "paper")
         self.assertEqual(result["trade"]["symbol"], "BANKNIFTY26JUL58000CE")
+
+    def test_paper_order_uses_fixed_equity_when_zerodha_has_only_500(self) -> None:
+        service = OrderService(
+            kite_provider=LowCashPaperKiteProvider(),  # type: ignore[arg-type]
+            paper_trading_service=PaperTradingService(),
+        )
+
+        paper_risk = service.risk_management_service.evaluate_entry(order_mode="paper")
+        live_risk = service.risk_management_service.evaluate_entry(order_mode="live")
+
+        self.assertEqual(paper_risk["limits"]["current_audited_equity"], 100000.0)
+        self.assertEqual(paper_risk["limits"]["available_cash"], 100000.0)
+        self.assertEqual(
+            paper_risk["limits"]["account_equity_source"],
+            "configured_paper_equity",
+        )
+        self.assertEqual(live_risk["limits"]["current_audited_equity"], 500.0)
+        self.assertEqual(live_risk["limits"]["available_cash"], 500.0)
+        self.assertEqual(live_risk["limits"]["account_equity_source"], "kite_margins")
+
+        result = service.place_signal_order(
+            self._signal(),
+            confirm_live=False,
+            order_mode="paper",
+            metadata={"trigger_identifier": "fixed-paper-equity"},
+        )
+
+        self.assertEqual(result["status"], "paper")
+        self.assertEqual(
+            result["pre_order_risk"]["risk_decision"]["approved_risk_amount"],
+            4000.0,
+        )
+        self.assertEqual(result["placed_quantity"], 15)
 
     def test_paper_order_cannot_bypass_account_risk_controls(self) -> None:
         paper = PaperTradingService()

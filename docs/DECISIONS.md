@@ -339,3 +339,45 @@ This file records decisions that should survive individual conversations and cod
 **Decision:** Compare unique episode-policy pairs using chronological training, validation, and untouched out-of-sample folds with purge/embargo at least as long as the maximum horizon. Simulate 1/2/3/5% only as counterfactuals and require staged promotion.  
 **Why:** Aggregate return, random folds, repeated scanner rows, or one strong day cannot justify an entry-policy or risk increase.  
 **Consequence:** This phase cannot activate a shadow policy or higher risk. Insufficient executable data returns `INSUFFICIENT DATA`, not a promotion.
+
+## D049 — Isolate paper capital from the connected broker account
+
+**Status:** Accepted  
+**Decision:** Paper scanner sizing, account percentage caps, armed-entry preflight and final pre-order risk use the fixed configured `ACCOUNT_EQUITY`, which defaults to ₹1,00,000. Only live trading uses Zerodha funds and audited broker equity for risk sizing and affordability.  
+**Why:** Paper research must remain reproducible and must not stop, resize or become more aggressive merely because cash is deposited into or withdrawn from the connected live broker account.  
+**Consequence:** Paper still enforces realized/unrealized paper P&L, premium exposure, planned/open-stop risk, loss streak, trade limits and executable-bid coverage, but calculates percentage budgets against the fixed simulation capital. Live continues to fail closed when broker equity is unavailable.
+
+## D050 — Use an explicit operator-selected four-percent active budget
+
+**Status:** Accepted by explicit operator direction  
+**Decision:** `ACTIVE_PAPER_RISK_BUDGET_PERCENT` and `ACTIVE_LIVE_RISK_BUDGET_PERCENT` are both 4%. Paper applies this to the fixed ₹1,00,000 daily capital base; live applies it to current Zerodha equity. The active per-trade ceiling, realized daily-loss cap and simultaneous Bank Nifty/open-risk caps are 4%. Cumulative daily planned risk is 8%, allowing another qualified trade after a winner or a smaller-risk attempt while one full-budget realized loss still ends new entries for the day.  
+**Why:** A one-percent budget rejected otherwise qualified one-lot opportunities when modeled stop risk marginally exceeded ₹1,000. The operator explicitly accepts a higher loss budget and wants quantity reduced before rejecting a qualified setup.  
+**Consequence:** Risk sizing floors quantity to exchange-valid whole lots and never widens the strategy stop to consume budget. If one lot including modeled slippage and allocated costs exceeds ₹4,000 in paper, or 4% of actual equity in live, the trade remains rejected. The 1/2/3/5% research tier spectrum and evidence requirements remain separate; the 4% operator budget is versioned as `banknifty_risk_v2` and must not be described as validated expectancy. Live mode, broker affordability, protective-stop and reconciliation gates remain unchanged.
+
+## D051 — Bootstrap one dated Kite token before runtime startup
+
+**Status:** Accepted by explicit operator direction  
+**Decision:** Repository-root `access_token.txt` is the sole runtime access-token store. It is git-ignored, written atomically with India trading date and creation metadata, and rejected when stale or malformed. Before starting any broker, WebSocket, scanner or automation work, startup validates today's file token, migrates a valid legacy `.env` token once, or performs configured headless Kite login with credentials read only from `.env`.  
+**Why:** Daily manual request-token exchange delays unattended startup, while an undated plaintext token or hardcoded password/TOTP secret creates leakage and stale-session risk.  
+**Consequence:** `KITE_USER_ID`, `KITE_PASSWORD` and the Base32 `KITE_TOTP_SECRET` require one-time local configuration. The current six-digit OTP is not stored. Token values and profile data are not logged. A failed login cannot fall back to yesterday's token; Kite-dependent modules remain unavailable and manual `/kite/auth` remains a recovery route. Selenium/Chrome availability and broker login-page changes are operational dependencies, so startup exposes a redacted bootstrap status.
+
+## D052 — End Windows scheduled runs on durable after-market completion
+
+**Status:** Accepted  
+**Decision:** The Windows scheduled runner exits only after the supervisor records `after_market_pipeline_completed`, then requests graceful Uvicorn shutdown and sends a Telegram safe-to-power-off notification. Continuous/manual app runs still retain their overnight supervisor. A 20-hour Task Scheduler limit remains only as a stuck-process circuit breaker.  
+**Why:** A fixed eight-hour window can terminate unfinished research after a late start, while leaving every boot-managed process alive overnight prevents a fresh next-day token bootstrap.  
+**Consequence:** Normal scheduled shutdown is driven by completed outcome/research work and flushes application shutdown hooks. Telegram credentials are optional but required for remote notification; notification failure does not prevent safe process shutdown.
+
+## D053 — Count only qualified underlying coverage as a research session
+
+**Status:** Accepted  
+**Decision:** A research date counts toward session-based strategy readiness only when regular-market `BANKNIFTY`/`NIFTY BANK` underlying ticks satisfy configurable start/end tolerance, minimum coverage, and maximum internal-gap requirements. The audit retains incomplete dates as `PARTIAL` and reports their reasons.  
+**Why:** Starting the app late, shutting it early, or losing the feed creates a tick-bearing date but not an independent full trading session. Counting such dates overstates regime and time-of-day evidence.  
+**Consequence:** The 20-session mechanical evidence gate uses only qualified complete sessions. Option activity cannot repair missing underlying coverage. Partial dates may contribute only independently complete episode paths and cannot justify full-session strategy conclusions.
+
+## D054 — Restrict hard gates to safety, availability, tradability, and numerical opportunity
+
+**Status:** Accepted by explicit operator direction; active as experimental v7  
+**Decision:** Permanent rejection gates are limited to universal session enforcement, canonical/fresh/gap-safe data, valid five-minute direction, valid current contract and executable book, spread/depth, expiry/minimum premium, valid stop/target geometry, numerical chase/target-room/remaining-RR, account/duplicate risk, and live broker safety. Neutral five-minute structure remains `WATCHING_SETUP`. One-minute opposition and extreme opposing-heavyweight participation pause entry. Premium momentum/breakout readiness, ordinary bank alignment, option quality, composite liquidity, volume, OI, expected-move and nearby-level context are timing/ranking/warning evidence rather than permanent rejection gates. Missing or stale premium evidence remains an unavailable-data failure.  
+**Why:** The accumulated evidence contains zero qualified complete sessions. Unvalidated confirmation gates were discarding potentially useful setups and conflating alpha hypotheses with safety. Retaining safe setups as watching/armed preserves opportunity while keeping execution and account protections intact.  
+**Consequence:** `banknifty_option_buying_v7` records watching states without inserting rejected-opportunity rows. A premium trigger can later promote the same setup; weak contextual scores cannot authorize an unsafe trade. The universal pre-order session switch defaults to and is configured `true`. Re-promotion of any soft signal to a rejection gate requires gate-specific independent chronological evidence across qualified sessions.

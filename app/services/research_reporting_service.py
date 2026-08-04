@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime, time
 from typing import Any
 
 from sqlalchemy import func
@@ -27,12 +27,8 @@ class ResearchDatasetAuditService:
         session = get_session()
         try:
             raw_ticks = int(session.query(func.count(RawTickRecord.id)).scalar() or 0)
-            sessions = int(
-                session.query(
-                    func.count(func.distinct(RawTickRecord.session_date))
-                ).scalar()
-                or 0
-            )
+            session_qualification = self._session_qualification(session)
+            sessions = int(session_qualification["complete_sessions"])
             unique_episodes = int(
                 session.query(func.count(SetupEpisodeRecord.id)).scalar() or 0
             )
@@ -121,6 +117,9 @@ class ResearchDatasetAuditService:
         return {
             "dataset_label": "PRELIMINARY" if sufficient else "INSUFFICIENT DATA",
             "sessions_available": sessions,
+            "sessions_observed": int(session_qualification["observed_sessions"]),
+            "partial_sessions": int(session_qualification["partial_sessions"]),
+            "session_qualification": session_qualification,
             "unique_episodes": unique_episodes,
             "episode_observations": observations,
             "shadow_policy_decisions": policy_decisions,
@@ -142,8 +141,162 @@ class ResearchDatasetAuditService:
             "conclusion": (
                 "Dataset meets the minimum mechanical completeness screen; chronological policy evaluation is still required."
                 if sufficient
-                else "Insufficient unique episodes, sessions, executable quotes, or completed observations for policy conclusions."
+                else "Insufficient unique episodes, complete sessions, executable quotes, or completed observations for policy conclusions."
             ),
+        }
+
+    def _session_qualification(self, session: Any) -> dict[str, Any]:
+        rows = (
+            session.query(
+                RawTickRecord.session_date,
+                RawTickRecord.exchange_timestamp,
+                RawTickRecord.receive_timestamp,
+            )
+            .filter(func.upper(RawTickRecord.symbol).in_(("BANKNIFTY", "NIFTY BANK")))
+            .order_by(
+                RawTickRecord.session_date.asc(),
+                RawTickRecord.exchange_timestamp.asc(),
+                RawTickRecord.receive_timestamp.asc(),
+            )
+            .yield_per(5000)
+        )
+        return self._qualify_session_rows(rows)
+
+    def _qualify_session_rows(self, rows: Any) -> dict[str, Any]:
+        market_open = self._parse_time(settings.runtime_market_open_time)
+        market_close = self._parse_time(settings.runtime_market_close_time)
+        tolerance_seconds = max(
+            0,
+            int(settings.research_session_boundary_tolerance_minutes) * 60,
+        )
+        expected_interval_seconds = max(
+            0.1, float(settings.outcome_missing_interval_seconds)
+        )
+        maximum_gap_seconds = max(
+            expected_interval_seconds,
+            float(settings.research_session_max_gap_seconds),
+        )
+        minimum_coverage_pct = min(
+            100.0, max(0.0, float(settings.research_session_min_coverage_pct))
+        )
+        grouped: dict[str, dict[str, Any]] = {}
+        for session_date, exchange_timestamp, receive_timestamp in rows:
+            timestamp = exchange_timestamp or receive_timestamp
+            if timestamp is None:
+                continue
+            clean_timestamp = timestamp.replace(tzinfo=None)
+            trading_date = self._coerce_date(session_date, clean_timestamp.date())
+            date_key = trading_date.isoformat()
+            bucket = grouped.setdefault(
+                date_key,
+                {"trading_date": trading_date, "timestamps": []},
+            )
+            start = datetime.combine(trading_date, market_open)
+            end = datetime.combine(trading_date, market_close)
+            if start <= clean_timestamp <= end:
+                bucket["timestamps"].append(clean_timestamp)
+
+        details: list[dict[str, Any]] = []
+        complete_dates: list[str] = []
+        partial_dates: list[str] = []
+        for date_key in sorted(grouped):
+            bucket = grouped[date_key]
+            trading_date = bucket["trading_date"]
+            timestamps = sorted(bucket["timestamps"])
+            start = datetime.combine(trading_date, market_open)
+            end = datetime.combine(trading_date, market_close)
+            session_seconds = max(1.0, (end - start).total_seconds())
+            reasons: list[str] = []
+            if not timestamps:
+                details.append(
+                    {
+                        "trading_date": date_key,
+                        "classification": "PARTIAL",
+                        "reasons": ["no_regular_market_underlying_ticks"],
+                        "tick_count": 0,
+                        "coverage_pct": 0.0,
+                        "first_tick": None,
+                        "last_tick": None,
+                        "opening_delay_seconds": session_seconds,
+                        "closing_shortfall_seconds": session_seconds,
+                        "gap_count": 0,
+                        "missing_seconds": session_seconds,
+                        "worst_gap_seconds": None,
+                    }
+                )
+                partial_dates.append(date_key)
+                continue
+
+            first_tick = timestamps[0]
+            last_tick = timestamps[-1]
+            opening_delay = max(0.0, (first_tick - start).total_seconds())
+            closing_shortfall = max(0.0, (end - last_tick).total_seconds())
+            gap_count = 0
+            internal_missing = 0.0
+            worst_gap = 0.0
+            prior = first_tick
+            for timestamp in timestamps[1:]:
+                gap = max(0.0, (timestamp - prior).total_seconds())
+                if gap > expected_interval_seconds:
+                    gap_count += 1
+                    internal_missing += gap - expected_interval_seconds
+                worst_gap = max(worst_gap, gap)
+                prior = timestamp
+            missing_seconds = min(
+                session_seconds,
+                opening_delay + closing_shortfall + internal_missing,
+            )
+            coverage_pct = round(
+                max(0.0, (session_seconds - missing_seconds) / session_seconds * 100),
+                4,
+            )
+            if opening_delay > tolerance_seconds:
+                reasons.append("late_session_start")
+            if closing_shortfall > tolerance_seconds:
+                reasons.append("early_session_end")
+            if worst_gap > maximum_gap_seconds:
+                reasons.append("gap_exceeds_limit")
+            if coverage_pct < minimum_coverage_pct:
+                reasons.append("coverage_below_minimum")
+            classification = "COMPLETE" if not reasons else "PARTIAL"
+            if classification == "COMPLETE":
+                complete_dates.append(date_key)
+            else:
+                partial_dates.append(date_key)
+            details.append(
+                {
+                    "trading_date": date_key,
+                    "classification": classification,
+                    "reasons": reasons,
+                    "tick_count": len(timestamps),
+                    "coverage_pct": coverage_pct,
+                    "first_tick": first_tick.isoformat(sep=" "),
+                    "last_tick": last_tick.isoformat(sep=" "),
+                    "opening_delay_seconds": round(opening_delay, 3),
+                    "closing_shortfall_seconds": round(closing_shortfall, 3),
+                    "gap_count": gap_count,
+                    "missing_seconds": round(missing_seconds, 3),
+                    "worst_gap_seconds": round(worst_gap, 3),
+                }
+            )
+        return {
+            "underlying_symbols": ["BANKNIFTY", "NIFTY BANK"],
+            "market_window": {
+                "start": market_open.strftime("%H:%M"),
+                "end": market_close.strftime("%H:%M"),
+            },
+            "boundary_tolerance_minutes": int(
+                settings.research_session_boundary_tolerance_minutes
+            ),
+            "expected_tick_interval_seconds": expected_interval_seconds,
+            "maximum_gap_seconds": maximum_gap_seconds,
+            "minimum_coverage_pct": minimum_coverage_pct,
+            "observed_sessions": len(details),
+            "complete_sessions": len(complete_dates),
+            "partial_sessions": len(partial_dates),
+            "complete_dates": complete_dates,
+            "partial_dates": partial_dates,
+            "details": details,
         }
 
     def _missing_intervals(self, session: Any) -> dict[str, Any]:
@@ -199,6 +352,20 @@ class ResearchDatasetAuditService:
 
     def _percent(self, numerator: int, denominator: int) -> float | None:
         return round(numerator / denominator * 100.0, 4) if denominator else None
+
+    def _parse_time(self, value: str) -> time:
+        hour, minute = str(value).split(":", 1)
+        return time(int(hour), int(minute))
+
+    def _coerce_date(self, value: Any, fallback: date) -> date:
+        if isinstance(value, datetime):
+            return value.date()
+        if isinstance(value, date):
+            return value
+        try:
+            return date.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return fallback
 
 
 class ShadowPolicyResearchReportService:

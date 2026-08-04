@@ -17,7 +17,7 @@ SETTING_PURPOSES: dict[str, str] = {
     "market_state_max_uncertainty": "Maximum tolerated market-state uncertainty before enriched decisions fail closed.",
     "mtf_min_timeframes": "Legacy diagnostic threshold; v5 actively requires completed 1-minute and 5-minute agreement.",
     "mtf_min_alignment_score": "Legacy diagnostic alignment threshold retained for versioned research.",
-    "active_decision_timeframes": "Fixed active v6 strategy timeframes: 1minute and 5minute only.",
+    "active_decision_timeframes": "Fixed active v7 strategy timeframes: 1minute and 5minute only.",
     "structure_min_completed_candles": "Minimum completed candles required before multi-candle price structure may choose a direction.",
     "opening_structure_min_1m_candles": "Completed one-minute candles required by the opening-session structure policy.",
     "opening_structure_min_5m_candles": "Completed five-minute candles required by the opening-session structure policy.",
@@ -41,8 +41,8 @@ SETTING_PURPOSES: dict[str, str] = {
     "min_risk_reward": "Minimum reward-to-risk required after dynamic entry, stop, and target calculation.",
     "max_trend_momentum_score": "Cap for correlated trend/momentum indicators so they cannot overboost confidence.",
     "max_bid_ask_spread_pct": "Maximum acceptable option bid/ask spread for tradable liquidity.",
-    "min_option_volume": "Minimum selected option volume needed to avoid thin contracts.",
-    "min_option_oi": "Minimum selected option open interest needed to avoid poor depth.",
+    "min_option_volume": "Ranking reference for selected-option activity; executable spread and depth remain hard.",
+    "min_option_oi": "Ranking reference for selected-option participation; executable spread and depth remain hard.",
     "min_option_buy_delta": "Lower delta bound for option-buying contracts; avoids too-far OTM options.",
     "max_option_buy_delta": "Upper delta bound for option-buying contracts; avoids overly expensive/deep ITM options.",
     "target_option_buy_delta": "Preferred absolute delta used to rank executable option-buying contracts.",
@@ -51,7 +51,7 @@ SETTING_PURPOSES: dict[str, str] = {
     "max_option_buy_theta_pct": "Theta quality guard for option buying; avoids contracts where decay is too heavy.",
     "min_option_buy_iv": "Lower IV sanity bound used by option-quality scoring.",
     "max_option_buy_iv": "Upper IV sanity bound used by option-quality scoring.",
-    "min_option_quality_score": "Minimum combined option quality score for selected contracts.",
+    "min_option_quality_score": "Ranking reference for combined option quality; it has no hard-gate authority in v7.",
     "enable_volatility_edge": "Enables diagnostic volatility edge analysis for Bank Nifty option buying.",
     "enable_volatility_edge_hard_gate": "Allows volatility edge to block trades only when explicitly enabled.",
     "min_volatility_edge_score": "Minimum volatility edge score when the volatility hard gate is enabled.",
@@ -117,13 +117,13 @@ SETTING_PURPOSES: dict[str, str] = {
     "enable_on_demand_premium_candle_backfill": "Lets premium confirmation backfill the selected option once before rejecting stale/missing candles.",
     "on_demand_premium_candle_backfill_cooldown_seconds": "Cooldown between on-demand selected-option candle backfill attempts.",
     "enable_banknifty_intelligence": "Enables Bank Nifty specialized filters such as top-bank alignment and zone room.",
-    "banknifty_top_bank_min_alignment": "Minimum top-bank constituent alignment required for Bank Nifty confidence.",
+    "banknifty_top_bank_min_alignment": "Soft top-bank alignment reference used for ranking and diagnostics.",
     "banknifty_top_bank_min_direction_count": "Minimum number of top banks that should support the chosen direction.",
     "banknifty_constituent_snapshot_file": "Locally reviewed NSE Indices constituent-weight snapshot used outside the trade-entry network path.",
     "banknifty_constituent_max_age_days": "Maximum official constituent snapshot age before alignment becomes stale diagnostic context.",
     "banknifty_constituent_min_weight_coverage": "Minimum available official index weight required before constituent alignment can gate an entry.",
     "banknifty_constituent_hard_gate_weight_cap": "Defensive per-bank cap used only in the alignment hard-gate calculation.",
-    "banknifty_opposing_heavyweight_weight": "Opposing official index weight that is considered materially unsafe for directional participation.",
+    "banknifty_opposing_heavyweight_weight": "Opposing official index weight that pauses an otherwise ready entry as WATCHING_SETUP.",
     "banknifty_expected_move_min_coverage": "Expected move coverage guard for whether target distance is realistic.",
     "banknifty_zone_risk_points": "Distance near major zones where Bank Nifty trades become riskier.",
     "enable_banknifty_regime_filter": "Enables Bank Nifty option-buying no-trade regime filters.",
@@ -630,11 +630,11 @@ class StrategyVersionRegistry:
         entry = config_snapshot.get("entry_timing", {})
         premium = config_snapshot.get("premium_confirmation", {})
         return (
-            "Experimental Bank Nifty option-buying entries use completed-candle swing, impulse, pullback and breakout-acceptance structure with 1-minute/5-minute directional agreement. "
+            "Experimental Bank Nifty option-buying v7 entries use completed-candle swing, impulse, pullback and breakout-acceptance structure with five-minute directional authority and one-minute timing. "
             f"The opening policy uses {decision.get('opening_structure_min_1m_candles')} one-minute and "
             f"{decision.get('opening_structure_min_5m_candles')} five-minute candles until {decision.get('opening_structure_end_time')}; "
-            "normal-session readiness keeps the configured structural minimum. Entries require "
-            "constituent and option-premium participation, executable spread/depth/liquidity, account risk approval, and entry timing that is not too early or too late. "
+            "normal-session readiness keeps the configured structural minimum. Hard gates require session/data safety, a valid direction and contract, executable spread/depth, numerical opportunity, and account risk approval. "
+            "One-minute opposition and extreme heavyweight opposition wait; premium quality, ordinary constituent alignment, option quality, volume, OI and composite liquidity remain timing/ranking evidence. "
             f"All entry paths share a normalized opportunity limit of {entry.get('normalized_entry_chase_max_atr')} scale units, and premium confirmation is "
             f"{'enabled' if premium.get('enable_option_premium_confirmation') else 'disabled'}."
         )

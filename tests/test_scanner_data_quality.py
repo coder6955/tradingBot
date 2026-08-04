@@ -115,6 +115,15 @@ class IncompleteCanonicalFeed(BankNiftyQualityFeed):
         }
 
 
+class NeutralStructureFeed(BankNiftyQualityFeed):
+    def get_snapshot(self, symbol: str) -> dict[str, object]:
+        return {
+            **super().get_snapshot(symbol),
+            "analysis_ready": True,
+            "structure_direction": "neutral",
+        }
+
+
 class FakeWebSocketPremiumFeed:
     def __init__(
         self,
@@ -443,6 +452,119 @@ class ScannerDataQualityTests(unittest.TestCase):
         self.assertIn(
             "canonical completed-candle analysis was not ready", result[0]["reasons"]
         )
+
+    def test_neutral_five_minute_structure_is_watching_not_rejected(self) -> None:
+        repo = RejectedOpportunityRepository()
+        scanner = ScannerService(
+            feed=NeutralStructureFeed({}),
+            rejected_opportunity_repository=repo,
+        )
+
+        result = scanner.scan_with_diagnostics(
+            symbols=["BANKNIFTY"], side="BUY", order_mode="paper"
+        )[0]
+
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["entry_timing_state"], "WATCHING_SETUP")
+        self.assertIn("waiting_for_directional_5minute_structure", result["reasons"])
+        self.assertEqual(repo.list_rejections(symbol="BANKNIFTY", limit=10), [])
+
+    def test_opposing_one_minute_direction_waits_instead_of_rejecting(self) -> None:
+        scanner = ScannerService(
+            feed=BankNiftyQualityFeed({}),
+            rejected_opportunity_repository=RejectedOpportunityRepository(),
+        )
+        result = scanner._apply_soft_confirmation_state(
+            entry_timing_eval={
+                "state": "ENTER_NOW",
+                "entry_timing_state": "ENTER_NOW",
+                "passed": True,
+                "reasons": ["premium_breakout_confirmed"],
+            },
+            multi_timeframe_eval={
+                "desired_direction": "bullish",
+                "frames": [
+                    {"timeframe": "5minute", "direction": "bullish"},
+                    {"timeframe": "1minute", "direction": "bearish"},
+                ],
+            },
+            banknifty_eval={"details": {}},
+        )
+
+        self.assertEqual(result["state"], "WATCHING_SETUP")
+        self.assertIn(
+            "one_minute_opposes_five_minute_wait",
+            result["soft_confirmation_wait_reasons"],
+        )
+
+    def test_mixed_banks_rank_but_only_extreme_opposition_waits(self) -> None:
+        scanner = ScannerService(
+            feed=BankNiftyQualityFeed({}),
+            rejected_opportunity_repository=RejectedOpportunityRepository(),
+        )
+        entry = {
+            "state": "ENTER_NOW",
+            "entry_timing_state": "ENTER_NOW",
+            "passed": True,
+            "reasons": ["premium_breakout_confirmed"],
+        }
+        mtf = {
+            "desired_direction": "bullish",
+            "frames": [
+                {"timeframe": "5minute", "direction": "bullish"},
+                {"timeframe": "1minute", "direction": "bullish"},
+            ],
+        }
+        mixed = scanner._apply_soft_confirmation_state(
+            entry_timing_eval=entry,
+            multi_timeframe_eval=mtf,
+            banknifty_eval={
+                "details": {
+                    "topBankAlignment": {
+                        "hard_gate_eligible": True,
+                        "alignment": 0.40,
+                        "against_weight": 0.20,
+                    }
+                }
+            },
+        )
+        opposed = scanner._apply_soft_confirmation_state(
+            entry_timing_eval=entry,
+            multi_timeframe_eval=mtf,
+            banknifty_eval={
+                "details": {
+                    "topBankAlignment": {
+                        "hard_gate_eligible": True,
+                        "alignment": 0.40,
+                        "against_weight": 0.35,
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(mixed["state"], "ENTER_NOW")
+        self.assertEqual(opposed["state"], "WATCHING_SETUP")
+        self.assertIn(
+            "opposing_heavyweight_participation_wait",
+            opposed["soft_confirmation_wait_reasons"],
+        )
+
+    def test_early_arming_uses_proxy_scores_only_as_ranking_evidence(self) -> None:
+        scanner = ScannerService(
+            feed=BankNiftyQualityFeed({}),
+            rejected_opportunity_repository=RejectedOpportunityRepository(),
+        )
+
+        result = scanner._setup_strong_enough_for_early_arm(
+            {
+                "data_quality": {"passed": True},
+                "data_freshness": {"passed": True},
+                "multi_timeframe": {"passed": False},
+                "option_quality": {"passed": False},
+            }
+        )
+
+        self.assertTrue(result)
 
     def test_zero_live_quote_with_valid_premium_candles_rejects_before_fake_prices(
         self,

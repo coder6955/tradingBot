@@ -159,10 +159,14 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
             settings.live_option_candle_backfill_timeframes
         )
         self.original_automation_enabled = settings.automation_enabled
+        self.original_scheduled_run_exit_after_complete = (
+            settings.scheduled_run_exit_after_complete
+        )
         object.__setattr__(
             settings, "automation_stop_after_after_market_complete", True
         )
         object.__setattr__(settings, "automation_enabled", False)
+        object.__setattr__(settings, "scheduled_run_exit_after_complete", False)
         object.__setattr__(settings, "enable_live_option_candle_gap_backfill", True)
         object.__setattr__(
             settings, "live_option_candle_backfill_interval_seconds", 120
@@ -194,6 +198,11 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
         )
         object.__setattr__(
             settings, "automation_enabled", self.original_automation_enabled
+        )
+        object.__setattr__(
+            settings,
+            "scheduled_run_exit_after_complete",
+            self.original_scheduled_run_exit_after_complete,
         )
 
     def test_supervisor_runs_research_in_market_closed_branch(self) -> None:
@@ -385,6 +394,22 @@ class AutomationSupervisorAfterMarketTests(unittest.TestCase):
                 for action in result["actions"]
             )
         )
+
+    def test_scheduled_boot_run_stops_after_after_market_pipeline(self) -> None:
+        object.__setattr__(settings, "automation_enabled", True)
+        object.__setattr__(settings, "scheduled_run_exit_after_complete", True)
+        research = FakeAfterMarketResearchService()
+        supervisor = FixedClockAutomationSupervisor(
+            now=datetime(2026, 7, 3, 16, 0),
+            after_market_research_service=research,
+        )
+        supervisor.running = True
+
+        result = supervisor.run_once({"symbols": "BANKNIFTY"})
+
+        self.assertEqual(result["status"], "ok")
+        self.assertFalse(supervisor.running)
+        self.assertEqual(supervisor.last_stop_reason, "after_market_pipeline_completed")
 
     def test_start_records_and_recovers_unclean_previous_process_run(self) -> None:
         repository = FakeLifecycleRepository(

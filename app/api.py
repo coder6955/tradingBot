@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import secrets
@@ -12,6 +13,7 @@ from sqlalchemy import text
 
 from app.application_context import ApplicationContext
 from app.config import settings
+from app.loginAutoCode import ensure_access_token_for_today
 from app.services.market_data_service import MarketDataService
 from app.services.scanner_service import ScannerService
 from app.services.signal_repository import SignalRepository
@@ -88,7 +90,7 @@ from app.services.time_utils import format_ist, ist_now_naive
 from app.providers.kite_provider import KiteProvider
 from app.providers.kite_auth_state import kite_auth_state
 from app.providers.kite_feed import KiteFeed
-from app.providers.token_store import save_access_token, load_access_token
+from app.providers.token_store import load_access_token, save_access_token, token_status
 from fastapi.responses import RedirectResponse, HTMLResponse
 
 API_DESCRIPTION = """
@@ -378,6 +380,10 @@ scanner_response_cache: dict[str, dict[str, object]] = {}
 scanner_response_cache_lock = threading.RLock()
 kite_provider_lock = threading.RLock()
 shared_kite_provider: KiteProvider | None = None
+kite_token_bootstrap_status: dict[str, Any] = {
+    "ready": False,
+    "source": "startup_not_run",
+}
 
 
 def get_kite_provider() -> KiteProvider:
@@ -573,6 +579,7 @@ automation_supervisor_service = AutomationSupervisorService(
 
 @app.on_event("startup")
 async def startup_automation() -> None:
+    await _bootstrap_kite_access_token()
     evidence_persistence_queue.start()
     evidence_persistence_queue.recover_pending_order_evidence()
     episode_outcome_collector.start()
@@ -586,6 +593,38 @@ async def startup_automation() -> None:
     ).start()
     if settings.automation_enabled:
         automation_supervisor_service.start(trigger="application_startup")
+
+
+async def _bootstrap_kite_access_token() -> None:
+    global kite_token_bootstrap_status
+    result = await asyncio.to_thread(ensure_access_token_for_today)
+    kite_token_bootstrap_status = dict(result)
+    if not result.get("ready"):
+        kite_auth_state.mark_auth_failed("startup_token_bootstrap_failed")
+        logger.warning(
+            "Kite token bootstrap unavailable source=%s missing=%s error_type=%s",
+            result.get("source"),
+            result.get("missing_configuration"),
+            result.get("error_type"),
+        )
+        return
+    token = load_access_token()
+    if not token:
+        kite_token_bootstrap_status = {
+            **kite_token_bootstrap_status,
+            "ready": False,
+            "source": "token_file_missing_after_bootstrap",
+        }
+        logger.error("Kite token bootstrap reported ready without a current token file")
+        return
+    get_kite_provider().set_access_token(token)
+    kite_auth_state.clear()
+    if shared_kite_feed is not None:
+        shared_kite_feed.refresh_credentials(token)
+    application_context.market_data_runtime_service.refresh_credentials(
+        access_token=token, restart_if_enabled=False
+    )
+    logger.info("Kite token bootstrap ready source=%s", result.get("source"))
 
 
 def _run_startup_maintenance() -> None:
@@ -820,9 +859,9 @@ async def runtime_status() -> dict[str, object]:
             "scanner_response_stale_ttl_seconds": settings.scanner_response_stale_ttl_seconds,
         },
         "kite": {
-            "access_token_available": bool(
-                load_access_token() or settings.kite_access_token
-            ),
+            "access_token_available": bool(load_access_token()),
+            "token_file": token_status(),
+            "automatic_login": dict(kite_token_bootstrap_status),
             "shared_provider_created": shared_kite_provider is not None,
             "api_timeout_seconds": settings.kite_api_timeout_seconds,
         },

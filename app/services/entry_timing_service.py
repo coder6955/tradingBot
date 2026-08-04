@@ -57,11 +57,6 @@ class EntryTimingService:
             if trigger > 0 and current > 0
             else None
         )
-        trigger_chase_pct = (
-            ((current - trigger) / max(trigger, 0.01)) * 100
-            if trigger > 0 and current > trigger
-            else 0.0
-        )
         move_from_base_pct = (
             ((current - base) / max(base, 0.01)) * 100
             if base > 0 and current > 0
@@ -77,8 +72,7 @@ class EntryTimingService:
         blockers = self._safety_blockers(
             data_quality=data_quality,
             freshness=freshness,
-            option_quality=option_quality,
-            liquidity_score=liquidity_score,
+            premium_eval=premium_eval,
             spread_pct=spread_pct,
             current=current,
             trigger=trigger,
@@ -186,6 +180,13 @@ class EntryTimingService:
             "breakout_accepted": breakout_accepted,
             "entry_opportunity": opportunity,
             "opportunity_warnings": list(opportunity["warnings"]),
+            "soft_confirmation_evidence": {
+                "option_quality_score": option_quality.get("score"),
+                "option_quality_passed": option_quality.get("passed"),
+                "liquidity_score": liquidity_score,
+                "premium_confirmation_score": premium_eval.get("score"),
+                "premium_confirmation_passed": premium_eval.get("passed"),
+            },
         }
 
     def _current_premium(
@@ -258,8 +259,7 @@ class EntryTimingService:
         *,
         data_quality: dict[str, Any],
         freshness: dict[str, Any],
-        option_quality: dict[str, Any],
-        liquidity_score: int,
+        premium_eval: dict[str, Any],
         spread_pct: float,
         current: float,
         trigger: float,
@@ -271,56 +271,37 @@ class EntryTimingService:
             reasons.append("entry_data_quality_failed")
         if not freshness.get("passed", True):
             reasons.append("entry_data_freshness_failed")
-        if option_quality and not option_quality.get("passed", True):
-            reasons.append("entry_option_quality_failed")
-        if liquidity_score < settings.min_option_liquidity_score:
-            reasons.append("entry_liquidity_failed")
+        premium_details = (
+            premium_eval.get("details", {})
+            if isinstance(premium_eval.get("details"), dict)
+            else {}
+        )
+        premium_reasons = [str(reason) for reason in premium_eval.get("reasons", [])]
+        if str(premium_details.get("source") or "") == "unavailable" or any(
+            marker in reason
+            for reason in premium_reasons
+            for marker in ("stale_or_missing", "capture_gap", "queue_gap")
+        ):
+            reasons.extend(
+                reason
+                for reason in premium_reasons
+                if any(
+                    marker in reason
+                    for marker in ("stale_or_missing", "capture_gap", "queue_gap")
+                )
+            )
+            if not any("stale_or_missing" in reason for reason in reasons):
+                reasons.append("premium_candles_stale_or_missing")
         if spread_pct > settings.max_bid_ask_spread_pct:
             reasons.append("entry_spread_too_wide")
         if current <= 0 or trigger <= 0 or target <= 0 or stop <= 0:
             reasons.append("entry_timing_price_inputs_missing")
         return reasons
 
-    def _chase_reasons(
-        self,
-        *,
-        trigger_chase_pct: float,
-        move_from_base_pct: float,
-        remaining_rr: float,
-        target_room_pct: float,
-        expected_move_coverage: float | None,
-        room_to_level_pct: float | None,
-        spread_pct: float,
-    ) -> list[str]:
-        reasons: list[str] = []
-        if trigger_chase_pct > settings.max_entry_chase_pct:
-            reasons.extend(["entry_too_late", "chase_risk_high"])
-        if move_from_base_pct > settings.max_premium_move_from_base_pct:
-            reasons.extend(["entry_too_late", "chase_risk_high"])
-        if remaining_rr < settings.min_remaining_risk_reward:
-            reasons.append("reward_compressed")
-        if target_room_pct < settings.min_target1_room_pct:
-            reasons.append("insufficient_target_room_after_entry")
-        if (
-            expected_move_coverage is not None
-            and expected_move_coverage < settings.min_entry_expected_move_coverage
-        ):
-            reasons.append("expected_move_coverage_weak")
-        if (
-            room_to_level_pct is not None
-            and room_to_level_pct < settings.min_entry_room_to_level_pct
-        ):
-            reasons.append("nearest_level_room_too_small")
-        if spread_pct > settings.max_bid_ask_spread_pct:
-            reasons.append("spread_widened_after_breakout")
-        return list(dict.fromkeys(reasons))
-
     def _setup_forming(
         self, banknifty_eval: dict[str, Any], price_action: dict[str, Any], trend: str
     ) -> bool:
-        bank_score = int(banknifty_eval.get("score") or 0)
-        price_score = int(price_action.get("score") or 0)
-        return bool(trend) and bank_score >= 50 and price_score >= 50
+        return str(trend).lower() in {"bullish", "bearish"}
 
     def _expected_move_coverage(self, banknifty_eval: dict[str, Any]) -> float | None:
         value = self._nested(banknifty_eval, "details", "expectedMoveCheck")

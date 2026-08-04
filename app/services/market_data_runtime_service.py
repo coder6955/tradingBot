@@ -102,9 +102,7 @@ class MarketDataRuntimeService:
         if not settings.enable_kite_websocket:
             return "DISABLED"
         if not settings.kite_api_key or not (
-            self.websocket_feed.access_token
-            or load_access_token()
-            or settings.kite_access_token
+            self.websocket_feed.access_token or load_access_token()
         ):
             return "AUTH_REQUIRED"
         if session != "REGULAR_MARKET" and not connected:

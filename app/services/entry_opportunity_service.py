@@ -66,22 +66,18 @@ class EntryOpportunityService:
         if target_room_pct < settings.min_target1_room_pct:
             blockers.append("insufficient_target_room_after_entry")
 
-        # A nearby level is resistance only until price accepts beyond it. Once
-        # accepted, remaining executable reward/risk is the controlling test.
+        # Context estimates are uncertain ranking evidence. Actual executable
+        # reward/risk and chase distance remain the controlling hard tests.
         if (
             expected_move_coverage is not None
             and expected_move_coverage < settings.min_entry_expected_move_coverage
         ):
-            (warnings if breakout_accepted else blockers).append(
-                "expected_move_coverage_weak"
-            )
+            warnings.append("expected_move_coverage_weak")
         if (
             room_to_level_pct is not None
             and room_to_level_pct < settings.min_entry_room_to_level_pct
         ):
-            (warnings if breakout_accepted else blockers).append(
-                "nearest_level_room_too_small"
-            )
+            warnings.append("nearest_level_room_too_small")
 
         return {
             "passed": not blockers,

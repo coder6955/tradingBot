@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 !.env.simple.example
+access_token.txt
+access_token.txt.tmp
+logs/
 
 # Python bytecode and caches
 __pycache__/

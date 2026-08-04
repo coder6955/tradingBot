@@ -46,7 +46,7 @@ class FastPathAcceptanceTests(unittest.TestCase):
         except PermissionError:
             pass
 
-    def _context(self, *, tick=None, created_at=None):
+    def _context(self, *, tick=None, created_at=None, candidate_overrides=None):
         now = datetime.now().replace(tzinfo=None)
         tick = tick or SimpleNamespace(
             price=101.0,
@@ -78,6 +78,7 @@ class FastPathAcceptanceTests(unittest.TestCase):
                     "data_fresh": True,
                     "gap_safe": True,
                     "risk_preflight": True,
+                    **(candidate_overrides or {}),
                 }
             },
             created_at=created_at,
@@ -112,6 +113,37 @@ class FastPathAcceptanceTests(unittest.TestCase):
             decision = service.validate_candidate({"direction": "bullish"})
         self.assertEqual(decision["reason"], "fast_scan_context_stale")
         self.assertEqual((calls.rest_calls, calls.database_queries), (0, 0))
+
+    def test_soft_confirmation_pauses_fast_candidate_without_hard_rejection(self):
+        service = self._context(
+            candidate_overrides={
+                "directional_agreement": False,
+                "constituent_participation": False,
+                "one_minute_opposed": True,
+                "constituent_strongly_opposed": False,
+            }
+        )
+
+        decision = service.validate_candidate({"direction": "bullish"})
+
+        self.assertFalse(decision["passed"])
+        self.assertEqual(decision["state"], "WATCHING_SETUP")
+        self.assertFalse(decision["hard_rejection"])
+        self.assertEqual(decision["reason"], "one_minute_opposes_five_minute_wait")
+
+    def test_mixed_constituents_do_not_block_fast_candidate(self):
+        service = self._context(
+            candidate_overrides={
+                "directional_agreement": False,
+                "constituent_participation": False,
+                "one_minute_opposed": False,
+                "constituent_strongly_opposed": False,
+            }
+        )
+
+        decision = service.validate_candidate({"direction": "bullish"})
+
+        self.assertTrue(decision["passed"], decision)
 
     def test_scheduled_scan_enforces_explicit_rest_call_budget(self):
         class Scanner:

@@ -22,14 +22,14 @@ class Settings:
     app_name: str = "AI Option Trader"
     app_environment: str = os.getenv("APP_ENV", "development")
     strategy_name: str = os.getenv("STRATEGY_NAME", "banknifty_option_buying")
-    strategy_version: str = os.getenv("STRATEGY_VERSION", "banknifty_option_buying_v6")
+    strategy_version: str = os.getenv("STRATEGY_VERSION", "banknifty_option_buying_v7")
     strategy_version_note: str = os.getenv(
         "STRATEGY_VERSION_NOTE",
-        "Price-structure opening and continuation entries with unified opportunity checks and runner exits",
+        "Safety-only hard gates with persistent watching and soft confirmation ranking",
     )
     strategy_change_reason: str = os.getenv(
         "STRATEGY_CHANGE_REASON",
-        "Improve Bank Nifty intraday option-buying timing while keeping execution and risk gates conservative",
+        "Stop unvalidated confirmations from permanently rejecting otherwise safe and executable Bank Nifty setups",
     )
     active_decision_timeframes: str = os.getenv(
         "ACTIVE_DECISION_TIMEFRAMES", "1minute,5minute"
@@ -55,6 +55,18 @@ class Settings:
     kite_api_key: Optional[str] = os.getenv("KITE_API_KEY")
     kite_api_secret: Optional[str] = os.getenv("KITE_API_SECRET")
     kite_access_token: Optional[str] = os.getenv("KITE_ACCESS_TOKEN")
+    kite_user_id: Optional[str] = os.getenv("KITE_USER_ID")
+    kite_password: Optional[str] = os.getenv("KITE_PASSWORD")
+    kite_totp_secret: Optional[str] = os.getenv("KITE_TOTP_SECRET")
+    kite_auto_login_enabled: bool = (
+        os.getenv("KITE_AUTO_LOGIN_ENABLED", "false").lower() == "true"
+    )
+    kite_auto_login_headless: bool = (
+        os.getenv("KITE_AUTO_LOGIN_HEADLESS", "true").lower() == "true"
+    )
+    kite_auto_login_timeout_seconds: int = int(
+        os.getenv("KITE_AUTO_LOGIN_TIMEOUT_SECONDS", "60")
+    )
     telegram_bot_token: Optional[str] = os.getenv("TELEGRAM_BOT_TOKEN")
     telegram_chat_id: Optional[str] = os.getenv("TELEGRAM_CHAT_ID")
     scanner_interval_seconds: int = int(os.getenv("SCANNER_INTERVAL_SECONDS", "60"))
@@ -71,10 +83,10 @@ class Settings:
     max_risk_per_trade_pct: float = float(os.getenv("MAX_RISK_PER_TRADE_PCT", "1.0"))
     risk_policy_version: str = os.getenv("RISK_POLICY_VERSION", "banknifty_risk_v1")
     active_entry_policy: str = os.getenv(
-        "ACTIVE_ENTRY_POLICY", "banknifty_option_buying_v6"
+        "ACTIVE_ENTRY_POLICY", "banknifty_option_buying_v7"
     )
     shadow_entry_policy: str = os.getenv(
-        "SHADOW_ENTRY_POLICY", "banknifty_option_buying_v6_shadow"
+        "SHADOW_ENTRY_POLICY", "banknifty_option_buying_v7_shadow"
     )
     active_risk_policy: str = os.getenv("ACTIVE_RISK_POLICY", "base_only_v1")
     shadow_risk_policy: str = os.getenv(
@@ -87,6 +99,12 @@ class Settings:
     risk_tier_3_high_pct: float = float(os.getenv("RISK_TIER_3_HIGH_PERCENT", "3.0"))
     risk_tier_4_exceptional_pct: float = float(
         os.getenv("RISK_TIER_4_EXCEPTIONAL_PERCENT", "5.0")
+    )
+    active_paper_risk_budget_pct: float = float(
+        os.getenv("ACTIVE_PAPER_RISK_BUDGET_PERCENT", "1.0")
+    )
+    active_live_risk_budget_pct: float = float(
+        os.getenv("ACTIVE_LIVE_RISK_BUDGET_PERCENT", "1.0")
     )
     absolute_max_risk_per_trade_percent: float = float(
         os.getenv("ABSOLUTE_MAX_RISK_PER_TRADE_PERCENT", "5.0")
@@ -187,6 +205,15 @@ class Settings:
     outcome_missing_interval_seconds: float = float(
         os.getenv("OUTCOME_MISSING_INTERVAL_SECONDS", "5.0")
     )
+    research_session_boundary_tolerance_minutes: int = int(
+        os.getenv("RESEARCH_SESSION_BOUNDARY_TOLERANCE_MINUTES", "5")
+    )
+    research_session_min_coverage_pct: float = float(
+        os.getenv("RESEARCH_SESSION_MIN_COVERAGE_PERCENT", "98.0")
+    )
+    research_session_max_gap_seconds: float = float(
+        os.getenv("RESEARCH_SESSION_MAX_GAP_SECONDS", "60.0")
+    )
     max_option_premium_pct: float = float(os.getenv("MAX_OPTION_PREMIUM_PCT", "80.0"))
     min_option_buy_premium: float = float(os.getenv("MIN_OPTION_BUY_PREMIUM", "5.0"))
     block_expiry_day_option_buying: bool = (
@@ -200,6 +227,8 @@ class Settings:
     )
     min_signal_score: int = int(os.getenv("MIN_SIGNAL_SCORE", "80"))
     min_option_liquidity_score: int = int(os.getenv("MIN_OPTION_LIQUIDITY_SCORE", "70"))
+    # Fixed simulated capital used by every paper-trading risk decision.
+    # Zerodha account equity is authoritative only for live orders.
     account_equity: float = float(os.getenv("ACCOUNT_EQUITY", "100000"))
     default_product: str = os.getenv("KITE_DEFAULT_PRODUCT", "MIS")
     max_scan_symbols: int = int(os.getenv("MAX_SCAN_SYMBOLS", "40"))
@@ -251,7 +280,7 @@ class Settings:
     min_option_volume: int = int(os.getenv("MIN_OPTION_VOLUME", "500"))
     min_option_oi: int = int(os.getenv("MIN_OPTION_OI", "5000"))
     enforce_market_hours: bool = (
-        os.getenv("ENFORCE_MARKET_HOURS", "false").lower() == "true"
+        os.getenv("ENFORCE_MARKET_HOURS", "true").lower() == "true"
     )
     market_open_time: str = os.getenv("MARKET_OPEN_TIME", "09:20")
     market_close_time: str = os.getenv("MARKET_CLOSE_TIME", "15:10")
@@ -429,6 +458,9 @@ class Settings:
     automation_stop_after_after_market_complete: bool = (
         os.getenv("AUTOMATION_STOP_AFTER_AFTER_MARKET_COMPLETE", "false").lower()
         == "true"
+    )
+    scheduled_run_exit_after_complete: bool = (
+        os.getenv("SCHEDULED_RUN_EXIT_AFTER_COMPLETE", "false").lower() == "true"
     )
     enable_strategy_edge_guard: bool = (
         os.getenv("ENABLE_STRATEGY_EDGE_GUARD", "false").lower() == "true"

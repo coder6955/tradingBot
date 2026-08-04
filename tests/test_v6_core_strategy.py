@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.config import settings
 from app.services.auto_trader_service import AutoTraderService
 from app.services.completed_structure_service import classify_completed_structure
 from app.services.entry_opportunity_service import EntryOpportunityService
@@ -85,10 +84,14 @@ class V6CoreStrategyTests(unittest.TestCase):
             expected_move_coverage=0.5,
             room_to_level_pct=0.1,
         )
-        rejected = EntryOpportunityService().evaluate(**common, breakout_accepted=False)
+        unaccepted = EntryOpportunityService().evaluate(
+            **common, breakout_accepted=False
+        )
         accepted = EntryOpportunityService().evaluate(**common, breakout_accepted=True)
-        self.assertFalse(rejected["passed"])
+        self.assertTrue(unaccepted["passed"])
         self.assertTrue(accepted["passed"])
+        self.assertIn("nearest_level_room_too_small", unaccepted["warnings"])
+        self.assertIn("expected_move_coverage_weak", unaccepted["warnings"])
         self.assertIn("nearest_level_room_too_small", accepted["warnings"])
         self.assertNotIn("nearest_level_room_too_small", accepted["blockers"])
 
@@ -114,7 +117,7 @@ class V6CoreStrategyTests(unittest.TestCase):
             58020,
             "bullish",
             quotes={
-                f"NFO:BANKNIFTYNEXT58000CE": {
+                "NFO:BANKNIFTYNEXT58000CE": {
                     "last_price": 100,
                     "volume": 5000,
                     "oi": 50000,

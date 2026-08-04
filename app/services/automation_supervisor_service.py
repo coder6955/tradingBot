@@ -455,9 +455,11 @@ class AutomationSupervisorService:
             settings.automation_stop_after_after_market_complete
         ):
             return False
-        # A boot-managed supervisor must survive overnight so it can restart
-        # the intraday workers on the next market day without human action.
-        if bool(settings.automation_enabled):
+        # A continuously boot-managed supervisor survives overnight. A Windows
+        # scheduled run exits after today's durable after-market work completes.
+        if bool(settings.automation_enabled) and not bool(
+            settings.scheduled_run_exit_after_complete
+        ):
             return False
         market_close = self._parse_time(settings.runtime_market_close_time)
         if now.weekday() >= 5 or now.time() <= market_close:

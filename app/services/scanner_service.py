@@ -147,7 +147,7 @@ class ScannerService:
         if feed is not None:
             self.feed = feed
         else:
-            access_token = load_access_token() or settings.kite_access_token
+            access_token = load_access_token()
             if settings.use_kite_market_data and access_token:
                 self.feed = KiteFeed()
             else:
@@ -288,7 +288,24 @@ class ScannerService:
 
             structure_direction = str(snapshot.get("structure_direction") or "").lower()
             if symbol not in trends and structure_direction == "neutral":
-                reasons = ["completed 5minute structure is neutral"]
+                reasons = ["waiting_for_directional_5minute_structure"]
+                watching = {
+                    "state": EntryTimingService.WATCHING_SETUP,
+                    "entry_timing_state": EntryTimingService.WATCHING_SETUP,
+                    "passed": False,
+                    "reasons": reasons,
+                    "entry_timing_reason": reasons[0],
+                    "entry_should_wait": True,
+                    "entry_should_reject_as_late": False,
+                }
+                factor_scores = {
+                    "entry_timing": watching,
+                    "decision_policy": {
+                        "classification": "WATCHING",
+                        "hard_rejection": False,
+                        "direction_authority": "completed_5minute_structure",
+                    },
+                }
                 self._log_decision(
                     symbol=symbol,
                     accepted=False,
@@ -299,19 +316,17 @@ class ScannerService:
                     side=side,
                     trend="neutral",
                 )
-                self._save_rejection(
-                    symbol=symbol,
-                    side=side,
-                    trend="neutral",
-                    score=0,
-                    reasons=reasons,
-                    breakdown=self._empty_score_breakdown(),
-                    snapshot=snapshot,
-                    rejection_source=rejection_source,
-                )
                 diagnostics.append(
                     self._diagnostic(
-                        symbol, snapshot, 0, "neutral", "neutral", side, None, reasons
+                        symbol,
+                        snapshot,
+                        0,
+                        "neutral",
+                        "neutral",
+                        side,
+                        None,
+                        reasons,
+                        factor_scores,
                     )
                 )
                 continue
@@ -542,11 +557,6 @@ class ScannerService:
                 day_type_eval=day_type_eval,
                 candles=completed_candle_sets.get("5minute", []),
             )
-            banknifty_details = (
-                banknifty_eval.get("details", {})
-                if isinstance(banknifty_eval.get("details"), dict)
-                else {}
-            )
             volatility_eval = self._shadow_diagnostic("volatility_edge")
             banknifty_regime_eval = self.banknifty_regime_filter_service.evaluate(
                 symbol=symbol,
@@ -595,6 +605,11 @@ class ScannerService:
                 price_action=price_eval,
                 liquidity_score=liquidity_score,
                 trend=trend,
+            )
+            entry_timing_eval = self._apply_soft_confirmation_state(
+                entry_timing_eval=entry_timing_eval,
+                multi_timeframe_eval=multi_timeframe_eval,
+                banknifty_eval=banknifty_eval,
             )
             score_breakdown = self._score_breakdown(
                 technical_score=score,
@@ -753,6 +768,15 @@ class ScannerService:
             risk_failures = list(gate_failures)
             risk_failures.extend(self._entry_timing_failures(entry_timing_eval))
             if risk_failures:
+                timing_state = str(
+                    entry_timing_eval.get("state")
+                    or entry_timing_eval.get("entry_timing_state")
+                    or ""
+                )
+                waiting_without_hard_failure = not gate_failures and timing_state in {
+                    EntryTimingService.WATCHING_SETUP,
+                    EntryTimingService.ARMED_FOR_ENTRY,
+                }
                 self._log_decision(
                     symbol=symbol,
                     accepted=False,
@@ -765,18 +789,19 @@ class ScannerService:
                     contract=contract,
                     factor_scores=factor_scores,
                 )
-                self._save_rejection(
-                    symbol=symbol,
-                    side=side,
-                    trend=trend,
-                    score=combined_score,
-                    reasons=risk_failures,
-                    breakdown=score_breakdown,
-                    snapshot=snapshot,
-                    contract=contract,
-                    factor_scores=factor_scores,
-                    rejection_source=rejection_source,
-                )
+                if not waiting_without_hard_failure:
+                    self._save_rejection(
+                        symbol=symbol,
+                        side=side,
+                        trend=trend,
+                        score=combined_score,
+                        reasons=risk_failures,
+                        breakdown=score_breakdown,
+                        snapshot=snapshot,
+                        contract=contract,
+                        factor_scores=factor_scores,
+                        rejection_source=rejection_source,
+                    )
                 diagnostics.append(
                     self._diagnostic(
                         symbol,
@@ -975,6 +1000,23 @@ class ScannerService:
                 if isinstance(timing.get("entry_opportunity"), dict)
                 else {}
             )
+            frames = (
+                mtf.get("frames", []) if isinstance(mtf.get("frames"), list) else []
+            )
+            desired_direction = str(mtf.get("desired_direction") or direction)
+            one_minute = next(
+                (
+                    frame
+                    for frame in frames
+                    if isinstance(frame, dict) and frame.get("timeframe") == "1minute"
+                ),
+                None,
+            )
+            one_minute_direction = (
+                str(one_minute.get("direction") or "neutral")
+                if one_minute is not None
+                else "missing"
+            )
             plan = {
                 "symbol": str(row.get("symbol") or "BANKNIFTY"),
                 "action": self._action("BUY", direction),
@@ -1002,6 +1044,13 @@ class ScannerService:
                 or prices.get("entry_price"),
                 "directional_agreement": bool(mtf.get("passed")),
                 "constituent_participation": participation_passed,
+                "one_minute_opposed": one_minute_direction
+                not in {"neutral", desired_direction},
+                "constituent_strongly_opposed": bool(
+                    participation.get("hard_gate_eligible", False)
+                    and float(participation.get("against_weight") or 0.0)
+                    >= settings.banknifty_opposing_heavyweight_weight
+                ),
                 "data_fresh": bool(freshness.get("passed")),
                 "gap_safe": not any(
                     "gap" in reason or "websocket_disconnected" in reason
@@ -1454,48 +1503,106 @@ class ScannerService:
             or contract.ask_quantity < settings.contract_min_depth_quantity
         ):
             failures.append("selected option top-book depth is below threshold")
-        if not (multi_timeframe_eval or {}).get("passed", False):
-            failures.extend(
+        available_timeframes = int(
+            (multi_timeframe_eval or {}).get("available_timeframes") or 0
+        )
+        frames = (
+            (multi_timeframe_eval or {}).get("frames", [])
+            if isinstance((multi_timeframe_eval or {}).get("frames"), list)
+            else []
+        )
+        desired_direction = str(
+            (multi_timeframe_eval or {}).get("desired_direction") or ""
+        )
+        five_minute = next(
+            (
+                frame
+                for frame in frames
+                if isinstance(frame, dict) and frame.get("timeframe") == "5minute"
+            ),
+            None,
+        )
+        if available_timeframes < 2 or five_minute is None:
+            missing_reasons = [
                 str(reason)
                 for reason in (multi_timeframe_eval or {}).get(
-                    "reasons", ["one_minute_and_five_minute_direction_disagree"]
+                    "reasons", ["one_minute_or_five_minute_completed_candles_missing"]
                 )
-            )
-        if settings.enable_option_premium_confirmation and not premium_eval.get(
-            "passed", False
-        ):
+                if "missing" in str(reason) or "load_failed" in str(reason)
+            ]
             failures.extend(
-                str(reason)
-                for reason in premium_eval.get(
-                    "reasons", ["option premium confirmation failed"]
-                )
+                missing_reasons
+                or ["one_minute_or_five_minute_completed_candles_missing"]
             )
-        participation = (
+        elif str(five_minute.get("direction") or "") != desired_direction:
+            failures.append("five_minute_direction_authority_inconsistent")
+        return list(dict.fromkeys(failures))
+
+    def _apply_soft_confirmation_state(
+        self,
+        *,
+        entry_timing_eval: dict[str, object],
+        multi_timeframe_eval: dict[str, object],
+        banknifty_eval: dict[str, object],
+    ) -> dict[str, object]:
+        result = dict(entry_timing_eval)
+        if str(result.get("state") or result.get("entry_timing_state")) != (
+            EntryTimingService.ENTER_NOW
+        ):
+            return result
+
+        wait_reasons: list[str] = []
+        desired_direction = str(multi_timeframe_eval.get("desired_direction") or "")
+        frames = (
+            multi_timeframe_eval.get("frames", [])
+            if isinstance(multi_timeframe_eval.get("frames"), list)
+            else []
+        )
+        one_minute = next(
+            (
+                frame
+                for frame in frames
+                if isinstance(frame, dict) and frame.get("timeframe") == "1minute"
+            ),
+            None,
+        )
+        if one_minute is not None:
+            one_minute_direction = str(one_minute.get("direction") or "neutral")
+            if one_minute_direction not in {"neutral", desired_direction}:
+                wait_reasons.append("one_minute_opposes_five_minute_wait")
+
+        details = (
             banknifty_eval.get("details", {})
             if isinstance(banknifty_eval.get("details"), dict)
             else {}
         )
         participation = (
-            participation.get("topBankAlignment", {})
-            if isinstance(participation.get("topBankAlignment"), dict)
+            details.get("topBankAlignment", {})
+            if isinstance(details.get("topBankAlignment"), dict)
             else {}
         )
-        if not participation.get("hard_gate_eligible", False):
-            failures.append(
-                "banknifty constituent participation is unavailable or incomplete"
-            )
-        else:
-            if (
-                float(participation.get("alignment") or 0.0)
-                < settings.banknifty_top_bank_min_alignment
-            ):
-                failures.append("top banks are mixed against Bank Nifty direction")
-            if (
-                float(participation.get("against_weight") or 0.0)
-                >= settings.banknifty_opposing_heavyweight_weight
-            ):
-                failures.append("opposing heavyweight bank participation is too large")
-        return list(dict.fromkeys(failures))
+        if (
+            participation.get("hard_gate_eligible", False)
+            and float(participation.get("against_weight") or 0.0)
+            >= settings.banknifty_opposing_heavyweight_weight
+        ):
+            wait_reasons.append("opposing_heavyweight_participation_wait")
+
+        if not wait_reasons:
+            return result
+        result.update(
+            {
+                "state": EntryTimingService.WATCHING_SETUP,
+                "entry_timing_state": EntryTimingService.WATCHING_SETUP,
+                "passed": False,
+                "reasons": wait_reasons,
+                "entry_timing_reason": "; ".join(wait_reasons),
+                "entry_should_wait": True,
+                "entry_should_reject_as_late": False,
+                "soft_confirmation_wait_reasons": wait_reasons,
+            }
+        )
+        return result
 
     def _entry_timing_failures(self, entry_timing_eval: dict[str, object]) -> list[str]:
         state = str(
@@ -1735,12 +1842,7 @@ class ScannerService:
     def _setup_strong_enough_for_early_arm(
         self, factor_scores: dict[str, object]
     ) -> bool:
-        required = [
-            "data_quality",
-            "data_freshness",
-            "multi_timeframe",
-            "option_quality",
-        ]
+        required = ["data_quality", "data_freshness"]
         for key in required:
             value = factor_scores.get(key, {})
             if isinstance(value, dict) and not value.get("passed", True):
@@ -2094,6 +2196,16 @@ class ScannerService:
             if isinstance(factor_scores.get("banknifty_intelligence"), dict)
             else {}
         )
+        constituent_details = (
+            constituents.get("details", {})
+            if isinstance(constituents.get("details"), dict)
+            else {}
+        )
+        top_bank_alignment = (
+            constituent_details.get("topBankAlignment", {})
+            if isinstance(constituent_details.get("topBankAlignment"), dict)
+            else {}
+        )
         timing_state = str(timing.get("state") or "").upper()
         route = (
             "scheduled_direct"
@@ -2130,7 +2242,9 @@ class ScannerService:
             not in {"neutral", "transition", "transitioning", expected_frame_direction},
             "constituent_evidence_available": bool(constituents),
             "constituent_strongly_contradictory": bool(
-                constituents.get("passed") is False
+                top_bank_alignment.get("hard_gate_eligible", False)
+                and float(top_bank_alignment.get("against_weight") or 0.0)
+                >= settings.banknifty_opposing_heavyweight_weight
             ),
             "contract_tradeable": bool(
                 contract.bid > 0 and contract.ask > 0 and contract.instrument_token
@@ -2140,6 +2254,7 @@ class ScannerService:
             "provenance_valid": bool(quality.get("passed", False)),
             "data_fresh": bool(freshness.get("passed", False)),
             "premium_confirmation_passed": bool(premium.get("passed", False)),
+            "premium_trigger_passed": bool(timing.get("breakout", False)),
             "preparation_passed": bool(
                 accepted or timing_state in {"ARMED_FOR_ENTRY", "ENTER_NOW"}
             ),
@@ -2370,12 +2485,9 @@ class ScannerService:
             if isinstance(setup_family, dict)
             else enriched.get("setup_family_group"),
             "hard_gate_thresholds": {
-                "min_option_quality_score": settings.min_option_quality_score,
                 "min_risk_reward": settings.min_risk_reward,
                 "max_bid_ask_spread_pct": settings.max_bid_ask_spread_pct,
-                "min_option_volume": settings.min_option_volume,
-                "min_option_oi": settings.min_option_oi,
-                "min_volatility_edge_score": settings.min_volatility_edge_score,
+                "contract_min_depth_quantity": settings.contract_min_depth_quantity,
                 "max_live_quote_age_seconds": settings.max_live_quote_age_seconds,
                 "max_live_option_quote_age_seconds": settings.max_live_option_quote_age_seconds,
                 "max_premium_confirmation_candle_age_seconds": settings.max_premium_confirmation_candle_age_seconds,
@@ -2387,7 +2499,14 @@ class ScannerService:
                 "min_market_regime_score": settings.min_market_regime_score,
                 "min_price_action_score": settings.min_price_action_score,
                 "min_option_chain_score": settings.min_option_chain_score,
+                "min_option_quality_score": settings.min_option_quality_score,
                 "min_option_premium_confirmation_score": settings.min_option_premium_confirmation_score,
+                "min_option_liquidity_score": settings.min_option_liquidity_score,
+                "min_option_volume": settings.min_option_volume,
+                "min_option_oi": settings.min_option_oi,
+                "banknifty_top_bank_min_alignment": settings.banknifty_top_bank_min_alignment,
+                "banknifty_opposing_heavyweight_weight": settings.banknifty_opposing_heavyweight_weight,
+                "expected_move_and_nearby_level_role": "warning_only",
             },
             "enabled_guards": {
                 "day_type_filter": settings.enable_day_type_filter,

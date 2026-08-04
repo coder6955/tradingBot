@@ -94,7 +94,7 @@ class EntryTimingServiceTests(unittest.TestCase):
         self.assertEqual(result["state"], EntryTimingService.TOO_LATE)
         self.assertIn("insufficient_target_room_after_entry", result["reasons"])
 
-    def test_expected_move_too_small_blocks_enter_now(self) -> None:
+    def test_expected_move_too_small_warns_but_does_not_block_enter_now(self) -> None:
         result = self._evaluate(
             current=103.0,
             trigger=102.0,
@@ -105,8 +105,8 @@ class EntryTimingServiceTests(unittest.TestCase):
             expected_coverage=0.5,
         )
 
-        self.assertEqual(result["state"], EntryTimingService.TOO_LATE)
-        self.assertIn("expected_move_coverage_weak", result["reasons"])
+        self.assertEqual(result["state"], EntryTimingService.ENTER_NOW)
+        self.assertIn("expected_move_coverage_weak", result["opportunity_warnings"])
 
     def test_spread_widening_after_trigger_blocks_enter_now(self) -> None:
         result = self._evaluate(
@@ -122,6 +122,24 @@ class EntryTimingServiceTests(unittest.TestCase):
         self.assertNotEqual(result["state"], EntryTimingService.ENTER_NOW)
         self.assertIn("entry_spread_too_wide", result["reasons"])
 
+    def test_proxy_quality_and_liquidity_scores_do_not_block_executable_breakout(
+        self,
+    ) -> None:
+        result = self._evaluate(
+            current=103.0,
+            trigger=102.0,
+            base=100.0,
+            target=120.0,
+            stop=96.0,
+            breakout=True,
+            option_quality_passed=False,
+            liquidity_score=10,
+        )
+
+        self.assertEqual(result["state"], EntryTimingService.ENTER_NOW)
+        self.assertFalse(result["soft_confirmation_evidence"]["option_quality_passed"])
+        self.assertEqual(result["soft_confirmation_evidence"]["liquidity_score"], 10)
+
     def _evaluate(
         self,
         *,
@@ -134,6 +152,8 @@ class EntryTimingServiceTests(unittest.TestCase):
         premium_change: float = 2.0,
         expected_coverage: float = 1.1,
         spread_pct: float = 1.0,
+        option_quality_passed: bool = True,
+        liquidity_score: int = 90,
     ) -> dict[str, object]:
         contract = OptionContract(
             "BANKNIFTY26JUL58000CE",
@@ -173,7 +193,7 @@ class EntryTimingServiceTests(unittest.TestCase):
             },
             data_quality={"passed": True},
             freshness={"passed": True},
-            option_quality={"passed": True},
+            option_quality={"passed": option_quality_passed, "score": 25},
             banknifty_eval={
                 "score": 75,
                 "passed": True,
@@ -184,7 +204,7 @@ class EntryTimingServiceTests(unittest.TestCase):
                 "passed": True,
                 "details": {"room_to_level_pct": 0.8},
             },
-            liquidity_score=90,
+            liquidity_score=liquidity_score,
             trend="bullish",
         )
 

@@ -520,13 +520,15 @@ class TradeSetupService:
     ) -> int:
         if lot_size <= 0 or side.upper() != "BUY":
             return 0
+        # Scanner sizing is a provisional paper plan. It must use the same
+        # fixed simulated capital as final paper authorization, never the
+        # connected Zerodha balance. Live affordability is checked separately
+        # at the final order boundary.
         equity = (
-            account_equity if account_equity is not None else self._available_cash()
+            account_equity
+            if account_equity is not None
+            else float(settings.account_equity)
         )
-        if equity <= 0 and account_equity is None:
-            # Scanner sizing is provisional. The shared pre-order authority
-            # requires real live equity and reruns every invariant.
-            equity = settings.account_equity
         decision = self.risk_policy_service.evaluate(
             RiskDecisionContext(
                 account_equity=float(equity or 0.0),
@@ -559,8 +561,6 @@ class TradeSetupService:
         enforce_budget: bool = False,
     ) -> List[str]:
         failures: List[str] = []
-        if self.liquidity_score(contract) < settings.min_option_liquidity_score:
-            failures.append("option liquidity is below threshold")
         if side.upper() == "BUY":
             if entry_price < settings.min_option_buy_premium:
                 failures.append("option premium is below minimum configured for buying")
@@ -585,10 +585,6 @@ class TradeSetupService:
                 failures.append("option selling is disabled by configuration")
         if self._spread_pct(contract) > settings.max_bid_ask_spread_pct:
             failures.append("bid/ask spread is too wide")
-        if contract.volume < settings.min_option_volume:
-            failures.append("option volume is below threshold")
-        if contract.open_interest < settings.min_option_oi:
-            failures.append("option open interest is below threshold")
         return failures
 
     def _available_cash(self) -> float:

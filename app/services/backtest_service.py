@@ -613,8 +613,6 @@ class BacktestTradeSetupService(TradeSetupService):
         enforce_budget: bool = False,
     ) -> list[str]:
         failures: list[str] = []
-        if self.liquidity_score(contract) < settings.min_option_liquidity_score:
-            failures.append("option liquidity is below threshold")
         if side.upper() == "BUY":
             if entry_price < settings.min_option_buy_premium:
                 failures.append("option premium is below minimum configured for buying")
@@ -630,10 +628,6 @@ class BacktestTradeSetupService(TradeSetupService):
                 failures.append("option selling is disabled by configuration")
         if self._spread_pct(contract) > settings.max_bid_ask_spread_pct:
             failures.append("bid/ask spread is too wide")
-        if contract.volume < settings.min_option_volume:
-            failures.append("option volume is below threshold")
-        if contract.open_interest < settings.min_option_oi:
-            failures.append("option open interest is below threshold")
         return failures
 
     def _option_premium_structure(

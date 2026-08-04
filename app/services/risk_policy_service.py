@@ -140,7 +140,7 @@ class RiskPolicyService:
             rejections.append("ENTRY_LIQUIDITY_INADEQUATE")
 
         approved = self._highest_allowed_tier(context, requested, downgrades)
-        approved_pct = self._tier_percent(approved)
+        approved_pct = self._approved_risk_percent(context, approved)
         absolute_cap = min(
             float(settings.absolute_max_risk_per_trade_percent),
             self.HARD_ABSOLUTE_MAX_PERCENT,
@@ -267,6 +267,20 @@ class RiskPolicyService:
             value = self._tier_percent(tier)
             if value <= 0 or value > self.HARD_ABSOLUTE_MAX_PERCENT:
                 reasons.append(f"{tier}_PERCENT_OUTSIDE_SAFE_RANGE")
+        for mode, value in (
+            ("PAPER", float(settings.active_paper_risk_budget_pct)),
+            ("LIVE", float(settings.active_live_risk_budget_pct)),
+        ):
+            if value <= 0 or value > self.HARD_ABSOLUTE_MAX_PERCENT:
+                reasons.append(f"ACTIVE_{mode}_RISK_BUDGET_PERCENT_OUTSIDE_SAFE_RANGE")
+            if value > min(
+                absolute,
+                float(settings.max_risk_per_trade_percent),
+                self.HARD_ABSOLUTE_MAX_PERCENT,
+            ):
+                reasons.append(
+                    f"ACTIVE_{mode}_RISK_BUDGET_PERCENT_EXCEEDS_CONFIGURED_MAXIMUM"
+                )
         if any(
             self._tier_percent(self.TIERS[index])
             > self._tier_percent(self.TIERS[index + 1])
@@ -488,6 +502,22 @@ class RiskPolicyService:
             TIER_4_EXCEPTIONAL: float(settings.risk_tier_4_exceptional_pct),
         }
         return values.get(str(tier), 0.0)
+
+    def _approved_risk_percent(
+        self, context: RiskDecisionContext, tier: str | None
+    ) -> float:
+        tier_percent = self._tier_percent(tier)
+        if str(context.policy_mode).lower() != "active":
+            return tier_percent
+        configured_active = (
+            float(settings.active_live_risk_budget_pct)
+            if str(context.order_mode).lower() == "live"
+            else float(settings.active_paper_risk_budget_pct)
+        )
+        # The operator-selected active budget is distinct from evidence-gated
+        # research tiers. A future validated tier can increase it only within
+        # the configured and hard process ceilings checked by evaluate().
+        return max(tier_percent, configured_active)
 
     def _normalize_tier(self, value: str) -> str:
         normalized = str(value or TIER_1_BASE).upper()
