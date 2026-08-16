@@ -402,3 +402,13 @@ This file records decisions that should survive individual conversations and cod
 **Decision:** The scheduled runner owns lifecycle notifications. It requires completed startup maintenance and reconciliation in addition to API, database, Kite, WebSocket, subscription, gap, lock, and supervisor checks; startup timeout fails closed. During operation it monitors session-aware health and new supervisor/worker errors, deduplicates repeated incidents, reports recovery, and treats an unhealthy/stopped supervisor as terminal. Generic scheduled component start/stop messages are suppressed. The completion message is sent only after application shutdown hooks report success; the outer PowerShell process invokes a fallback notifier for unhandled abnormal exit codes.  
 **Why:** Process existence is not operational readiness, repeated worker loops can spam identical errors, and “safe shutdown” is false if persistence flush or another shutdown hook failed.  
 **Consequence:** Telegram remains best-effort and `/alerts/status` exposes only configuration and secret-free delivery metadata. Power loss, total network loss, or termination of the entire local scheduler/process tree cannot be reported by that same machine; those require an independent remote watchdog.
+
+## D058 — Start the local database before scheduled trading startup
+
+**Status:** Accepted by explicit operator direction
+
+**Decision:** The Windows scheduled launcher checks local MySQL port 3306 before launching the trading runtime. When unavailable, it starts the installed XAMPP MySQL executable using its own `my.ini`, waits up to 60 seconds for TCP readiness, and fails before Python startup if the database remains unavailable. An explicit `XAMPP_ROOT` can override the known local installation paths.
+
+**Why:** The scheduled application repeatedly failed during FastAPI startup because XAMPP MySQL was not running and `localhost:3306` actively refused the database connection.
+
+**Consequence:** Database startup becomes an idempotent prerequisite of the scheduled run. The launcher never stops or restarts an already-reachable MySQL instance, and application-level database initialization and health verification still fail closed.

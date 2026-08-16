@@ -32,6 +32,7 @@ ENV/
 app.db
 *.db-journal
 *.sqlite-journal
+backups/
 
 # Logs and process files
 *.log

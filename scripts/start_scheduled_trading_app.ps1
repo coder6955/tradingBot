@@ -22,6 +22,77 @@ function Get-DotEnvValue {
     return $line.Substring($line.IndexOf("=") + 1).Trim().Trim('"').Trim("'")
 }
 
+function Test-LocalTcpPort {
+    param(
+        [string]$HostName = "127.0.0.1",
+        [int]$Port = 3306,
+        [int]$TimeoutMilliseconds = 1000
+    )
+    $client = [System.Net.Sockets.TcpClient]::new()
+    try {
+        $connect = $client.BeginConnect($HostName, $Port, $null, $null)
+        if (-not $connect.AsyncWaitHandle.WaitOne($TimeoutMilliseconds)) {
+            return $false
+        }
+        $client.EndConnect($connect)
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $client.Dispose()
+    }
+}
+
+function Ensure-XamppMySql {
+    param(
+        [int]$Port = 3306,
+        [int]$StartupTimeoutSeconds = 60
+    )
+    if (Test-LocalTcpPort -Port $Port) {
+        return "already_running"
+    }
+
+    $candidateRoots = @()
+    if ($env:XAMPP_ROOT) {
+        $candidateRoots += $env:XAMPP_ROOT
+    }
+    $candidateRoots += @("C:\xamppp", "C:\xampp")
+
+    $xamppRoot = $candidateRoots |
+        Where-Object {
+            Test-Path -LiteralPath (Join-Path $_ "mysql\bin\mysqld.exe") -PathType Leaf
+        } |
+        Select-Object -First 1
+    if (-not $xamppRoot) {
+        throw "MySQL is unavailable on port $Port and no XAMPP MySQL installation was found"
+    }
+
+    $mysqlExecutable = Join-Path $xamppRoot "mysql\bin\mysqld.exe"
+    $mysqlConfig = Join-Path $xamppRoot "mysql\bin\my.ini"
+    if (-not (Test-Path -LiteralPath $mysqlConfig -PathType Leaf)) {
+        throw "XAMPP MySQL configuration was not found"
+    }
+
+    Start-Process `
+        -FilePath $mysqlExecutable `
+        -ArgumentList @("--defaults-file=$mysqlConfig", "--standalone") `
+        -WorkingDirectory $xamppRoot `
+        -WindowStyle Hidden |
+        Out-Null
+
+    $deadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
+    do {
+        Start-Sleep -Milliseconds 500
+        if (Test-LocalTcpPort -Port $Port) {
+            return "started"
+        }
+    } while ((Get-Date) -lt $deadline)
+
+    throw "XAMPP MySQL did not become reachable on port $Port within $StartupTimeoutSeconds seconds"
+}
+
 function Send-FallbackAlert {
     param([string]$Reason)
     if (
@@ -134,6 +205,21 @@ catch {
 
 $env:AUTOMATION_STOP_AFTER_AFTER_MARKET_COMPLETE = "true"
 $env:SCHEDULED_RUN_EXIT_AFTER_COMPLETE = "true"
+
+try {
+    $mysqlStartupResult = Ensure-XamppMySql
+    "[{0}] XAMPP MySQL prerequisite: {1}." -f (
+        Get-Date -Format "yyyy-MM-dd HH:mm:ss K"
+    ), $mysqlStartupResult | Out-File -LiteralPath $lifecycleLog -Append -Encoding utf8
+}
+catch {
+    $databaseFailure = "Scheduled launcher could not prepare XAMPP MySQL: $($_.Exception.Message)"
+    "[{0}] {1}" -f (
+        Get-Date -Format "yyyy-MM-dd HH:mm:ss K"
+    ), $databaseFailure | Out-File -LiteralPath $lifecycleLog -Append -Encoding utf8
+    Send-FallbackAlert -Reason $databaseFailure
+    throw
+}
 
 try {
     $appProcess = Start-Process `

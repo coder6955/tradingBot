@@ -1,12 +1,19 @@
 import asyncio
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from scripts.run_scheduled_app import (
     COMPLETION_REASON,
     RuntimeMonitorResult,
     StartupHealthResult,
     _after_market_completion_reached,
+    _configure_scheduled_profile,
     _evaluate_runtime_health,
     _evaluate_startup_health,
     _failure_exit_code,
@@ -33,6 +40,73 @@ class FakeNotificationService:
 
 
 class ScheduledAppRunnerTests(unittest.IsolatedAsyncioTestCase):
+    def test_scheduled_runner_owns_its_completion_profile(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            _configure_scheduled_profile()
+
+            self.assertEqual(
+                os.environ["AUTOMATION_STOP_AFTER_AFTER_MARKET_COMPLETE"], "true"
+            )
+            self.assertEqual(
+                os.environ["SCHEDULED_RUN_EXIT_AFTER_COMPLETE"], "true"
+            )
+
+        with patch.dict(
+            os.environ,
+            {
+                "AUTOMATION_STOP_AFTER_AFTER_MARKET_COMPLETE": "false",
+                "SCHEDULED_RUN_EXIT_AFTER_COMPLETE": "false",
+            },
+            clear=True,
+        ):
+            _configure_scheduled_profile()
+
+            self.assertEqual(
+                os.environ["AUTOMATION_STOP_AFTER_AFTER_MARKET_COMPLETE"], "false"
+            )
+            self.assertEqual(
+                os.environ["SCHEDULED_RUN_EXIT_AFTER_COMPLETE"], "false"
+            )
+
+    def test_scheduled_entry_points_bootstrap_project_imports(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        probes = {
+            "runner": (
+                project_root / "scripts" / "run_scheduled_app.py",
+                "import app.config",
+            ),
+            "fallback_notifier": (
+                project_root / "scripts" / "notify_scheduled_failure.py",
+                "",
+            ),
+        }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for name, (script_path, followup) in probes.items():
+                with self.subTest(entry_point=name):
+                    probe = (
+                        "import runpy\n"
+                        f"runpy.run_path({str(script_path)!r})\n"
+                        f"{followup}\n"
+                    )
+                    result = subprocess.run(
+                        [sys.executable, "-I", "-c", probe],
+                        cwd=temp_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        check=False,
+                    )
+
+                    self.assertEqual(
+                        result.returncode,
+                        0,
+                        msg=(
+                            f"{name} could not import the project when executed "
+                            f"as a scheduled file:\n{result.stderr}"
+                        ),
+                    )
+
     def _healthy_checks(self) -> dict[str, dict[str, object]]:
         return {
             "api": {"status": "ok"},

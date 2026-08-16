@@ -5,12 +5,18 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import uvicorn
 
@@ -22,6 +28,12 @@ COMPLETION_MESSAGE = (
     "finished and the app shut down safely. You may switch off the laptop."
 )
 IST = ZoneInfo("Asia/Kolkata")
+
+
+def _configure_scheduled_profile() -> None:
+    """Apply lifecycle defaults that belong to this dedicated scheduled runner."""
+    os.environ.setdefault("AUTOMATION_STOP_AFTER_AFTER_MARKET_COMPLETE", "true")
+    os.environ.setdefault("SCHEDULED_RUN_EXIT_AFTER_COMPLETE", "true")
 
 
 @dataclass(frozen=True)
@@ -714,6 +726,7 @@ async def _serve(
 
 
 def main() -> int:
+    _configure_scheduled_profile()
     parser = argparse.ArgumentParser(description="Run the scheduled trading app")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
