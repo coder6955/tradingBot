@@ -1,6 +1,6 @@
 import unittest
 from dataclasses import fields
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app import loginAutoCode
 from app.config import settings
@@ -112,6 +112,26 @@ class LoginAutoCodeTests(unittest.TestCase):
         self.assertEqual(result["source"], "automatic_login_credentials_missing")
         self.assertIn("KITE_TOTP_SECRET", result["missing_configuration"])
         browser.assert_not_called()
+
+    def test_login_page_classifies_rejected_credentials_without_exposing_text(
+        self,
+    ) -> None:
+        driver = Mock()
+        driver.find_element.return_value.text = "Invalid user ID or password"
+
+        self.assertEqual(
+            loginAutoCode._classify_totp_page_failure(driver),
+            "credentials_rejected",
+        )
+
+    def test_login_page_classifies_interactive_challenge(self) -> None:
+        driver = Mock()
+        driver.find_element.return_value.text = "Please complete the CAPTCHA"
+
+        self.assertEqual(
+            loginAutoCode._classify_totp_page_failure(driver),
+            "interactive_challenge_required",
+        )
 
 
 if __name__ == "__main__":

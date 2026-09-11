@@ -407,8 +407,18 @@ This file records decisions that should survive individual conversations and cod
 
 **Status:** Accepted by explicit operator direction
 
-**Decision:** The Windows scheduled launcher checks local MySQL port 3306 before launching the trading runtime. When unavailable, it starts the installed XAMPP MySQL executable using its own `my.ini`, waits up to 60 seconds for TCP readiness, and fails before Python startup if the database remains unavailable. An explicit `XAMPP_ROOT` can override the known local installation paths.
+**Decision:** The Windows scheduled launcher checks local MySQL port 3306 before launching the trading runtime. When unavailable, it starts the installed XAMPP MySQL executable using its own `my.ini` and waits up to 60 seconds for TCP readiness. It then uses the configured `DATABASE_URL` credentials to create the validated MySQL schema name with `CREATE DATABASE IF NOT EXISTS` before the application initializes tables. An explicit `XAMPP_ROOT` can override the known local installation paths.
 
 **Why:** The scheduled application repeatedly failed during FastAPI startup because XAMPP MySQL was not running and `localhost:3306` actively refused the database connection.
 
-**Consequence:** Database startup becomes an idempotent prerequisite of the scheduled run. The launcher never stops or restarts an already-reachable MySQL instance, and application-level database initialization and health verification still fail closed.
+**Consequence:** Database server and schema startup become idempotent prerequisites of the scheduled run. The launcher never stops or restarts an already-reachable MySQL instance, accepts only a restricted database identifier from configuration, and application-level table initialization and health verification still fail closed.
+
+## D059 — Make Windows scheduled process and instance-lock startup deterministic
+
+**Status:** Accepted
+
+**Decision:** The Windows byte-range lock is acquired without first reading its protected byte, and lock-file access or initialization errors are distinguished from genuine lock contention. The already-hidden PowerShell launcher invokes Python directly and waits for it instead of reconstructing the environment through `Start-Process`; application settings continue to come from the project `.env`, while scheduled lifecycle flags are applied inside the Python runner.
+
+**Why:** Reading a byte protected by another Windows process raises `PermissionError` before the lock attempt and obscures the contention path. Separately, an inherited environment containing both `Path` and `PATH` makes PowerShell `Start-Process` throw `ArgumentException` before Python starts.
+
+**Consequence:** A real concurrent runtime still fails closed, but a stale lock file is harmless after its owner exits. Scheduled and manual launcher invocations no longer depend on `Start-Process` converting the parent environment into a case-insensitive dictionary, retain the working Windows socket-provider environment, and distinguish file access problems from another running app in startup logs.

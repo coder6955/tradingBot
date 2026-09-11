@@ -4,6 +4,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $runnerPath = Join-Path $projectRoot "scripts\run_scheduled_app.py"
+$databaseBootstrapPath = Join-Path $projectRoot "scripts\ensure_database.py"
 $fallbackNotifierPath = Join-Path $projectRoot "scripts\notify_scheduled_failure.py"
 $logDirectory = Join-Path $projectRoot "logs"
 
@@ -149,6 +150,10 @@ if (-not (Test-Path -LiteralPath $runnerPath -PathType Leaf)) {
     Send-FallbackAlert -Reason "Scheduled Python runner was not found"
     throw "Scheduled Python runner was not found at $runnerPath"
 }
+if (-not (Test-Path -LiteralPath $databaseBootstrapPath -PathType Leaf)) {
+    Send-FallbackAlert -Reason "Database bootstrap helper was not found"
+    throw "Database bootstrap helper was not found at $databaseBootstrapPath"
+}
 if (-not (Test-Path -LiteralPath $fallbackNotifierPath -PathType Leaf)) {
     Send-FallbackAlert -Reason "Scheduled failure notifier was not found"
     throw "Scheduled failure notifier was not found at $fallbackNotifierPath"
@@ -222,19 +227,47 @@ catch {
 }
 
 try {
-    $appProcess = Start-Process `
-        -FilePath $pythonPath `
-        -ArgumentList @($runnerPath, "--host", "127.0.0.1", "--port", "8000") `
-        -WorkingDirectory $projectRoot `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $standardOutputLog `
-        -RedirectStandardError $standardErrorLog `
-        -Wait `
-        -PassThru
-    $processExitCode = $appProcess.ExitCode
+    $databaseBootstrapOutput = & $pythonPath $databaseBootstrapPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Database bootstrap exited with code $LASTEXITCODE"
+    }
+    "[{0}] Database prerequisite: {1}." -f (
+        Get-Date -Format "yyyy-MM-dd HH:mm:ss K"
+    ), ($databaseBootstrapOutput -join " ") | Out-File -LiteralPath $lifecycleLog -Append -Encoding utf8
 }
 catch {
-    $launchFailure = "Scheduled launcher could not start or wait for the app: $($_.Exception.GetType().Name)"
+    $databaseFailure = "Scheduled launcher could not prepare the configured database: $($_.Exception.Message)"
+    "[{0}] {1}" -f (
+        Get-Date -Format "yyyy-MM-dd HH:mm:ss K"
+    ), $databaseFailure | Out-File -LiteralPath $lifecycleLog -Append -Encoding utf8
+    Send-FallbackAlert -Reason $databaseFailure
+    throw
+}
+
+try {
+    # Invoke Python directly inside the already-hidden scheduled PowerShell
+    # process. Start-Process reconstructs the inherited environment in a
+    # case-insensitive dictionary and crashes when a host supplies both Path
+    # and PATH. A clean Start-Process environment, conversely, can omit state
+    # required by Python's Windows socket provider. Direct native invocation
+    # preserves the working environment and still waits for the full run.
+    $savedErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows PowerShell 5 converts every native stderr line into a
+        # non-terminating NativeCommandError. With the script-wide Stop policy
+        # that would abort on Uvicorn's ordinary INFO logging, so relax it only
+        # for the native process and rely on its exit code.
+        $ErrorActionPreference = "Continue"
+        & $pythonPath $runnerPath --host 127.0.0.1 --port 8000 `
+            1> $standardOutputLog 2> $standardErrorLog
+        $processExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+}
+catch {
+    $launchFailure = "Scheduled launcher could not invoke or wait for the app: $($_.Exception.GetType().Name)"
     Send-FallbackAlert -Reason $launchFailure
     throw
 }

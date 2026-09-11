@@ -11,7 +11,7 @@ The system has two entry paths:
 
 Neither path bypasses risk management.
 
-Before either path starts, the application must establish a broker-validated access token for the current India trading date. It first validates today's git-ignored `access_token.txt`; if unavailable, it may migrate a valid legacy `.env` token or perform configured headless user/password/TOTP login. Failure is explicit and keeps Kite-dependent trading and data paths unavailable. Manual `/kite/auth`, callback, and `/kite/session` remain recovery paths and save into the same dated token file.
+Before either path starts, the application must establish a broker-validated access token for the current India trading date. It first validates today's git-ignored `access_token.txt`; if unavailable, it may migrate a valid legacy `.env` token or perform configured headless user/password/TOTP login. Failure is explicit, records a secret-free login-stage code (credentials form, TOTP form, broker redirect, interactive challenge, or rate limit), and keeps Kite-dependent trading and data paths unavailable. Manual `/kite/auth`, callback, and `/kite/session` remain recovery paths and save into the same dated token file.
 
 ## End-to-end flow
 

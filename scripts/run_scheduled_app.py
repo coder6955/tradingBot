@@ -82,10 +82,20 @@ def _evaluate_startup_health(
     kite = checks.get("kite", {})
     if kite.get("status") != "ok":
         auth = kite.get("auth") if isinstance(kite.get("auth"), dict) else {}
+        runtime = checks.get("runtime", {})
+        runtime_kite = (
+            runtime.get("kite") if isinstance(runtime.get("kite"), dict) else {}
+        )
+        automatic_login = (
+            runtime_kite.get("automatic_login")
+            if isinstance(runtime_kite.get("automatic_login"), dict)
+            else {}
+        )
         issues.append(
             "Kite login: "
             + _safe_detail(
-                kite.get("message")
+                automatic_login.get("error_code")
+                or kite.get("message")
                 or kite.get("status")
                 or auth.get("last_error_reason"),
                 fallback="profile verification failed",

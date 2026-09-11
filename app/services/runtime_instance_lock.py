@@ -18,13 +18,30 @@ class RuntimeInstanceLock:
         if self.acquired:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+b")
         try:
-            handle.seek(0)
-            if handle.read(1) == b"":
+            handle = self.path.open("a+b")
+        except OSError as exc:
+            raise RuntimeError(
+                f"Cannot open the Bank Nifty runtime lock file: {self.path}"
+            ) from exc
+
+        try:
+            # Do not read byte zero before acquiring it. On Windows, reading a
+            # byte locked by another process raises PermissionError, which used
+            # to make every overlapping/stale startup look like a file ACL
+            # failure. File size can be inspected without touching the locked
+            # byte, and the byte only needs to be initialized once.
+            if os.fstat(handle.fileno()).st_size == 0:
                 handle.write(b"0")
                 handle.flush()
             handle.seek(0)
+        except OSError as exc:
+            handle.close()
+            raise RuntimeError(
+                f"Cannot initialize the Bank Nifty runtime lock file: {self.path}"
+            ) from exc
+
+        try:
             if os.name == "nt":
                 import msvcrt
 
@@ -33,7 +50,7 @@ class RuntimeInstanceLock:
                 import fcntl
 
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except (OSError, BlockingIOError) as exc:
+        except OSError as exc:
             handle.close()
             raise RuntimeError(
                 "Another Bank Nifty trading app instance is already running"
